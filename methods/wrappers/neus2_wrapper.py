@@ -100,7 +100,7 @@ class NeuS2Method(BaseMethod):
             print(f"Converter script not found at {converter_script}")
             return False
 
-        cmd = f"python {converter_script} --input {input_path} --output {output_path} --splits train test"
+        cmd = f"python {converter_script.absolute()} --input {input_path} --output {output_path} --splits train test"
         result = self.run_command(cmd)
 
         if result.returncode != 0:

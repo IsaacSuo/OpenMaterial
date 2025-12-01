@@ -74,14 +74,12 @@ class PGSRMethod(BaseMethod):
         config.update(kwargs)
 
         iterations = config.get('iterations', 30000)
-        gpu = config.get('gpu', 0)
 
         cmd = f"""python train.py \
             -s {data_path} \
             -m {output_path} \
             -r 1 \
-            --iterations {iterations} \
-            --gpu {gpu}"""
+            --iterations {iterations}"""
 
         result = self.run_command(cmd)
 
@@ -146,5 +144,4 @@ class PGSRMethod(BaseMethod):
         """Get default PGSR configuration"""
         return {
             'iterations': 30000,
-            'gpu': 0,
         }
