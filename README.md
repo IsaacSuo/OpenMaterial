@@ -84,6 +84,7 @@ OpenMaterial/
 
 - 🚀 **[快速开始](docs/QUICKSTART.md)** - 30秒上手
 - 📘 **[详细部署](docs/DEPLOYMENT.md)** - 完整部署指南
+- 🔒 **[无 GitHub 访问部署](docs/SERVER_WITHOUT_GITHUB.md)** - 内网服务器部署方案
 
 ## 🎯 使用示例
 

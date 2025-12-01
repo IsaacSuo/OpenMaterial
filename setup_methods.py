@@ -152,11 +152,49 @@ def setup_method(method_name):
         return False
 
 
+def unpack_external():
+    """Unpack external repositories from external_pack/"""
+    import tarfile
+
+    root = Path.cwd()
+    pack_dir = root / 'external_pack'
+    external_dir = root / 'external'
+
+    if not pack_dir.exists():
+        print(f"! external_pack/ directory not found")
+        return False
+
+    external_dir.mkdir(exist_ok=True)
+
+    for tarfile_path in pack_dir.glob('*.tar.gz'):
+        repo_name = tarfile_path.stem
+        target_path = external_dir / repo_name
+
+        if target_path.exists():
+            print(f"✓ {repo_name} already exists at {target_path}")
+            continue
+
+        print(f"Unpacking {repo_name}...")
+
+        try:
+            with tarfile.open(tarfile_path, 'r:gz') as tar:
+                tar.extractall(external_dir)
+            print(f"✓ Extracted {repo_name}")
+        except Exception as e:
+            print(f"✗ Failed to extract {repo_name}: {e}")
+            return False
+
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description='Setup external method repositories')
 
     parser.add_argument('--clone', action='store_true',
-                        help='Clone external repositories')
+                        help='Clone external repositories from GitHub')
+
+    parser.add_argument('--unpack', action='store_true',
+                        help='Unpack external repositories from external_pack/ (for servers without GitHub access)')
 
     parser.add_argument('--move', action='store_true',
                         help='Move embedded repositories to external/')
@@ -185,6 +223,18 @@ def main():
             print("  rm -rf NeuS2/ 2DGS/ PGSR/")
         else:
             print("\nNo repositories to move")
+
+    # Unpack repositories
+    if args.unpack:
+        print("\n" + "="*60)
+        print(" Unpacking External Repositories")
+        print("="*60 + "\n")
+
+        if unpack_external():
+            print("\n✓ All repositories unpacked")
+            print("\nNote: Submodules need to be initialized manually if needed.")
+        else:
+            print("\n✗ Failed to unpack repositories")
 
     # Clone repositories
     if args.clone:
@@ -244,19 +294,26 @@ def main():
             print("Cancelled")
 
     # Show usage if no action specified
-    if not any([args.clone, args.move, args.setup, args.clean]):
+    if not any([args.clone, args.unpack, args.move, args.setup, args.clean]):
         parser.print_help()
         print("\n" + "="*60)
         print(" Quick Start")
         print("="*60)
-        print("\n1. Move embedded repos (if you have them):")
-        print("   python setup_methods.py --move")
-        print("\n2. Or clone fresh repos:")
+        print("\n=== Option 1: With GitHub Access ===")
+        print("\n1. Clone repos from GitHub:")
         print("   python setup_methods.py --clone")
-        print("\n3. Setup environments:")
+        print("\n2. Setup environments:")
         print("   python setup_methods.py --setup all")
-        print("\n4. Run benchmark:")
-        print("   python run_benchmark.py --method neus2 --start 0 --end 50 --gpu 0")
+        print("\n=== Option 2: Without GitHub Access (Server) ===")
+        print("\n1. On local machine, pack repos:")
+        print("   ./pack_external.sh")
+        print("\n2. Upload external_pack/ to server with git push")
+        print("\n3. On server, unpack repos:")
+        print("   python setup_methods.py --unpack")
+        print("\n4. Setup environments:")
+        print("   python setup_methods.py --setup all")
+        print("\n=== Run Benchmark ===")
+        print("\n   python run_benchmark.py --method neus2 --start 0 --end 50 --gpu 0")
 
 
 if __name__ == '__main__':

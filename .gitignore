@@ -4,3 +4,11 @@ Mesh/
 external/
 *_output/
 *_data/
+
+# Build and cache
+__pycache__/
+*.pyc
+*.so
+*.o
+build/
+*.egg-info/
