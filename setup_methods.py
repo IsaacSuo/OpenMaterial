@@ -26,10 +26,17 @@ def setup_method(method_name):
 
     Method = get_method(method_name)
 
-    if method_name == 'instant-nsr-pl':
-        repo_path = 'instant-nsr-pl'
-    else:
-        repo_path = f'external/{method_name.upper() if method_name == "2dgs" else method_name.title()}'
+    # Map method names to their repository paths
+    repo_paths = {
+        'neus2': 'external/NeuS2',
+        '2dgs': 'external/2DGS',
+        'pgsr': 'external/PGSR',
+        'instant-nsr-pl': 'instant-nsr-pl'
+    }
+
+    repo_path = repo_paths.get(method_name)
+    if not repo_path:
+        raise ValueError(f"Unknown method: {method_name}")
 
     method = Method(repo_path=repo_path)
 
