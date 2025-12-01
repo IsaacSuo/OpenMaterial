@@ -1,3 +1,6 @@
 datasets/
 output/
 Mesh/
+external/
+*_output/
+*_data/
