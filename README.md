@@ -29,17 +29,14 @@
 ### 安装
 
 ```bash
-# 1. 克隆项目
+# 1. 克隆项目（包含所有外部仓库）
 git clone YOUR_REPO_URL
 cd OpenMaterial
 
-# 2. 设置外部仓库
-python setup_methods.py --clone
-
-# 3. 下载数据
+# 2. 下载数据
 python download.py --token YOUR_HF_TOKEN --type ablation
 
-# 4. 设置环境
+# 3. 设置环境
 python setup_methods.py --setup all
 ```
 
@@ -84,7 +81,6 @@ OpenMaterial/
 
 - 🚀 **[快速开始](docs/QUICKSTART.md)** - 30秒上手
 - 📘 **[详细部署](docs/DEPLOYMENT.md)** - 完整部署指南
-- 🔒 **[无 GitHub 访问部署](docs/SERVER_WITHOUT_GITHUB.md)** - 内网服务器部署方案
 
 ## 🎯 使用示例
 
@@ -194,13 +190,15 @@ python compare_methods.py --methods instant-nsr-pl neus2 2dgs pgsr
 ## 🚢 服务器部署
 
 ```bash
-# 本地上传
-rsync -avz OpenMaterial/ user@server:/path/
-
-# 服务器设置
+# 服务器操作
 ssh user@server
-cd /path/OpenMaterial
-python setup_methods.py --clone
+git clone YOUR_REPO_URL
+cd OpenMaterial
+
+# 下载数据
+python download.py --token YOUR_HF_TOKEN --type all
+
+# 设置环境
 python setup_methods.py --setup all
 
 # 使用 tmux 运行
@@ -212,24 +210,6 @@ python run_benchmark.py --method all --start 0 --end 100 --gpus 0,1,2
 tail -f benchmark_output/*/benchmark_results.json
 watch -n 1 nvidia-smi
 ```
-
-## 🔄 迁移指南
-
-### 从旧版本迁移
-
-如果您已经有嵌入的 NeuS2/2DGS/PGSR 目录：
-
-```bash
-# 移动到 external/
-python setup_methods.py --move
-
-# 清理旧目录
-rm -rf NeuS2/ 2DGS/ PGSR/
-
-# 使用新脚本
-python run_benchmark.py --method all --gpus 0,1,2
-```
-
 
 ## 🛠️ 添加新方法
 

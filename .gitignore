@@ -1,7 +1,6 @@
 datasets/
 output/
 Mesh/
-external/
 *_output/
 *_data/
 
@@ -12,3 +11,4 @@ __pycache__/
 *.o
 build/
 *.egg-info/
+.DS_Store

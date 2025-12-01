@@ -2,8 +2,11 @@
 """
 Setup script for external method repositories
 
-This script downloads and sets up external repositories as modules
-instead of embedded git submodules.
+This script sets up conda environments and compiles dependencies
+for all methods (NeuS2, 2DGS, PGSR, Instant-NSR-PL).
+
+Note: External repositories are included in the main repository.
+No need to clone separately.
 """
 
 import argparse
@@ -11,120 +14,6 @@ import subprocess
 import shutil
 from pathlib import Path
 import sys
-
-
-# Repository URLs
-REPOS = {
-    'NeuS2': {
-        'url': 'https://gh-proxy.org/https://github.com/19reborn/NeuS2.git',
-        'branch': 'main',
-        'recursive': True
-    },
-    '2DGS': {
-        'url': 'https://gh-proxy.org/https://github.com/hbb1/2d-gaussian-splatting.git',
-        'branch': 'main',
-        'recursive': True
-    },
-    'PGSR': {
-        'url': 'https://gh-proxy.org/https://github.com/zju3dv/PGSR.git',
-        'branch': 'main',
-        'recursive': False
-    }
-}
-
-
-def run_command(cmd, cwd=None):
-    """Run shell command"""
-    result = subprocess.run(
-        cmd,
-        shell=True,
-        cwd=cwd,
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        print(f"Command failed: {cmd}")
-        print(f"Error: {result.stderr}")
-        return False
-    return True
-
-
-def clone_repo(name, info, external_dir):
-    """Clone a repository"""
-    repo_path = external_dir / name
-
-    if repo_path.exists():
-        print(f"✓ {name} already exists at {repo_path}")
-        return True
-
-    print(f"Cloning {name}...")
-
-    recursive_flag = '--recursive' if info['recursive'] else ''
-    cmd = f"git clone {recursive_flag} {info['url']} {name}"
-
-    if not run_command(cmd, cwd=str(external_dir)):
-        return False
-
-    print(f"✓ {name} cloned successfully")
-    return True
-
-
-def move_embedded_to_external():
-    """Move embedded repositories to external directory"""
-    root = Path.cwd()
-    external_dir = root / 'external'
-    external_dir.mkdir(exist_ok=True)
-
-    moved = False
-
-    for name in REPOS.keys():
-        embedded_path = root / name
-        external_path = external_dir / name
-
-        if embedded_path.exists() and embedded_path.is_dir():
-            if external_path.exists():
-                print(f"! {name} already exists in external/, skipping move")
-                continue
-
-            print(f"Moving {name} to external/...")
-
-            # Check if it's a git repo
-            if (embedded_path / '.git').exists():
-                # It's a git repo, just move it
-                shutil.move(str(embedded_path), str(external_path))
-                print(f"✓ Moved {name} to external/")
-                moved = True
-            else:
-                print(f"! {name} is not a git repository, skipping")
-
-    return moved
-
-
-def create_data_converter():
-    """Create OpenMaterial data converter for NeuS2"""
-    external_dir = Path.cwd() / 'external'
-    neus2_path = external_dir / 'NeuS2'
-
-    if not neus2_path.exists():
-        print("NeuS2 not found, skipping converter creation")
-        return
-
-    tools_dir = neus2_path / 'tools'
-    tools_dir.mkdir(exist_ok=True)
-
-    converter_path = tools_dir / 'convert_openmaterial.py'
-
-    if converter_path.exists():
-        print(f"✓ Converter already exists at {converter_path}")
-        return
-
-    # Copy converter from NeuS2/tools/ if we created it earlier
-    old_converter = Path('NeuS2/tools/convert_openmaterial.py')
-    if old_converter.exists():
-        shutil.copy(old_converter, converter_path)
-        print(f"✓ Copied converter to {converter_path}")
-    else:
-        print("! Converter script not found, you may need to create it")
 
 
 def setup_method(method_name):
@@ -152,105 +41,24 @@ def setup_method(method_name):
         return False
 
 
-def unpack_external():
-    """Unpack external repositories from external_pack/"""
-    import tarfile
-
-    root = Path.cwd()
-    pack_dir = root / 'external_pack'
-    external_dir = root / 'external'
-
-    if not pack_dir.exists():
-        print(f"! external_pack/ directory not found")
-        return False
-
-    external_dir.mkdir(exist_ok=True)
-
-    for tarfile_path in pack_dir.glob('*.tar.gz'):
-        repo_name = tarfile_path.stem
-        target_path = external_dir / repo_name
-
-        if target_path.exists():
-            print(f"✓ {repo_name} already exists at {target_path}")
-            continue
-
-        print(f"Unpacking {repo_name}...")
-
-        try:
-            with tarfile.open(tarfile_path, 'r:gz') as tar:
-                tar.extractall(external_dir)
-            print(f"✓ Extracted {repo_name}")
-        except Exception as e:
-            print(f"✗ Failed to extract {repo_name}: {e}")
-            return False
-
-    return True
-
-
 def main():
-    parser = argparse.ArgumentParser(description='Setup external method repositories')
-
-    parser.add_argument('--clone', action='store_true',
-                        help='Clone external repositories from GitHub')
-
-    parser.add_argument('--unpack', action='store_true',
-                        help='Unpack external repositories from external_pack/ (for servers without GitHub access)')
-
-    parser.add_argument('--move', action='store_true',
-                        help='Move embedded repositories to external/')
+    parser = argparse.ArgumentParser(
+        description='Setup conda environments for all methods',
+        epilog='External repositories are already included in the project.'
+    )
 
     parser.add_argument('--setup', type=str, nargs='+',
                         choices=['neus2', '2dgs', 'pgsr', 'instant-nsr-pl', 'all'],
-                        help='Setup method environments')
-
-    parser.add_argument('--clean', action='store_true',
-                        help='Remove external repositories (dangerous!)')
+                        help='Setup method environments (conda + dependencies + CUDA compilation)')
 
     args = parser.parse_args()
 
-    root = Path.cwd()
-    external_dir = root / 'external'
-
-    # Move embedded repos
-    if args.move:
-        print("\n" + "="*60)
-        print(" Moving Embedded Repositories")
-        print("="*60 + "\n")
-
-        if move_embedded_to_external():
-            print("\n✓ Repositories moved to external/")
-            print("\nYou can now safely remove old embedded directories:")
-            print("  rm -rf NeuS2/ 2DGS/ PGSR/")
-        else:
-            print("\nNo repositories to move")
-
-    # Unpack repositories
-    if args.unpack:
-        print("\n" + "="*60)
-        print(" Unpacking External Repositories")
-        print("="*60 + "\n")
-
-        if unpack_external():
-            print("\n✓ All repositories unpacked")
-            print("\nNote: Submodules need to be initialized manually if needed.")
-        else:
-            print("\n✗ Failed to unpack repositories")
-
-    # Clone repositories
-    if args.clone:
-        print("\n" + "="*60)
-        print(" Cloning External Repositories")
-        print("="*60 + "\n")
-
-        external_dir.mkdir(exist_ok=True)
-
-        for name, info in REPOS.items():
-            clone_repo(name, info, external_dir)
-
-        # Create data converter
-        create_data_converter()
-
-        print("\n✓ All repositories cloned")
+    # Check if external/ exists
+    external_dir = Path.cwd() / 'external'
+    if not external_dir.exists():
+        print("Error: external/ directory not found!")
+        print("Make sure you have cloned the repository with all its contents.")
+        sys.exit(1)
 
     # Setup environments
     if args.setup:
@@ -277,43 +85,21 @@ def main():
         if failed:
             print(f"\n✗ Failed to set up: {', '.join(failed)}")
 
-    # Clean
-    if args.clean:
-        print("\n" + "="*60)
-        print(" Cleaning External Repositories")
-        print("="*60 + "\n")
-
-        confirm = input("This will delete external/. Are you sure? (yes/no): ")
-        if confirm.lower() == 'yes':
-            if external_dir.exists():
-                shutil.rmtree(external_dir)
-                print("✓ Removed external/")
-            else:
-                print("external/ does not exist")
-        else:
-            print("Cancelled")
-
     # Show usage if no action specified
-    if not any([args.clone, args.unpack, args.move, args.setup, args.clean]):
+    else:
         parser.print_help()
         print("\n" + "="*60)
         print(" Quick Start")
         print("="*60)
-        print("\n=== Option 1: With GitHub Access ===")
-        print("\n1. Clone repos from GitHub:")
-        print("   python setup_methods.py --clone")
-        print("\n2. Setup environments:")
+        print("\n1. Setup all method environments:")
         print("   python setup_methods.py --setup all")
-        print("\n=== Option 2: Without GitHub Access (Server) ===")
-        print("\n1. On local machine, pack repos:")
-        print("   ./pack_external.sh")
-        print("\n2. Upload external_pack/ to server with git push")
-        print("\n3. On server, unpack repos:")
-        print("   python setup_methods.py --unpack")
-        print("\n4. Setup environments:")
-        print("   python setup_methods.py --setup all")
-        print("\n=== Run Benchmark ===")
-        print("\n   python run_benchmark.py --method neus2 --start 0 --end 50 --gpu 0")
+        print("\n2. Or setup specific methods:")
+        print("   python setup_methods.py --setup neus2")
+        print("   python setup_methods.py --setup neus2 2dgs")
+        print("\n3. Run benchmark:")
+        print("   python run_benchmark.py --method neus2 --start 0 --end 50 --gpu 0")
+        print("\nNote: External repositories (NeuS2, 2DGS, PGSR) are already")
+        print("included in the project. Just git pull and setup!")
 
 
 if __name__ == '__main__':
