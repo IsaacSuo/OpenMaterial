@@ -101,7 +101,7 @@ class NeuS2Method(BaseMethod):
             return False
 
         cmd = f"python {converter_script} --input {input_path} --output {output_path} --splits train test"
-        result = self.run_command(cmd, cwd=str(self.repo_path.parent))
+        result = self.run_command(cmd)
 
         if result.returncode != 0:
             print(f"Data conversion failed: {result.stderr}")
