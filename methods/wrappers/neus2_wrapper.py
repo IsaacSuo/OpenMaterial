@@ -33,25 +33,36 @@ class NeuS2Method(BaseMethod):
 
         # Install dependencies
         print("Installing dependencies...")
-        result = self.run_command("pip install -r requirements.txt")
+        result = self.run_command(
+            "pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
+        )
         if result.returncode != 0:
             print(f"Failed to install dependencies: {result.stderr}")
             return False
 
         # Install PyTorch
+        print("Installing PyTorch...")
         result = self.run_command(
-            "pip install torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cu118"
+            "pip install torch==2.0.1 torchvision==0.15.2 "
+            "--index-url https://download.pytorch.org/whl/cu118"
         )
         if result.returncode != 0:
             print(f"Failed to install PyTorch: {result.stderr}")
             return False
 
-        # Install PyTorch3D
+        # Install PyTorch3D (optional, may fail due to network)
+        print("Installing PyTorch3D (optional)...")
         result = self.run_command(
             'pip install "git+https://github.com/facebookresearch/pytorch3d.git"'
         )
         if result.returncode != 0:
-            print(f"Warning: PyTorch3D installation failed, but may not be critical")
+            print(f"⚠ Warning: PyTorch3D installation failed (network issue), trying prebuilt...")
+            # Try prebuilt version from conda-forge
+            result = self.run_command(
+                "pip install pytorch3d -i https://pypi.tuna.tsinghua.edu.cn/simple"
+            )
+            if result.returncode != 0:
+                print(f"⚠ PyTorch3D not installed, may cause issues if needed")
 
         # Build CUDA code
         print("Building CUDA code...")

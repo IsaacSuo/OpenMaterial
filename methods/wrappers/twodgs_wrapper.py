@@ -37,7 +37,7 @@ class TwoDGSMethod(BaseMethod):
             return False
 
         # Install dependencies
-        result = self.run_command("pip install plyfile tqdm")
+        result = self.run_command("pip install plyfile tqdm -i https://pypi.tuna.tsinghua.edu.cn/simple")
         if result.returncode != 0:
             return False
 
