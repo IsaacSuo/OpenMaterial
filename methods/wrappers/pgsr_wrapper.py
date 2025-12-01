@@ -31,7 +31,8 @@ class PGSRMethod(BaseMethod):
         # Install PyTorch
         print("Installing PyTorch...")
         result = self.run_command(
-            "pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118"
+            "pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 "
+            "-i https://pypi.tuna.tsinghua.edu.cn/simple"
         )
         if result.returncode != 0:
             return False
