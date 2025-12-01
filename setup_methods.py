@@ -16,17 +16,17 @@ import sys
 # Repository URLs
 REPOS = {
     'NeuS2': {
-        'url': 'https://github.com/19reborn/NeuS2.git',
+        'url': 'https://gh-proxy.org/https://github.com/19reborn/NeuS2.git',
         'branch': 'main',
         'recursive': True
     },
     '2DGS': {
-        'url': 'https://github.com/hbb1/2d-gaussian-splatting.git',
+        'url': 'https://gh-proxy.org/https://github.com/hbb1/2d-gaussian-splatting.git',
         'branch': 'main',
         'recursive': True
     },
     'PGSR': {
-        'url': 'https://github.com/zju3dv/PGSR.git',
+        'url': 'https://gh-proxy.org/https://github.com/zju3dv/PGSR.git',
         'branch': 'main',
         'recursive': False
     }
