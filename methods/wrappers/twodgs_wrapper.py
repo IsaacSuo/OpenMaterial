@@ -28,14 +28,21 @@ class TwoDGSMethod(BaseMethod):
             if result.returncode != 0:
                 return False
 
-        # Install PyTorch
-        print("Installing PyTorch...")
-        result = self.run_command(
-            "pip install torch==2.3.1 torchvision==0.18.1 "
-            "-i https://pypi.tuna.tsinghua.edu.cn/simple"
+        # Install PyTorch (check if already installed)
+        print("Checking PyTorch...")
+        check_torch = self.run_command(
+            "python -c \"import torch; print(torch.__version__)\" 2>/dev/null"
         )
-        if result.returncode != 0:
-            return False
+        if check_torch.returncode == 0 and "2.3.1" in check_torch.stdout:
+            print(f"✓ PyTorch 2.3.1 already installed, skipping download")
+        else:
+            print("Installing PyTorch...")
+            result = self.run_command(
+                "pip install torch==2.3.1 torchvision==0.18.1 "
+                "-i https://pypi.tuna.tsinghua.edu.cn/simple"
+            )
+            if result.returncode != 0:
+                return False
 
         # Install dependencies
         result = self.run_command("pip install plyfile tqdm -i https://pypi.tuna.tsinghua.edu.cn/simple")
