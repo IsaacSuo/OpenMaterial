@@ -65,7 +65,27 @@ class PGSRMethod(BaseMethod):
         return True
 
     def convert_data(self, input_path: str, output_path: str) -> bool:
-        """PGSR uses COLMAP format directly, no conversion needed"""
+        """PGSR uses transforms.json format directly, create symlink to avoid data duplication"""
+        import os
+        from pathlib import Path
+
+        output_path_obj = Path(output_path)
+        input_path_obj = Path(input_path)
+
+        # Create parent directory
+        output_path_obj.parent.mkdir(parents=True, exist_ok=True)
+
+        # Remove existing symlink/directory if it exists
+        if output_path_obj.exists() or output_path_obj.is_symlink():
+            if output_path_obj.is_symlink():
+                output_path_obj.unlink()
+            else:
+                import shutil
+                shutil.rmtree(output_path_obj)
+
+        # Create symlink to input data
+        os.symlink(input_path_obj.absolute(), output_path_obj)
+
         return True
 
     def train(self, data_path: str, output_path: str, **kwargs) -> bool:
