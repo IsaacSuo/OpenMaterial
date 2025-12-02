@@ -77,7 +77,7 @@ class TwoDGSMethod(BaseMethod):
 
         iterations = config.get('iterations', 30000)
         lambda_normal = config.get('lambda_normal', 0.05)
-        lambda_distortion = config.get('lambda_distortion', 1000)
+        lambda_dist = config.get('lambda_dist', 1000)
         depth_ratio = config.get('depth_ratio', 0)
 
         cmd = f"""python train.py \
@@ -86,7 +86,7 @@ class TwoDGSMethod(BaseMethod):
             -r 1 \
             --iterations {iterations} \
             --lambda_normal {lambda_normal} \
-            --lambda_distortion {lambda_distortion} \
+            --lambda_dist {lambda_dist} \
             --depth_ratio {depth_ratio}"""
 
         result = self.run_command(cmd)
@@ -151,7 +151,7 @@ class TwoDGSMethod(BaseMethod):
         return {
             'iterations': 30000,
             'lambda_normal': 0.05,
-            'lambda_distortion': 1000,
+            'lambda_dist': 1000,
             'depth_ratio': 0,
             'mesh_res': 1024,
         }
