@@ -168,9 +168,12 @@ class TwoDGSMethod(BaseMethod):
         else:
             abs_data_path = data_path
 
+        iteration = config.get('iterations', 30000)
+
         cmd = f"""python render.py \
             -s {abs_data_path} \
             -m {abs_model_path} \
+            --iteration {iteration} \
             --skip_test \
             --skip_train \
             --mesh_res {mesh_res} \
@@ -183,13 +186,21 @@ class TwoDGSMethod(BaseMethod):
             return False
 
         # Copy mesh to output path
-        source_mesh = abs_model_path / "fuse.ply"
+        # 2DGS saves mesh at: {model_path}/train/ours_{iteration}/fuse_post.ply or fuse.ply
+        train_dir = abs_model_path / "train" / f"ours_{iteration}"
+
+        # Try post-processed mesh first
+        source_mesh = train_dir / "fuse_post.ply"
+        if not source_mesh.exists():
+            # Fall back to regular mesh
+            source_mesh = train_dir / "fuse.ply"
+
         if source_mesh.exists():
             import shutil
             shutil.copy(source_mesh, output_mesh_path)
             return True
         else:
-            print(f"Mesh not found at {source_mesh}")
+            print(f"Mesh not found at {train_dir}")
             return False
 
     def get_default_config(self) -> Dict[str, Any]:
