@@ -101,10 +101,22 @@ class NeuS2Method(BaseMethod):
             return False
 
         cmd = f"python {converter_script.absolute()} --input {input_path} --output {output_path} --splits train test"
+        print(f"Running conversion: {cmd}")
         result = self.run_command(cmd)
 
+        print(f"Conversion stdout: {result.stdout}")
+        print(f"Conversion stderr: {result.stderr}")
+        print(f"Conversion returncode: {result.returncode}")
+
         if result.returncode != 0:
-            print(f"Data conversion failed: {result.stderr}")
+            print(f"Data conversion failed with return code {result.returncode}")
+            return False
+
+        # Verify output files were created
+        output_train = Path(output_path) / "transforms_train.json"
+        if not output_train.exists():
+            print(f"Error: Expected output file not found: {output_train}")
+            print(f"Conversion command output: {result.stdout}")
             return False
 
         return True
