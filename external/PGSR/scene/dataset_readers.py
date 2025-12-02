@@ -216,7 +216,11 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
 
         frames = contents["frames"]
         for idx, frame in enumerate(frames):
-            cam_name = os.path.join(path, frame["file_path"] + extension)
+            # Check if file_path already has an extension
+            file_path = frame["file_path"]
+            if not file_path.endswith(extension) and extension:
+                file_path = file_path + extension
+            cam_name = os.path.join(path, file_path)
 
             # NeRF 'transform_matrix' is a camera-to-world transform
             c2w = np.array(frame["transform_matrix"])
