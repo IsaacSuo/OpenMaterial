@@ -100,7 +100,11 @@ class NeuS2Method(BaseMethod):
             print(f"Converter script not found at {converter_script}")
             return False
 
-        cmd = f"python {converter_script.absolute()} --input {input_path} --output {output_path} --splits train test"
+        # Use absolute paths to avoid issues with working directory
+        abs_input = Path(input_path).absolute()
+        abs_output = Path(output_path).absolute()
+
+        cmd = f"python {converter_script.absolute()} --input {abs_input} --output {abs_output} --splits train test"
         print(f"Running conversion: {cmd}")
         result = self.run_command(cmd)
 
@@ -113,7 +117,7 @@ class NeuS2Method(BaseMethod):
             return False
 
         # Verify output files were created
-        output_train = Path(output_path) / "transforms_train.json"
+        output_train = abs_output / "transforms_train.json"
         if not output_train.exists():
             print(f"Error: Expected output file not found: {output_train}")
             print(f"Conversion command output: {result.stdout}")
