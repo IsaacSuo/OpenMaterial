@@ -3,6 +3,7 @@ output/
 Mesh/
 *_output/
 *_data/
+benchmark_output/
 
 # Build and cache
 __pycache__/
