@@ -72,6 +72,8 @@ class TwoDGSMethod(BaseMethod):
         output_path_obj = Path(output_path)
         input_path_obj = Path(input_path)
 
+        print(f"Creating symlink: {output_path_obj} -> {input_path_obj}")
+
         # Create parent directory
         output_path_obj.parent.mkdir(parents=True, exist_ok=True)
 
@@ -85,6 +87,15 @@ class TwoDGSMethod(BaseMethod):
 
         # Create symlink to input data
         os.symlink(input_path_obj.absolute(), output_path_obj)
+
+        # Verify the symlink works
+        if not output_path_obj.exists():
+            print(f"Error: Symlink created but target doesn't exist!")
+            return False
+
+        transforms_file = output_path_obj / "transforms_train.json"
+        print(f"Checking for transforms file: {transforms_file}")
+        print(f"Transforms file exists: {transforms_file.exists()}")
 
         return True
 
