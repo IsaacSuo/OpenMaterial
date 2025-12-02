@@ -52,8 +52,11 @@ def parse_args():
     parser.add_argument('--skip-setup', action='store_true',
                         help='Skip environment setup')
 
-    parser.add_argument('--only-train', action='store_true',
-                        help='Only train, skip mesh extraction')
+    parser.add_argument('--skip-train', action='store_true',
+                        help='Skip training if model checkpoint already exists')
+
+    parser.add_argument('--skip-mesh', action='store_true',
+                        help='Skip mesh extraction')
 
     parser.add_argument('--dry-run', action='store_true',
                         help='Print what would be done without executing')
@@ -94,7 +97,7 @@ def get_scenes(dataset_path: str, start: int, end: int, max_scenes: int = -1) ->
 
 def run_method_on_scenes(method_name: str, scenes: List[str],
                          output_dir: str, gpu_id: int,
-                         skip_setup: bool, only_train: bool,
+                         skip_setup: bool, skip_train: bool, skip_mesh: bool,
                          method_config: Dict = None) -> Dict:
     """Run a method on all scenes"""
 
@@ -146,6 +149,8 @@ def run_method_on_scenes(method_name: str, scenes: List[str],
             input_scene=scene_path,
             output_dir=str(method_output_dir),
             gpu_id=gpu_id,
+            skip_train=skip_train,
+            skip_mesh=skip_mesh,
             **(method_config or {})
         )
 
@@ -223,7 +228,7 @@ def main():
         # Single method - run directly
         results = run_method_on_scenes(
             methods[0], scenes, args.output,
-            gpu_ids[0], args.skip_setup, args.only_train,
+            gpu_ids[0], args.skip_setup, args.skip_train, args.skip_mesh,
             method_config
         )
 
@@ -236,7 +241,7 @@ def main():
                 pool.apply_async(
                     run_method_on_scenes,
                     (method, scenes, args.output, gpu_id,
-                     args.skip_setup, args.only_train, method_config)
+                     args.skip_setup, args.skip_train, args.skip_mesh, method_config)
                 )
                 for method, gpu_id in zip(methods, gpu_ids)
             ]

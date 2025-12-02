@@ -185,7 +185,8 @@ class BaseMethod(ABC):
         return result.returncode == 0
 
     def process_scene(self, input_scene: str, output_dir: str,
-                     gpu_id: int = 0, **kwargs) -> Dict[str, Any]:
+                     gpu_id: int = 0, skip_train: bool = False,
+                     skip_mesh: bool = False, **kwargs) -> Dict[str, Any]:
         """
         Process a single scene (convert, train, extract mesh)
 
@@ -193,6 +194,8 @@ class BaseMethod(ABC):
             input_scene: Path to OpenMaterial scene
             output_dir: Base output directory
             gpu_id: GPU ID to use
+            skip_train: Skip training if model already exists
+            skip_mesh: Skip mesh extraction
             **kwargs: Method-specific parameters
 
         Returns:
@@ -221,23 +224,51 @@ class BaseMethod(ABC):
 
         try:
             # Step 1: Convert data
-            print(f"[{self.method_name}] Converting data for {scene_name}...")
-            if not self.convert_data(input_scene, str(converted_data)):
-                results['error'] = 'Data conversion failed'
-                return results
+            if not converted_data.exists() or converted_data.is_symlink():
+                print(f"[{self.method_name}] Converting data for {scene_name}...")
+                if not self.convert_data(input_scene, str(converted_data)):
+                    results['error'] = 'Data conversion failed'
+                    return results
+            else:
+                print(f"[{self.method_name}] ✓ Data already converted for {scene_name}")
 
             # Step 2: Train
-            print(f"[{self.method_name}] Training on {scene_name}...")
             os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
-            if not self.train(str(converted_data), str(model_output), **kwargs):
-                results['error'] = 'Training failed'
-                return results
+
+            # Check if training is already done
+            training_done = self._check_training_done(str(model_output), **kwargs)
+
+            if skip_train and training_done:
+                print(f"[{self.method_name}] ✓ Model already trained for {scene_name}, skipping training")
+            elif training_done:
+                print(f"[{self.method_name}] ✓ Model already exists for {scene_name}, reusing")
+            else:
+                print(f"[{self.method_name}] Training on {scene_name}...")
+                if not self.train(str(converted_data), str(model_output), **kwargs):
+                    results['error'] = 'Training failed'
+                    return results
 
             # Step 3: Extract mesh
-            print(f"[{self.method_name}] Extracting mesh for {scene_name}...")
-            if not self.extract_mesh(str(model_output), str(mesh_output), **kwargs):
-                results['error'] = 'Mesh extraction failed'
-                return results
+            if skip_mesh:
+                print(f"[{self.method_name}] Skipping mesh extraction for {scene_name}")
+            elif mesh_output.exists():
+                print(f"[{self.method_name}] ✓ Mesh already exists for {scene_name}, re-extracting")
+                # Pass data_path for methods that need it
+                extract_kwargs = kwargs.copy()
+                if 'data_path' not in extract_kwargs:
+                    extract_kwargs['data_path'] = input_scene
+                if not self.extract_mesh(str(model_output), str(mesh_output), **extract_kwargs):
+                    results['error'] = 'Mesh extraction failed'
+                    return results
+            else:
+                print(f"[{self.method_name}] Extracting mesh for {scene_name}...")
+                # Pass data_path for methods that need it
+                extract_kwargs = kwargs.copy()
+                if 'data_path' not in extract_kwargs:
+                    extract_kwargs['data_path'] = input_scene
+                if not self.extract_mesh(str(model_output), str(mesh_output), **extract_kwargs):
+                    results['error'] = 'Mesh extraction failed'
+                    return results
 
             results['success'] = True
             print(f"[{self.method_name}] ✓ Successfully processed {scene_name}")
@@ -247,3 +278,36 @@ class BaseMethod(ABC):
             print(f"[{self.method_name}] ✗ Error processing {scene_name}: {e}")
 
         return results
+
+    def _check_training_done(self, model_path: str, **kwargs) -> bool:
+        """
+        Check if training is already completed
+
+        Args:
+            model_path: Path to model output directory
+            **kwargs: Method-specific parameters (e.g., iterations)
+
+        Returns:
+            bool: True if training checkpoint exists
+        """
+        model_dir = Path(model_path)
+        if not model_dir.exists():
+            return False
+
+        # Check for common checkpoint patterns
+        iteration = kwargs.get('iterations', 30000)
+
+        # Check for .pth files (common for PyTorch models)
+        if list(model_dir.glob(f"**/*{iteration}*.pth")):
+            return True
+
+        # Check for point_cloud directory (Gaussian Splatting methods)
+        point_cloud_dir = model_dir / "point_cloud" / f"iteration_{iteration}"
+        if point_cloud_dir.exists():
+            return True
+
+        # Check for any .ply checkpoint files
+        if list(model_dir.glob(f"**/*{iteration}*.ply")):
+            return True
+
+        return False
