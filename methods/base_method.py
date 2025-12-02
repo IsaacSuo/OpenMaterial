@@ -120,6 +120,7 @@ class BaseMethod(ABC):
         if log_output and log_dir:
             # Stream output to terminal and save to log files
             import sys
+            import select
             log_dir_path = Path(log_dir)
             log_dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -129,65 +130,33 @@ class BaseMethod(ABC):
             print(f"Training logs: {stdout_log}")
 
             # Use Popen for real-time output
-            process = subprocess.Popen(
-                full_cmd,
-                shell=True,
-                cwd=cwd,
-                executable='/bin/bash',
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1  # Line buffered
-            )
-
-            stdout_lines = []
-            stderr_lines = []
-
-            # Open log files
+            # Don't capture - let output flow directly to terminal
             with open(stdout_log, 'w') as f_out, open(stderr_log, 'w') as f_err:
-                # Read output in real-time
-                while True:
-                    # Read stdout
-                    if process.stdout:
-                        stdout_line = process.stdout.readline()
-                        if stdout_line:
-                            print(stdout_line, end='', flush=True)
-                            f_out.write(stdout_line)
-                            f_out.flush()
-                            stdout_lines.append(stdout_line)
+                # Use tee-like approach: output goes to terminal AND files
+                process = subprocess.Popen(
+                    f"{full_cmd} 2>&1 | tee -a {stdout_log}",
+                    shell=True,
+                    cwd=cwd,
+                    executable='/bin/bash'
+                )
 
-                    # Read stderr
-                    if process.stderr:
-                        stderr_line = process.stderr.readline()
-                        if stderr_line:
-                            print(stderr_line, end='', file=sys.stderr, flush=True)
-                            f_err.write(stderr_line)
-                            f_err.flush()
-                            stderr_lines.append(stderr_line)
+                # Wait for process to complete
+                returncode = process.wait()
 
-                    # Check if process finished
-                    if process.poll() is not None:
-                        # Read remaining output
-                        if process.stdout:
-                            for line in process.stdout:
-                                print(line, end='', flush=True)
-                                f_out.write(line)
-                                stdout_lines.append(line)
-                        if process.stderr:
-                            for line in process.stderr:
-                                print(line, end='', file=sys.stderr, flush=True)
-                                f_err.write(line)
-                                stderr_lines.append(line)
-                        break
+            # Read logs for return value
+            with open(stdout_log, 'r') as f:
+                stdout_content = f.read()
+            with open(stderr_log, 'r') as f:
+                stderr_content = f.read() if stderr_log.exists() else ""
 
             # Create CompletedProcess-like object for compatibility
             class LoggedResult:
                 def __init__(self, returncode, stdout, stderr):
                     self.returncode = returncode
-                    self.stdout = ''.join(stdout)
-                    self.stderr = ''.join(stderr)
+                    self.stdout = stdout
+                    self.stderr = stderr
 
-            return LoggedResult(process.returncode, stdout_lines, stderr_lines)
+            return LoggedResult(returncode, stdout_content, stderr_content)
         else:
             # Original behavior: capture output
             result = subprocess.run(
