@@ -134,11 +134,16 @@ class TwoDGSMethod(BaseMethod):
 
     def extract_mesh(self, model_path: str, output_mesh_path: str, **kwargs) -> bool:
         """Extract mesh from 2DGS model"""
+        from pathlib import Path
+
         config = self.get_default_config()
         config.update(kwargs)
 
         mesh_res = config.get('mesh_res', 1024)
         depth_ratio = config.get('depth_ratio', 0)
+
+        # Use absolute paths since render.py runs in external/2DGS directory
+        abs_model_path = Path(model_path).absolute()
 
         # Find the data path from model path
         # In 2DGS, we need the original data path for mesh extraction
@@ -149,7 +154,7 @@ class TwoDGSMethod(BaseMethod):
             # Try to infer from model path structure
             # Assume structure: output_dir/models/object/scene
             # Data at: datasets/openmaterial/object/scene
-            parts = Path(model_path).parts
+            parts = abs_model_path.parts
             if 'models' in parts:
                 idx = parts.index('models')
                 object_name = parts[idx + 1] if idx + 1 < len(parts) else None
@@ -157,9 +162,15 @@ class TwoDGSMethod(BaseMethod):
                 if object_name and scene_name:
                     data_path = f"../datasets/openmaterial/{object_name}/{scene_name}"
 
+        # Convert data_path to absolute if provided
+        if data_path:
+            abs_data_path = Path(data_path).absolute()
+        else:
+            abs_data_path = data_path
+
         cmd = f"""python render.py \
-            -s {data_path} \
-            -m {model_path} \
+            -s {abs_data_path} \
+            -m {abs_model_path} \
             --skip_test \
             --skip_train \
             --mesh_res {mesh_res} \
@@ -172,7 +183,7 @@ class TwoDGSMethod(BaseMethod):
             return False
 
         # Copy mesh to output path
-        source_mesh = Path(model_path) / "fuse.ply"
+        source_mesh = abs_model_path / "fuse.ply"
         if source_mesh.exists():
             import shutil
             shutil.copy(source_mesh, output_mesh_path)

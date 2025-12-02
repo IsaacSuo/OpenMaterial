@@ -117,16 +117,21 @@ class PGSRMethod(BaseMethod):
 
     def extract_mesh(self, model_path: str, output_mesh_path: str, **kwargs) -> bool:
         """Extract mesh from PGSR model"""
+        from pathlib import Path
+
         config = self.get_default_config()
         config.update(kwargs)
 
         iteration = config.get('iterations', 30000)
 
+        # Use absolute paths since render.py runs in external/PGSR directory
+        abs_model_path = Path(model_path).absolute()
+
         # Get data path
         data_path = kwargs.get('data_path')
         if not data_path:
             # Try to infer
-            parts = Path(model_path).parts
+            parts = abs_model_path.parts
             if 'models' in parts:
                 idx = parts.index('models')
                 object_name = parts[idx + 1] if idx + 1 < len(parts) else None
@@ -134,9 +139,15 @@ class PGSRMethod(BaseMethod):
                 if object_name and scene_name:
                     data_path = f"../datasets/openmaterial/{object_name}/{scene_name}"
 
+        # Convert data_path to absolute if provided
+        if data_path:
+            abs_data_path = Path(data_path).absolute()
+        else:
+            abs_data_path = data_path
+
         cmd = f"""python render.py \
-            -s {data_path} \
-            -m {model_path} \
+            -s {abs_data_path} \
+            -m {abs_model_path} \
             --iteration {iteration} \
             --skip_test \
             --skip_train \
@@ -150,7 +161,7 @@ class PGSRMethod(BaseMethod):
             return False
 
         # Copy mesh to output path
-        mesh_dir = Path(model_path) / "point_cloud" / f"iteration_{iteration}"
+        mesh_dir = abs_model_path / "point_cloud" / f"iteration_{iteration}"
 
         # Try post-processed mesh first
         source_mesh = mesh_dir / "fuse_post.ply"
