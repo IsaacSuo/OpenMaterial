@@ -45,7 +45,7 @@ class TwoDGSMethod(BaseMethod):
                 return False
 
         # Install dependencies
-        result = self.run_command("pip install plyfile tqdm opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple")
+        result = self.run_command("pip install plyfile tqdm opencv-python mediapy -i https://pypi.tuna.tsinghua.edu.cn/simple")
         if result.returncode != 0:
             return False
 

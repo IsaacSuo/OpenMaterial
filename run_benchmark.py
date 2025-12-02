@@ -40,6 +40,9 @@ def parse_args():
     parser.add_argument('--end', type=int, default=-1,
                         help='End object index (-1 for all)')
 
+    parser.add_argument('--max-scenes', type=int, default=-1,
+                        help='Maximum number of scenes to process (-1 for all)')
+
     parser.add_argument('--gpu', type=int, default=0,
                         help='GPU ID to use (for single method)')
 
@@ -61,7 +64,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def get_scenes(dataset_path: str, start: int, end: int) -> List[str]:
+def get_scenes(dataset_path: str, start: int, end: int, max_scenes: int = -1) -> List[str]:
     """Get list of scenes to process"""
     dataset_path = Path(dataset_path)
 
@@ -81,6 +84,10 @@ def get_scenes(dataset_path: str, start: int, end: int) -> List[str]:
     for obj_dir in objects:
         obj_scenes = [str(s) for s in obj_dir.iterdir() if s.is_dir()]
         scenes.extend(obj_scenes)
+
+    # Limit total number of scenes if max_scenes is set
+    if max_scenes > 0:
+        scenes = scenes[:max_scenes]
 
     return scenes
 
@@ -180,7 +187,7 @@ def main():
 
     # Get scenes to process
     print("Scanning dataset...")
-    scenes = get_scenes(args.dataset, args.start, args.end)
+    scenes = get_scenes(args.dataset, args.start, args.end, args.max_scenes)
     print(f"Found {len(scenes)} scenes to process")
 
     if args.dry_run:
