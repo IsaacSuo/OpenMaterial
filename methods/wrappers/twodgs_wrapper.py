@@ -101,6 +101,8 @@ class TwoDGSMethod(BaseMethod):
 
     def train(self, data_path: str, output_path: str, **kwargs) -> bool:
         """Train 2DGS"""
+        from pathlib import Path
+
         config = self.get_default_config()
         config.update(kwargs)
 
@@ -109,9 +111,13 @@ class TwoDGSMethod(BaseMethod):
         lambda_dist = config.get('lambda_dist', 1000)
         depth_ratio = config.get('depth_ratio', 0)
 
+        # Use absolute paths since train.py runs in external/2DGS directory
+        abs_data_path = Path(data_path).absolute()
+        abs_output_path = Path(output_path).absolute()
+
         cmd = f"""python train.py \
-            -s {data_path} \
-            -m {output_path} \
+            -s {abs_data_path} \
+            -m {abs_output_path} \
             -r 1 \
             --iterations {iterations} \
             --lambda_normal {lambda_normal} \
