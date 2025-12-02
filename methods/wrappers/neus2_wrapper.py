@@ -134,7 +134,12 @@ class NeuS2Method(BaseMethod):
 
         n_steps = config.get('n_steps', 15000)
         network = config.get('network', 'dtu.json')
-        scene_file = Path(data_path) / "transforms_train.json"
+
+        # Use absolute paths since scripts run in external/NeuS2 directory
+        abs_data_path = Path(data_path).absolute()
+        abs_output_path = Path(output_path).absolute()
+
+        scene_file = abs_data_path / "transforms_train.json"
 
         if not scene_file.exists():
             print(f"Scene file not found: {scene_file}")
@@ -148,7 +153,7 @@ class NeuS2Method(BaseMethod):
             --network {network} \
             --n_steps {n_steps}"""
 
-        result = self.run_command(cmd)
+        result = self.run_command(cmd, log_output=True, log_dir=str(abs_output_path))
 
         if result.returncode != 0:
             print(f"Training failed: {result.stderr}")
@@ -164,9 +169,12 @@ class NeuS2Method(BaseMethod):
         n_steps = config.get('n_steps', 15000)
         marching_cubes_res = config.get('marching_cubes_res', 512)
 
+        # Use absolute paths
+        abs_model_path = Path(model_path).absolute()
+
         # Find the trained model
-        exp_name = Path(model_path).name
-        output_dir = self.repo_path / "output" / exp_name
+        exp_name = abs_model_path.name
+        output_dir = self.repo_path.absolute() / "output" / exp_name
         checkpoint_dir = output_dir / "checkpoints"
 
         if not checkpoint_dir.exists():

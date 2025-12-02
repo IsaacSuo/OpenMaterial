@@ -32,9 +32,13 @@ class InstantNSRMethod(BaseMethod):
         config = self.get_default_config()
         config.update(kwargs)
 
+        # Use absolute paths since launch.py runs in instant-nsr-pl directory
+        abs_data_path = Path(data_path).absolute()
+        abs_output_path = Path(output_path).absolute()
+
         # Extract scene information
-        scene_name = Path(data_path).name
-        object_name = Path(data_path).parent.name
+        scene_name = abs_data_path.name
+        object_name = abs_data_path.parent.name
 
         # Get material name from scene name
         material_name = scene_name.split('-')[-1] if '-' in scene_name else 'diffuse'
@@ -42,15 +46,15 @@ class InstantNSRMethod(BaseMethod):
         # Run training using launch.py
         cmd = f"""python launch.py \
             --config configs/neus-openmaterial-wmask.yaml \
-            --output_dir {output_path} \
+            --output_dir {abs_output_path} \
             --train \
             dataset.bsdf_name={material_name} \
             dataset.object={object_name} \
             dataset.scene={scene_name} \
-            dataset.root_dir={data_path} \
+            dataset.root_dir={abs_data_path} \
             trial_name={object_name}"""
 
-        result = self.run_command(cmd)
+        result = self.run_command(cmd, log_output=True, log_dir=str(abs_output_path))
 
         if result.returncode != 0:
             print(f"Training failed: {result.stderr}")
@@ -60,13 +64,16 @@ class InstantNSRMethod(BaseMethod):
 
     def extract_mesh(self, model_path: str, output_mesh_path: str, **kwargs) -> bool:
         """Extract mesh from Instant-NSR-PL model"""
+        # Use absolute paths
+        abs_model_path = Path(model_path).absolute()
+
         # Instant-NSR-PL generates mesh during training
         # Find the mesh in the output directory
-        mesh_file = Path(model_path) / "mesh" / "mesh.ply"
+        mesh_file = abs_model_path / "mesh" / "mesh.ply"
 
         if not mesh_file.exists():
             # Try alternative location
-            exp_dir = Path(model_path).parent
+            exp_dir = abs_model_path.parent
             mesh_file = exp_dir / "mesh" / "mesh.ply"
 
         if mesh_file.exists():
@@ -74,7 +81,7 @@ class InstantNSRMethod(BaseMethod):
             shutil.copy(mesh_file, output_mesh_path)
             return True
         else:
-            print(f"Mesh not found at {model_path}")
+            print(f"Mesh not found at {abs_model_path}")
             return False
 
     def get_default_config(self) -> Dict[str, Any]:
