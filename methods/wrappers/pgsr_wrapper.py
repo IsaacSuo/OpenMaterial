@@ -107,7 +107,7 @@ class PGSRMethod(BaseMethod):
             -r 1 \
             --iterations {iterations}"""
 
-        result = self.run_command(cmd)
+        result = self.run_command(cmd, log_output=True, log_dir=str(abs_output_path))
 
         if result.returncode != 0:
             print(f"Training failed: {result.stderr}")

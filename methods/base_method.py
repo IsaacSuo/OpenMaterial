@@ -93,7 +93,8 @@ class BaseMethod(ABC):
         pass
 
     def run_command(self, cmd: str, cwd: Optional[str] = None,
-                   use_conda: bool = True) -> subprocess.CompletedProcess:
+                   use_conda: bool = True, log_output: bool = False,
+                   log_dir: Optional[str] = None) -> subprocess.CompletedProcess:
         """
         Run a shell command
 
@@ -101,6 +102,8 @@ class BaseMethod(ABC):
             cmd: Command to run
             cwd: Working directory
             use_conda: Whether to activate conda environment
+            log_output: If True, stream output to terminal and save to log files
+            log_dir: Directory to save logs (required if log_output=True)
 
         Returns:
             CompletedProcess: Result of the command
@@ -114,16 +117,88 @@ class BaseMethod(ABC):
         else:
             full_cmd = cmd
 
-        result = subprocess.run(
-            full_cmd,
-            shell=True,
-            cwd=cwd,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True
-        )
+        if log_output and log_dir:
+            # Stream output to terminal and save to log files
+            import sys
+            log_dir_path = Path(log_dir)
+            log_dir_path.mkdir(parents=True, exist_ok=True)
 
-        return result
+            stdout_log = log_dir_path / "training.log"
+            stderr_log = log_dir_path / "training_error.log"
+
+            print(f"Training logs: {stdout_log}")
+
+            # Use Popen for real-time output
+            process = subprocess.Popen(
+                full_cmd,
+                shell=True,
+                cwd=cwd,
+                executable='/bin/bash',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1  # Line buffered
+            )
+
+            stdout_lines = []
+            stderr_lines = []
+
+            # Open log files
+            with open(stdout_log, 'w') as f_out, open(stderr_log, 'w') as f_err:
+                # Read output in real-time
+                while True:
+                    # Read stdout
+                    if process.stdout:
+                        stdout_line = process.stdout.readline()
+                        if stdout_line:
+                            print(stdout_line, end='', flush=True)
+                            f_out.write(stdout_line)
+                            f_out.flush()
+                            stdout_lines.append(stdout_line)
+
+                    # Read stderr
+                    if process.stderr:
+                        stderr_line = process.stderr.readline()
+                        if stderr_line:
+                            print(stderr_line, end='', file=sys.stderr, flush=True)
+                            f_err.write(stderr_line)
+                            f_err.flush()
+                            stderr_lines.append(stderr_line)
+
+                    # Check if process finished
+                    if process.poll() is not None:
+                        # Read remaining output
+                        if process.stdout:
+                            for line in process.stdout:
+                                print(line, end='', flush=True)
+                                f_out.write(line)
+                                stdout_lines.append(line)
+                        if process.stderr:
+                            for line in process.stderr:
+                                print(line, end='', file=sys.stderr, flush=True)
+                                f_err.write(line)
+                                stderr_lines.append(line)
+                        break
+
+            # Create CompletedProcess-like object for compatibility
+            class LoggedResult:
+                def __init__(self, returncode, stdout, stderr):
+                    self.returncode = returncode
+                    self.stdout = ''.join(stdout)
+                    self.stderr = ''.join(stderr)
+
+            return LoggedResult(process.returncode, stdout_lines, stderr_lines)
+        else:
+            # Original behavior: capture output
+            result = subprocess.run(
+                full_cmd,
+                shell=True,
+                cwd=cwd,
+                executable='/bin/bash',
+                capture_output=True,
+                text=True
+            )
+            return result
 
     def check_environment(self) -> bool:
         """

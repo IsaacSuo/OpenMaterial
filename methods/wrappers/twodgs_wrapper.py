@@ -124,7 +124,7 @@ class TwoDGSMethod(BaseMethod):
             --lambda_dist {lambda_dist} \
             --depth_ratio {depth_ratio}"""
 
-        result = self.run_command(cmd)
+        result = self.run_command(cmd, log_output=True, log_dir=str(abs_output_path))
 
         if result.returncode != 0:
             print(f"Training failed: {result.stderr}")
