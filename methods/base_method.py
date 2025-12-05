@@ -129,19 +129,56 @@ class BaseMethod(ABC):
 
             print(f"Training logs: {stdout_log}")
 
-            # Use Popen for real-time output
-            # Don't capture - let output flow directly to terminal
-            with open(stdout_log, 'w') as f_out, open(stderr_log, 'w') as f_err:
-                # Use tee-like approach: output goes to terminal AND files
+            # Stream output with progress display (single line update)
+            import re
+            with open(stdout_log, 'w') as f_out:
                 process = subprocess.Popen(
-                    f"{full_cmd} 2>&1 | tee -a {stdout_log}",
+                    full_cmd,
                     shell=True,
                     cwd=cwd,
-                    executable='/bin/bash'
+                    executable='/bin/bash',
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
                 )
 
-                # Wait for process to complete
+                # Patterns to detect progress lines
+                progress_patterns = [
+                    r'Iteration.*?(\d+)/(\d+)',  # Iteration X/Y
+                    r'Iter.*?(\d+)',              # Iter X
+                    r'Step.*?(\d+)',              # Step X
+                    r'Epoch.*?(\d+)',             # Epoch X
+                    r'\[.*?\].*?(\d+)%',          # Progress bar with percentage
+                ]
+
+                last_progress = None
+                for line in process.stdout:
+                    f_out.write(line)  # Save to log file
+                    f_out.flush()
+
+                    # Check if line contains progress information
+                    is_progress = False
+                    for pattern in progress_patterns:
+                        if re.search(pattern, line, re.IGNORECASE):
+                            is_progress = True
+                            # Print progress on same line
+                            print(f"\r{line.strip()[:120]}", end='', flush=True)
+                            last_progress = line.strip()
+                            break
+
+                    # Print important lines (errors, warnings) on new line
+                    if not is_progress:
+                        lower_line = line.lower()
+                        if any(keyword in lower_line for keyword in ['error', 'warning', 'failed', 'exception']):
+                            print(f"\n{line.strip()}")
+
                 returncode = process.wait()
+
+                # Print final progress or completion message
+                if last_progress:
+                    print(f"\r{last_progress[:120]}")
+                print(f"Training completed with return code: {returncode}")
 
             # Read logs for return value
             with open(stdout_log, 'r') as f:

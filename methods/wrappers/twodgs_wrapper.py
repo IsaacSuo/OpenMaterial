@@ -45,8 +45,12 @@ class TwoDGSMethod(BaseMethod):
                 return False
 
         # Install dependencies
-        result = self.run_command("pip install plyfile tqdm opencv-python mediapy -i https://pypi.tuna.tsinghua.edu.cn/simple")
+        result = self.run_command(
+            "pip install plyfile tqdm opencv-python mediapy open3d==0.18.0 lpips scikit-image trimesh "
+            "-i https://pypi.tuna.tsinghua.edu.cn/simple"
+        )
         if result.returncode != 0:
+            print(f"Failed to install dependencies: {result.stderr}")
             return False
 
         # Build CUDA extensions

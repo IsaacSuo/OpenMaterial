@@ -44,10 +44,28 @@ class PGSRMethod(BaseMethod):
             if result.returncode != 0:
                 return False
 
-        # Install dependencies
-        result = self.run_command("pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple")
+        # Install dependencies (including those in requirements.txt)
+        print("Installing dependencies...")
+        result = self.run_command(
+            "pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
+        )
         if result.returncode != 0:
+            print(f"Failed to install base dependencies: {result.stderr}")
             return False
+
+        # Install PyTorch3D (required for PGSR mesh processing)
+        print("Installing PyTorch3D...")
+        result = self.run_command(
+            "pip install pytorch3d -i https://pypi.tuna.tsinghua.edu.cn/simple"
+        )
+        if result.returncode != 0:
+            print(f"⚠ PyPI version failed, trying from source...")
+            result = self.run_command(
+                'pip install "git+https://github.com/facebookresearch/pytorch3d.git"'
+            )
+            if result.returncode != 0:
+                print(f"Failed to install PyTorch3D: {result.stderr}")
+                return False
 
         # Build CUDA extensions
         print("Building CUDA extensions...")

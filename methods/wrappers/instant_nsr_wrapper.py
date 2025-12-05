@@ -19,8 +19,43 @@ class InstantNSRMethod(BaseMethod):
 
     def setup(self) -> bool:
         """Setup Instant-NSR-PL environment"""
-        # Instant-NSR-PL is already set up in the project
-        print("✓ Instant-NSR-PL already configured")
+        if not self.check_environment():
+            print(f"Creating conda environment: {self.conda_env}")
+            result = self.run_command(
+                f"conda create -n {self.conda_env} python=3.8 -y",
+                use_conda=False
+            )
+            if result.returncode != 0:
+                print(f"Failed to create environment: {result.stderr}")
+                return False
+
+        # Install PyTorch (check if already installed)
+        print("Checking PyTorch...")
+        check_torch = self.run_command(
+            "python -c \"import torch; print(torch.__version__)\" 2>/dev/null"
+        )
+        if check_torch.returncode == 0 and ("2.3.1" in check_torch.stdout or "2.0" in check_torch.stdout):
+            print(f"✓ PyTorch already installed, skipping download")
+        else:
+            print("Installing PyTorch...")
+            result = self.run_command(
+                "pip install torch==2.3.1 torchvision==0.18.1 "
+                "-i https://pypi.tuna.tsinghua.edu.cn/simple"
+            )
+            if result.returncode != 0:
+                print(f"Failed to install PyTorch: {result.stderr}")
+                return False
+
+        # Install dependencies from requirements.txt
+        print("Installing dependencies...")
+        result = self.run_command(
+            "pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
+        )
+        if result.returncode != 0:
+            print(f"Failed to install dependencies: {result.stderr}")
+            return False
+
+        print("✓ Instant-NSR-PL setup complete")
         return True
 
     def convert_data(self, input_path: str, output_path: str) -> bool:

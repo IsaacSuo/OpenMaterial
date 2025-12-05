@@ -34,7 +34,7 @@ class NeuS2Method(BaseMethod):
         # Install dependencies
         print("Installing dependencies...")
         result = self.run_command(
-            "pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
+            "pip install -r requirements.txt trimesh tensorboard -i https://pypi.tuna.tsinghua.edu.cn/simple"
         )
         if result.returncode != 0:
             print(f"Failed to install dependencies: {result.stderr}")
@@ -75,12 +75,12 @@ class NeuS2Method(BaseMethod):
 
         # Build CUDA code
         print("Building CUDA code...")
-        result = self.run_command("cmake . -B build", use_conda=False)
+        result = self.run_command("cmake . -B build")
         if result.returncode != 0:
             print(f"CMake configuration failed: {result.stderr}")
             return False
 
-        result = self.run_command("cmake --build build --config RelWithDebInfo -j", use_conda=False)
+        result = self.run_command("cmake --build build --config RelWithDebInfo -j")
         if result.returncode != 0:
             print(f"Build failed: {result.stderr}")
             return False

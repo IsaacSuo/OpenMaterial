@@ -58,6 +58,9 @@ def parse_args():
     parser.add_argument('--skip-mesh', action='store_true',
                         help='Skip mesh extraction')
 
+    parser.add_argument('--skip-completed', action='store_true',
+                        help='Skip scenes that are already fully processed (mesh exists)')
+
     parser.add_argument('--dry-run', action='store_true',
                         help='Print what would be done without executing')
 
@@ -98,6 +101,7 @@ def get_scenes(dataset_path: str, start: int, end: int, max_scenes: int = -1) ->
 def run_method_on_scenes(method_name: str, scenes: List[str],
                          output_dir: str, gpu_id: int,
                          skip_setup: bool, skip_train: bool, skip_mesh: bool,
+                         skip_completed: bool,
                          method_config: Dict = None) -> Dict:
     """Run a method on all scenes"""
 
@@ -143,8 +147,32 @@ def run_method_on_scenes(method_name: str, scenes: List[str],
     print(f"{'='*60}\n")
 
     method_output_dir = Path(output_dir) / method_name
+    results_file = method_output_dir / 'benchmark_results.json'
+    results_file.parent.mkdir(parents=True, exist_ok=True)
 
     for scene_path in tqdm(scenes, desc=f"{method_name}"):
+        # Check if scene is already completed
+        if skip_completed:
+            scene_name = Path(scene_path).name
+            object_name = Path(scene_path).parent.name
+            mesh_output = method_output_dir / "meshes" / object_name / f"{scene_name}.ply"
+
+            if mesh_output.exists():
+                print(f"[{method_name}] ✓ Scene already completed: {scene_name}, skipping")
+                results['scenes_processed'] += 1
+                results['scenes_success'] += 1
+                results['scene_results'].append({
+                    'scene': scene_name,
+                    'object': object_name,
+                    'success': True,
+                    'skipped': True,
+                    'mesh_output': str(mesh_output),
+                })
+                # Save results after each scene
+                with open(results_file, 'w') as f:
+                    json.dump(results, f, indent=2)
+                continue
+
         scene_result = method.process_scene(
             input_scene=scene_path,
             output_dir=str(method_output_dir),
@@ -162,12 +190,9 @@ def run_method_on_scenes(method_name: str, scenes: List[str],
 
         results['scene_results'].append(scene_result)
 
-    # Save results
-    results_file = method_output_dir / 'benchmark_results.json'
-    results_file.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(results_file, 'w') as f:
-        json.dump(results, f, indent=2)
+        # Save results after each scene (incremental save)
+        with open(results_file, 'w') as f:
+            json.dump(results, f, indent=2)
 
     print(f"\n{'='*60}")
     print(f" {method_name} Results")
@@ -229,7 +254,7 @@ def main():
         results = run_method_on_scenes(
             methods[0], scenes, args.output,
             gpu_ids[0], args.skip_setup, args.skip_train, args.skip_mesh,
-            method_config
+            args.skip_completed, method_config
         )
 
     else:
@@ -241,7 +266,8 @@ def main():
                 pool.apply_async(
                     run_method_on_scenes,
                     (method, scenes, args.output, gpu_id,
-                     args.skip_setup, args.skip_train, args.skip_mesh, method_config)
+                     args.skip_setup, args.skip_train, args.skip_mesh,
+                     args.skip_completed, method_config)
                 )
                 for method, gpu_id in zip(methods, gpu_ids)
             ]
