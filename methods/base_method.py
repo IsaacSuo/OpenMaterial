@@ -129,8 +129,9 @@ class BaseMethod(ABC):
 
             print(f"Training logs: {stdout_log}")
 
-            # Stream output with progress display (single line update)
+            # Stream output with progress display
             import re
+            import time
             with open(stdout_log, 'w') as f_out:
                 process = subprocess.Popen(
                     full_cmd,
@@ -140,45 +141,56 @@ class BaseMethod(ABC):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
-                    bufsize=1
+                    bufsize=1,
+                    universal_newlines=True
                 )
 
                 # Patterns to detect progress lines
                 progress_patterns = [
-                    r'Iteration.*?(\d+)/(\d+)',  # Iteration X/Y
+                    r'Iteration.*?(\d+)',         # Iteration X or Iteration X/Y
                     r'Iter.*?(\d+)',              # Iter X
                     r'Step.*?(\d+)',              # Step X
                     r'Epoch.*?(\d+)',             # Epoch X
-                    r'\[.*?\].*?(\d+)%',          # Progress bar with percentage
+                    r'\d+%',                      # X%
+                    r'Loss',                      # Lines with Loss
+                    r'PSNR',                      # Lines with PSNR
                 ]
 
                 last_progress = None
+                line_count = 0
+                last_update_time = time.time()
+
                 for line in process.stdout:
                     f_out.write(line)  # Save to log file
                     f_out.flush()
+
+                    line_count += 1
+                    current_time = time.time()
 
                     # Check if line contains progress information
                     is_progress = False
                     for pattern in progress_patterns:
                         if re.search(pattern, line, re.IGNORECASE):
                             is_progress = True
-                            # Print progress on same line
-                            print(f"\r{line.strip()[:120]}", end='', flush=True)
-                            last_progress = line.strip()
                             break
 
+                    # Update display for progress lines (limit to once per 0.5 seconds)
+                    if is_progress and (current_time - last_update_time > 0.5):
+                        # Clean line of ANSI codes and print
+                        clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line.strip())
+                        print(f"\r{clean_line[:120]:<120}", end='', flush=True)
+                        last_progress = clean_line
+                        last_update_time = current_time
                     # Print important lines (errors, warnings) on new line
-                    if not is_progress:
-                        lower_line = line.lower()
-                        if any(keyword in lower_line for keyword in ['error', 'warning', 'failed', 'exception']):
-                            print(f"\n{line.strip()}")
+                    elif any(keyword in line.lower() for keyword in ['error', 'warning', 'failed', 'exception']):
+                        print(f"\n{line.strip()}")
 
                 returncode = process.wait()
 
                 # Print final progress or completion message
                 if last_progress:
-                    print(f"\r{last_progress[:120]}")
-                print(f"Training completed with return code: {returncode}")
+                    print(f"\r{last_progress[:120]:<120}")
+                print(f"\nTraining completed with return code: {returncode}")
 
             # Read logs for return value
             with open(stdout_log, 'r') as f:

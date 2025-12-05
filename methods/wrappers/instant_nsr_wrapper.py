@@ -79,7 +79,7 @@ class InstantNSRMethod(BaseMethod):
         material_name = scene_name.split('-')[-1] if '-' in scene_name else 'diffuse'
 
         # Run training using launch.py
-        cmd = f"""python launch.py \
+        cmd = f"""python -u launch.py \
             --config configs/neus-openmaterial-wmask.yaml \
             --output_dir {abs_output_path} \
             --train \

@@ -147,7 +147,7 @@ class NeuS2Method(BaseMethod):
 
         exp_name = Path(output_path).name
 
-        cmd = f"""python scripts/run.py \
+        cmd = f"""python -u scripts/run.py \
             --scene {scene_file} \
             --name {exp_name} \
             --network {network} \

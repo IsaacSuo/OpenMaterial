@@ -119,7 +119,7 @@ class TwoDGSMethod(BaseMethod):
         abs_data_path = Path(data_path).absolute()
         abs_output_path = Path(output_path).absolute()
 
-        cmd = f"""python train.py \
+        cmd = f"""python -u train.py \
             -s {abs_data_path} \
             -m {abs_output_path} \
             -r 1 \
