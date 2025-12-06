@@ -195,8 +195,11 @@ class BaseMethod(ABC):
             # Read logs for return value
             with open(stdout_log, 'r') as f:
                 stdout_content = f.read()
-            with open(stderr_log, 'r') as f:
-                stderr_content = f.read() if stderr_log.exists() else ""
+            if stderr_log.exists():
+                with open(stderr_log, 'r') as f:
+                    stderr_content = f.read()
+            else:
+                stderr_content = ""
 
             # Create CompletedProcess-like object for compatibility
             class LoggedResult:
