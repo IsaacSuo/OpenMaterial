@@ -30,12 +30,13 @@ class CameraInfo(NamedTuple):
     T: np.array
     FovY: np.array
     FovX: np.array
+    image: np.array
     image_path: str
     image_name: str
     width: int
     height: int
-    fx: float
-    fy: float
+    fx: float = None
+    fy: float = None
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
