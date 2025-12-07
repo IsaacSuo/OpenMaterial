@@ -61,6 +61,18 @@ def compute_chamfer_distance(pred_mesh_path: str, gt_mesh_path: str,
     pts_pr = sample_points_from_meshes(mesh_pr, num_samples=num_samples).squeeze()
     pts_gt = sample_points_from_meshes(mesh_gt, num_samples=num_samples).squeeze()
 
+    # Normalize both point clouds to unit cube centered at origin
+    # This handles scale differences between predicted and GT meshes
+    pts_pr_center = pts_pr.mean(dim=0)
+    pts_gt_center = pts_gt.mean(dim=0)
+    pts_pr = pts_pr - pts_pr_center
+    pts_gt = pts_gt - pts_gt_center
+
+    # Scale to unit cube based on GT mesh
+    gt_scale = pts_gt.abs().max()
+    pts_pr = pts_pr / gt_scale
+    pts_gt = pts_gt / gt_scale
+
     # Compute bidirectional nearest distances
     dist_gt = nearest_dist(pts_gt, pts_pr)
     dist_pr = nearest_dist(pts_pr, pts_gt)
@@ -72,8 +84,8 @@ def compute_chamfer_distance(pred_mesh_path: str, gt_mesh_path: str,
     mean_gt = dist_gt_cpu[dist_gt_cpu < max_dist].mean()
     mean_pr = dist_pr_cpu[dist_pr_cpu < max_dist].mean()
 
-    # Chamfer distance in cm
-    chamfer = (mean_gt + mean_pr) / 2 * 100
+    # Chamfer distance (normalized, unitless)
+    chamfer = (mean_gt + mean_pr) / 2
 
     return chamfer
 
