@@ -163,14 +163,13 @@ class PGSRMethod(BaseMethod):
         else:
             abs_data_path = data_path
 
+        # PGSR render.py extracts mesh automatically when --skip_train is NOT set
+        # Mesh is saved to {model_path}/mesh/tsdf_fusion_post.ply
         cmd = f"""python render.py \
             -s {abs_data_path} \
             -m {abs_model_path} \
             --iteration {iteration} \
-            --skip_test \
-            --skip_train \
-            --compute_pcd \
-            --compute_mesh"""
+            --skip_test"""
 
         result = self.run_command(cmd)
 
@@ -179,13 +178,14 @@ class PGSRMethod(BaseMethod):
             return False
 
         # Copy mesh to output path
-        mesh_dir = abs_model_path / "point_cloud" / f"iteration_{iteration}"
+        # PGSR saves mesh at: {model_path}/mesh/tsdf_fusion_post.ply
+        mesh_dir = abs_model_path / "mesh"
 
         # Try post-processed mesh first
-        source_mesh = mesh_dir / "fuse_post.ply"
+        source_mesh = mesh_dir / "tsdf_fusion_post.ply"
         if not source_mesh.exists():
             # Fall back to regular mesh
-            source_mesh = mesh_dir / "fuse.ply"
+            source_mesh = mesh_dir / "tsdf_fusion.ply"
 
         if source_mesh.exists():
             import shutil
