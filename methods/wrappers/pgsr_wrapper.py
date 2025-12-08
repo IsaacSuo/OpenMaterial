@@ -114,6 +114,7 @@ class PGSRMethod(BaseMethod):
         config.update(kwargs)
 
         iterations = config.get('iterations', 30000)
+        densify_abs_grad_threshold = config.get('densify_abs_grad_threshold', 0.0002)
 
         # Use absolute paths since train.py runs in external/PGSR directory
         abs_data_path = Path(data_path).absolute()
@@ -123,7 +124,10 @@ class PGSRMethod(BaseMethod):
             -s {abs_data_path} \
             -m {abs_output_path} \
             -r 1 \
-            --iterations {iterations}"""
+            --iterations {iterations} \
+            --densify_abs_grad_threshold {densify_abs_grad_threshold} \
+            --eval \
+            --white_background"""
 
         result = self.run_command(cmd, log_output=True, log_dir=str(abs_output_path))
 
@@ -165,13 +169,16 @@ class PGSRMethod(BaseMethod):
 
         # PGSR render.py extracts mesh automatically when --skip_train is NOT set
         # Mesh is saved to {model_path}/mesh/tsdf_fusion_post.ply
-        # Increase voxel_size to reduce memory usage (default 0.002 causes OOM)
-        voxel_size = config.get('voxel_size', 0.005)
+        voxel_size = config.get('voxel_size', 0.004)
+        max_depth = config.get('max_depth', 5.0)
+        num_cluster = config.get('num_cluster', 1)
         cmd = f"""python render.py \
             -s {abs_data_path} \
             -m {abs_model_path} \
             --iteration {iteration} \
             --voxel_size {voxel_size} \
+            --max_depth {max_depth} \
+            --num_cluster {num_cluster} \
             --skip_test"""
 
         result = self.run_command(cmd)
@@ -202,4 +209,8 @@ class PGSRMethod(BaseMethod):
         """Get default PGSR configuration"""
         return {
             'iterations': 30000,
+            'densify_abs_grad_threshold': 0.0002,
+            'voxel_size': 0.004,
+            'max_depth': 5.0,
+            'num_cluster': 1,
         }
