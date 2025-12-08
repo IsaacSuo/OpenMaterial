@@ -40,7 +40,7 @@ def nearest_dist(pts0, pts1, batch_size=512):
 
 def compute_chamfer_distance(pred_mesh_path: str, gt_mesh_path: str,
                             num_samples: int = 1000000,
-                            max_dist: float = 0.15) -> float:
+                            max_dist: float = 1.0) -> float:
     """
     Compute Chamfer Distance between predicted and ground truth meshes
 
