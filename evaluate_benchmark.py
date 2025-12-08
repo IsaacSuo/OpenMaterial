@@ -61,18 +61,6 @@ def compute_chamfer_distance(pred_mesh_path: str, gt_mesh_path: str,
     pts_pr = sample_points_from_meshes(mesh_pr, num_samples=num_samples).squeeze()
     pts_gt = sample_points_from_meshes(mesh_gt, num_samples=num_samples).squeeze()
 
-    # Normalize both point clouds to unit cube centered at origin
-    # This handles scale differences between predicted and GT meshes
-    pts_pr_center = pts_pr.mean(dim=0)
-    pts_gt_center = pts_gt.mean(dim=0)
-    pts_pr = pts_pr - pts_pr_center
-    pts_gt = pts_gt - pts_gt_center
-
-    # Scale to unit cube based on GT mesh
-    gt_scale = pts_gt.abs().max()
-    pts_pr = pts_pr / gt_scale
-    pts_gt = pts_gt / gt_scale
-
     # Compute bidirectional nearest distances
     dist_gt = nearest_dist(pts_gt, pts_pr)
     dist_pr = nearest_dist(pts_pr, pts_gt)
@@ -84,8 +72,8 @@ def compute_chamfer_distance(pred_mesh_path: str, gt_mesh_path: str,
     mean_gt = dist_gt_cpu[dist_gt_cpu < max_dist].mean()
     mean_pr = dist_pr_cpu[dist_pr_cpu < max_dist].mean()
 
-    # Chamfer distance (normalized, unitless)
-    chamfer = (mean_gt + mean_pr) / 2
+    # Chamfer distance in cm (matching official implementation)
+    chamfer = (mean_gt + mean_pr) / 2 * 100
 
     return chamfer
 
@@ -149,13 +137,13 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
             results['scenes'].append({
                 'scene': scene_name,
                 'object': object_name,
-                'chamfer_distance': float(chamfer),
+                'chamfer_distance_cm': float(chamfer),
                 'pred_mesh': str(pred_mesh),
                 'gt_mesh': str(gt_mesh)
             })
             results['chamfer_distances'].append(float(chamfer))
 
-            print(f"{scene_name}: {chamfer:.4f}")
+            print(f"{scene_name}: {chamfer:.5f} cm")
 
         except Exception as e:
             print(f"Error evaluating {scene_name}: {e}")
@@ -226,10 +214,10 @@ def main():
         if 'error' in result:
             print(f"{result['method']}: {result['error']}")
         else:
-            num_scenes = len([s for s in result['scenes'] if 'chamfer_distance' in s])
+            num_scenes = len([s for s in result['scenes'] if 'chamfer_distance_cm' in s])
             print(f"{result['method']}:")
             print(f"  Scenes evaluated: {num_scenes}")
-            print(f"  Mean Chamfer Distance: {result['mean_chamfer']:.4f} (normalized)")
+            print(f"  Mean Chamfer Distance: {result['mean_chamfer']:.5f} cm")
 
     print(f"\nResults saved to: {output_path}")
 
