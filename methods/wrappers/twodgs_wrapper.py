@@ -111,8 +111,8 @@ class TwoDGSMethod(BaseMethod):
         config.update(kwargs)
 
         iterations = config.get('iterations', 30000)
-        lambda_normal = config.get('lambda_normal', 0.05)
-        lambda_dist = config.get('lambda_dist', 1000)
+        lambda_normal = config.get('lambda_normal', 0.0)
+        lambda_dist = config.get('lambda_dist', 0.0)
         depth_ratio = config.get('depth_ratio', 0)
 
         # Use absolute paths since train.py runs in external/2DGS directory
@@ -126,7 +126,9 @@ class TwoDGSMethod(BaseMethod):
             --iterations {iterations} \
             --lambda_normal {lambda_normal} \
             --lambda_dist {lambda_dist} \
-            --depth_ratio {depth_ratio}"""
+            --depth_ratio {depth_ratio} \
+            --eval \
+            --white_background"""
 
         result = self.run_command(cmd, log_output=True, log_dir=str(abs_output_path))
 
@@ -211,8 +213,8 @@ class TwoDGSMethod(BaseMethod):
         """Get default 2DGS configuration"""
         return {
             'iterations': 30000,
-            'lambda_normal': 0.05,
-            'lambda_dist': 1000,
+            'lambda_normal': 0.0,
+            'lambda_dist': 0.0,
             'depth_ratio': 0,
             'mesh_res': 1024,
         }
