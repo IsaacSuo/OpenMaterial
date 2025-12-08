@@ -292,10 +292,11 @@ class BaseMethod(ABC):
 
             if skip_train and training_done:
                 print(f"[{self.method_name}] ✓ Model already trained for {scene_name}, skipping training")
-            elif training_done:
-                print(f"[{self.method_name}] ✓ Model already exists for {scene_name}, reusing")
             else:
-                print(f"[{self.method_name}] Training on {scene_name}...")
+                if training_done:
+                    print(f"[{self.method_name}] Model checkpoint exists for {scene_name}, will continue training")
+                else:
+                    print(f"[{self.method_name}] Training on {scene_name}...")
                 if not self.train(str(converted_data), str(model_output), **kwargs):
                     results['error'] = 'Training failed'
                     return results
