@@ -166,7 +166,7 @@ class PGSRMethod(BaseMethod):
         # PGSR render.py extracts mesh automatically when --skip_train is NOT set
         # Mesh is saved to {model_path}/mesh/tsdf_fusion_post.ply
         # Increase voxel_size to reduce memory usage (default 0.002 causes OOM)
-        voxel_size = config.get('voxel_size', 0.01)
+        voxel_size = config.get('voxel_size', 0.005)
         cmd = f"""python render.py \
             -s {abs_data_path} \
             -m {abs_model_path} \
