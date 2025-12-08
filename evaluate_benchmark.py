@@ -28,6 +28,7 @@ def check_eval_environment() -> bool:
     result = subprocess.run(
         f"conda env list | grep {env_name}",
         shell=True,
+        executable='/bin/bash',
         capture_output=True
     )
 
@@ -40,7 +41,12 @@ def check_eval_environment() -> bool:
     conda activate {env_name} && \
     python -c "import torch; import pytorch3d; import trimesh"
     """
-    result = subprocess.run(check_cmd, shell=True, capture_output=True)
+    result = subprocess.run(
+        check_cmd,
+        shell=True,
+        executable='/bin/bash',
+        capture_output=True
+    )
 
     return result.returncode == 0
 
@@ -62,6 +68,7 @@ def setup_eval_environment() -> bool:
     result = subprocess.run(
         f"conda create -n {env_name} python=3.10 -y",
         shell=True,
+        executable='/bin/bash',
         capture_output=True,
         text=True
     )
@@ -76,7 +83,13 @@ def setup_eval_environment() -> bool:
     conda activate {env_name} && \
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
     """
-    result = subprocess.run(install_cmd, shell=True, capture_output=True, text=True)
+    result = subprocess.run(
+        install_cmd,
+        shell=True,
+        executable='/bin/bash',
+        capture_output=True,
+        text=True
+    )
     if result.returncode != 0:
         print(f"Failed to install PyTorch: {result.stderr}")
         return False
@@ -88,7 +101,13 @@ def setup_eval_environment() -> bool:
     conda activate {env_name} && \
     pip install pytorch3d -i https://pypi.tuna.tsinghua.edu.cn/simple
     """
-    result = subprocess.run(pytorch3d_cmd, shell=True, capture_output=True, text=True)
+    result = subprocess.run(
+        pytorch3d_cmd,
+        shell=True,
+        executable='/bin/bash',
+        capture_output=True,
+        text=True
+    )
 
     if result.returncode != 0:
         print("PyPI installation failed, trying from source...")
@@ -97,7 +116,13 @@ def setup_eval_environment() -> bool:
         conda activate {env_name} && \
         pip install "git+https://github.com/facebookresearch/pytorch3d.git"
         """
-        result = subprocess.run(pytorch3d_source, shell=True, capture_output=True, text=True)
+        result = subprocess.run(
+            pytorch3d_source,
+            shell=True,
+            executable='/bin/bash',
+            capture_output=True,
+            text=True
+        )
         if result.returncode != 0:
             print(f"Failed to install PyTorch3D: {result.stderr}")
             return False
@@ -109,7 +134,13 @@ def setup_eval_environment() -> bool:
     conda activate {env_name} && \
     pip install trimesh tqdm -i https://pypi.tuna.tsinghua.edu.cn/simple
     """
-    result = subprocess.run(deps_cmd, shell=True, capture_output=True, text=True)
+    result = subprocess.run(
+        deps_cmd,
+        shell=True,
+        executable='/bin/bash',
+        capture_output=True,
+        text=True
+    )
     if result.returncode != 0:
         print(f"Failed to install dependencies: {result.stderr}")
         return False
