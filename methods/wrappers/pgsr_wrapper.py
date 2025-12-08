@@ -115,6 +115,8 @@ class PGSRMethod(BaseMethod):
 
         iterations = config.get('iterations', 30000)
         densify_abs_grad_threshold = config.get('densify_abs_grad_threshold', 0.0002)
+        max_abs_split_points = config.get('max_abs_split_points', 0)
+        opacity_cull_threshold = config.get('opacity_cull_threshold', 0.05)
 
         # Use absolute paths since train.py runs in external/PGSR directory
         abs_data_path = Path(data_path).absolute()
@@ -126,6 +128,8 @@ class PGSRMethod(BaseMethod):
             -r 1 \
             --iterations {iterations} \
             --densify_abs_grad_threshold {densify_abs_grad_threshold} \
+            --max_abs_split_points {max_abs_split_points} \
+            --opacity_cull_threshold {opacity_cull_threshold} \
             --eval \
             --white_background"""
 
@@ -172,6 +176,9 @@ class PGSRMethod(BaseMethod):
         voxel_size = config.get('voxel_size', 0.004)
         max_depth = config.get('max_depth', 5.0)
         num_cluster = config.get('num_cluster', 1)
+        use_depth_filter = config.get('use_depth_filter', True)
+
+        depth_filter_flag = "--use_depth_filter" if use_depth_filter else ""
         cmd = f"""python render.py \
             -s {abs_data_path} \
             -m {abs_model_path} \
@@ -179,6 +186,7 @@ class PGSRMethod(BaseMethod):
             --voxel_size {voxel_size} \
             --max_depth {max_depth} \
             --num_cluster {num_cluster} \
+            {depth_filter_flag} \
             --skip_test"""
 
         result = self.run_command(cmd)
@@ -206,11 +214,20 @@ class PGSRMethod(BaseMethod):
             return False
 
     def get_default_config(self) -> Dict[str, Any]:
-        """Get default PGSR configuration"""
+        """Get default PGSR configuration
+
+        For OpenMaterial's complex materials (conductors, dielectrics):
+        - max_abs_split_points=0: Disable absolute splitting for weakly textured scenes
+        - opacity_cull_threshold=0.05: Higher threshold to remove unreliable Gaussians
+        - use_depth_filter=True: Filter inaccurate depth points
+        """
         return {
             'iterations': 30000,
             'densify_abs_grad_threshold': 0.0002,
+            'max_abs_split_points': 0,
+            'opacity_cull_threshold': 0.05,
             'voxel_size': 0.004,
             'max_depth': 5.0,
             'num_cluster': 1,
+            'use_depth_filter': True,
         }
