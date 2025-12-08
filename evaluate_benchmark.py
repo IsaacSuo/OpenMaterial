@@ -10,6 +10,7 @@ Usage:
 import argparse
 import json
 import sys
+import subprocess
 from pathlib import Path
 from typing import Dict, List
 import torch
@@ -17,6 +18,109 @@ import trimesh
 from pytorch3d.structures import Meshes
 from pytorch3d.ops import sample_points_from_meshes
 from tqdm import tqdm
+
+
+def check_eval_environment() -> bool:
+    """
+    Check if evaluation environment exists and has required packages
+
+    Returns:
+        bool: True if environment is ready
+    """
+    env_name = "openmaterial_eval"
+
+    # Check if conda env exists
+    result = subprocess.run(
+        f"conda env list | grep {env_name}",
+        shell=True,
+        capture_output=True
+    )
+
+    if result.returncode != 0:
+        return False
+
+    # Check if required packages are installed
+    check_cmd = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh && \
+    conda activate {env_name} && \
+    python -c "import torch; import pytorch3d; import trimesh"
+    """
+    result = subprocess.run(check_cmd, shell=True, capture_output=True)
+
+    return result.returncode == 0
+
+
+def setup_eval_environment() -> bool:
+    """
+    Setup evaluation environment with PyTorch3D and dependencies
+
+    Returns:
+        bool: True if setup successful
+    """
+    env_name = "openmaterial_eval"
+
+    print(f"\nSetting up evaluation environment: {env_name}")
+    print("This may take a few minutes...")
+
+    # Create environment
+    print("Creating conda environment...")
+    result = subprocess.run(
+        f"conda create -n {env_name} python=3.10 -y",
+        shell=True,
+        capture_output=True,
+        text=True
+    )
+    if result.returncode != 0:
+        print(f"Failed to create environment: {result.stderr}")
+        return False
+
+    # Install PyTorch
+    print("Installing PyTorch...")
+    install_cmd = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh && \
+    conda activate {env_name} && \
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+    """
+    result = subprocess.run(install_cmd, shell=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Failed to install PyTorch: {result.stderr}")
+        return False
+
+    # Install PyTorch3D
+    print("Installing PyTorch3D...")
+    pytorch3d_cmd = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh && \
+    conda activate {env_name} && \
+    pip install pytorch3d -i https://pypi.tuna.tsinghua.edu.cn/simple
+    """
+    result = subprocess.run(pytorch3d_cmd, shell=True, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        print("PyPI installation failed, trying from source...")
+        pytorch3d_source = f"""
+        source $(conda info --base)/etc/profile.d/conda.sh && \
+        conda activate {env_name} && \
+        pip install "git+https://github.com/facebookresearch/pytorch3d.git"
+        """
+        result = subprocess.run(pytorch3d_source, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"Failed to install PyTorch3D: {result.stderr}")
+            return False
+
+    # Install other dependencies
+    print("Installing evaluation dependencies...")
+    deps_cmd = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh && \
+    conda activate {env_name} && \
+    pip install trimesh tqdm -i https://pypi.tuna.tsinghua.edu.cn/simple
+    """
+    result = subprocess.run(deps_cmd, shell=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Failed to install dependencies: {result.stderr}")
+        return False
+
+    print(f"✓ Evaluation environment '{env_name}' setup complete\n")
+    return True
 
 
 def load_mesh(file_path):
@@ -191,6 +295,30 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
 
 
 def main():
+    # Check and setup evaluation environment first
+    print("Checking evaluation environment...")
+    if not check_eval_environment():
+        print("\n" + "="*60)
+        print(" Evaluation Environment Not Found")
+        print("="*60)
+        print("\nThe evaluation requires a separate conda environment")
+        print("with PyTorch3D and dependencies.")
+        print("\nWould you like to set it up now? This will take a few minutes.")
+
+        response = input("\nSetup evaluation environment? (y/n): ")
+        if response.lower() != 'y':
+            print("\nPlease setup the environment manually:")
+            print("  conda create -n openmaterial_eval python=3.10")
+            print("  conda activate openmaterial_eval")
+            print("  pip install torch pytorch3d trimesh")
+            sys.exit(1)
+
+        if not setup_eval_environment():
+            print("\nFailed to setup evaluation environment")
+            sys.exit(1)
+    else:
+        print("✓ Evaluation environment ready\n")
+
     parser = argparse.ArgumentParser(description='Evaluate benchmark results')
 
     parser.add_argument('--method', type=str, default='all',
