@@ -61,18 +61,30 @@ def compute_chamfer_distance(pred_mesh_path: str, gt_mesh_path: str,
     pts_pr = sample_points_from_meshes(mesh_pr, num_samples=num_samples).squeeze()
     pts_gt = sample_points_from_meshes(mesh_gt, num_samples=num_samples).squeeze()
 
-    # Normalize both to unit sphere (matching official benchmark setup)
-    # Center both point clouds
+    # Normalize both to unit sphere
     pts_pr_center = pts_pr.mean(dim=0)
     pts_gt_center = pts_gt.mean(dim=0)
     pts_pr = pts_pr - pts_pr_center
     pts_gt = pts_gt - pts_gt_center
 
-    # Scale both to unit sphere (diameter = 2, radius = 1)
     pred_scale = pts_pr.abs().max()
     gt_scale = pts_gt.abs().max()
     pts_pr = pts_pr / pred_scale
     pts_gt = pts_gt / gt_scale
+
+    # Align pred to GT using Procrustes (scale + rotation)
+    # Use SVD to find optimal rotation
+    H = pts_pr.T @ pts_gt  # Cross-covariance
+    U, S, Vt = torch.linalg.svd(H)
+    R = Vt.T @ U.T
+
+    # Ensure proper rotation (det(R) = 1)
+    if torch.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+
+    # Apply rotation to pred
+    pts_pr = pts_pr @ R
 
     # Compute bidirectional nearest distances
     dist_gt = nearest_dist(pts_gt, pts_pr)
