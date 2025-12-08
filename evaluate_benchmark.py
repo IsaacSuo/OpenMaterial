@@ -13,11 +13,6 @@ import sys
 import subprocess
 from pathlib import Path
 from typing import Dict, List
-import torch
-import trimesh
-from pytorch3d.structures import Meshes
-from pytorch3d.ops import sample_points_from_meshes
-from tqdm import tqdm
 
 
 def check_eval_environment() -> bool:
@@ -125,6 +120,10 @@ def setup_eval_environment() -> bool:
 
 def load_mesh(file_path):
     """Load mesh file and convert to PyTorch3D format"""
+    import torch
+    import trimesh
+    from pytorch3d.structures import Meshes
+
     mesh = trimesh.load(file_path, process=False)
     verts = torch.tensor(mesh.vertices, dtype=torch.float32).cuda()
     faces = torch.tensor(mesh.faces, dtype=torch.int64).cuda()
@@ -133,6 +132,8 @@ def load_mesh(file_path):
 
 def nearest_dist(pts0, pts1, batch_size=512):
     """Compute nearest distance from pts0 to pts1"""
+    import torch
+
     pn0 = pts0.shape[0]
     dists = []
     for i in range(0, pn0, batch_size):
@@ -157,6 +158,9 @@ def compute_chamfer_distance(pred_mesh_path: str, gt_mesh_path: str,
     Returns:
         Chamfer distance in cm
     """
+    import torch
+    from pytorch3d.ops import sample_points_from_meshes
+
     # Load meshes
     mesh_pr = load_mesh(pred_mesh_path)
     mesh_gt = load_mesh(gt_mesh_path)
@@ -240,6 +244,8 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
     print(f" Evaluating {method}")
     print(f" Found {len(mesh_files)} meshes")
     print(f"{'='*60}\n")
+
+    from tqdm import tqdm
 
     for pred_mesh in tqdm(mesh_files, desc=f"Evaluating {method}"):
         # Extract scene info from path
@@ -334,6 +340,9 @@ def main():
                         help='Output JSON file for results')
 
     args = parser.parse_args()
+
+    # Import torch here to check CUDA after environment is verified
+    import torch
 
     # Check CUDA availability
     if not torch.cuda.is_available():
