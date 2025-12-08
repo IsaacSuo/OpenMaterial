@@ -165,9 +165,14 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
                 'error': str(e)
             })
 
-    # Compute mean
+    # Compute mean (ignoring nan values)
     if results['chamfer_distances']:
-        results['mean_chamfer'] = sum(results['chamfer_distances']) / len(results['chamfer_distances'])
+        import math
+        valid_distances = [d for d in results['chamfer_distances'] if not math.isnan(d)]
+        if valid_distances:
+            results['mean_chamfer'] = sum(valid_distances) / len(valid_distances)
+        results['valid_scenes'] = len(valid_distances)
+        results['nan_scenes'] = len(results['chamfer_distances']) - len(valid_distances)
 
     return results
 
