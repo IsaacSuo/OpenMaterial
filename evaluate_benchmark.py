@@ -149,13 +149,13 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
             results['scenes'].append({
                 'scene': scene_name,
                 'object': object_name,
-                'chamfer_distance_cm': float(chamfer),
+                'chamfer_distance': float(chamfer),
                 'pred_mesh': str(pred_mesh),
                 'gt_mesh': str(gt_mesh)
             })
             results['chamfer_distances'].append(float(chamfer))
 
-            print(f"{scene_name}: {chamfer:.4f} cm")
+            print(f"{scene_name}: {chamfer:.4f}")
 
         except Exception as e:
             print(f"Error evaluating {scene_name}: {e}")
@@ -226,10 +226,10 @@ def main():
         if 'error' in result:
             print(f"{result['method']}: {result['error']}")
         else:
-            num_scenes = len([s for s in result['scenes'] if 'chamfer_distance_cm' in s])
+            num_scenes = len([s for s in result['scenes'] if 'chamfer_distance' in s])
             print(f"{result['method']}:")
             print(f"  Scenes evaluated: {num_scenes}")
-            print(f"  Mean Chamfer Distance: {result['mean_chamfer']:.4f} cm")
+            print(f"  Mean Chamfer Distance: {result['mean_chamfer']:.4f} (normalized)")
 
     print(f"\nResults saved to: {output_path}")
 
