@@ -45,39 +45,60 @@ class PGSRMethod(BaseMethod):
                 return False
 
         # Install dependencies (including those in requirements.txt)
-        print("Installing dependencies...")
-        result = self.run_command(
-            "pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
+        print("Checking dependencies...")
+        check_deps = self.run_command(
+            "python -c \"import open3d; import plyfile; import lpips; import trimesh\" 2>/dev/null"
         )
-        if result.returncode != 0:
-            print(f"Failed to install base dependencies: {result.stderr}")
-            return False
-
-        # Install PyTorch3D (required for PGSR mesh processing)
-        print("Installing PyTorch3D...")
-        result = self.run_command(
-            "pip install pytorch3d -i https://pypi.tuna.tsinghua.edu.cn/simple"
-        )
-        if result.returncode != 0:
-            print(f"⚠ PyPI version failed, trying from source...")
+        if check_deps.returncode == 0:
+            print("✓ Dependencies already installed")
+        else:
+            print("Installing dependencies...")
             result = self.run_command(
-                'pip install "git+https://github.com/facebookresearch/pytorch3d.git"'
+                "pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
             )
             if result.returncode != 0:
-                print(f"Failed to install PyTorch3D: {result.stderr}")
+                print(f"Failed to install base dependencies: {result.stderr}")
                 return False
 
-        # Build CUDA extensions
-        print("Building CUDA extensions...")
-        result = self.run_command("pip install submodules/diff-plane-rasterization")
-        if result.returncode != 0:
-            print(f"Failed to build diff-plane-rasterization: {result.stderr}")
-            return False
+        # Install PyTorch3D (required for PGSR mesh processing)
+        print("Checking PyTorch3D...")
+        check_pytorch3d = self.run_command(
+            "python -c \"import pytorch3d; print(pytorch3d.__version__)\" 2>/dev/null"
+        )
+        if check_pytorch3d.returncode == 0:
+            print(f"✓ PyTorch3D already installed")
+        else:
+            print("Installing PyTorch3D...")
+            result = self.run_command(
+                "pip install pytorch3d -i https://pypi.tuna.tsinghua.edu.cn/simple"
+            )
+            if result.returncode != 0:
+                print(f"⚠ PyPI version failed, trying from source...")
+                result = self.run_command(
+                    'pip install "git+https://github.com/facebookresearch/pytorch3d.git"'
+                )
+                if result.returncode != 0:
+                    print(f"Failed to install PyTorch3D: {result.stderr}")
+                    return False
 
-        result = self.run_command("pip install submodules/simple-knn")
-        if result.returncode != 0:
-            print(f"Failed to build simple-knn: {result.stderr}")
-            return False
+        # Build CUDA extensions (check if already built)
+        print("Checking CUDA extensions...")
+        check_extensions = self.run_command(
+            "python -c \"import diff_plane_rasterization; import simple_knn\" 2>/dev/null"
+        )
+        if check_extensions.returncode == 0:
+            print("✓ CUDA extensions already built")
+        else:
+            print("Building CUDA extensions...")
+            result = self.run_command("pip install submodules/diff-plane-rasterization")
+            if result.returncode != 0:
+                print(f"Failed to build diff-plane-rasterization: {result.stderr}")
+                return False
+
+            result = self.run_command("pip install submodules/simple-knn")
+            if result.returncode != 0:
+                print(f"Failed to build simple-knn: {result.stderr}")
+                return False
 
         print("✓ PGSR setup complete")
         return True

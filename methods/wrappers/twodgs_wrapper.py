@@ -45,25 +45,40 @@ class TwoDGSMethod(BaseMethod):
                 return False
 
         # Install dependencies
-        result = self.run_command(
-            "pip install plyfile tqdm opencv-python mediapy open3d==0.18.0 lpips scikit-image trimesh "
-            "-i https://pypi.tuna.tsinghua.edu.cn/simple"
+        print("Checking dependencies...")
+        check_deps = self.run_command(
+            "python -c \"import plyfile; import open3d; import lpips; import trimesh\" 2>/dev/null"
         )
-        if result.returncode != 0:
-            print(f"Failed to install dependencies: {result.stderr}")
-            return False
+        if check_deps.returncode == 0:
+            print("✓ Dependencies already installed")
+        else:
+            print("Installing dependencies...")
+            result = self.run_command(
+                "pip install plyfile tqdm opencv-python mediapy open3d==0.18.0 lpips scikit-image trimesh "
+                "-i https://pypi.tuna.tsinghua.edu.cn/simple"
+            )
+            if result.returncode != 0:
+                print(f"Failed to install dependencies: {result.stderr}")
+                return False
 
-        # Build CUDA extensions
-        print("Building CUDA extensions...")
-        result = self.run_command("pip install submodules/diff-surfel-rasterization")
-        if result.returncode != 0:
-            print(f"Failed to build diff-surfel-rasterization: {result.stderr}")
-            return False
+        # Build CUDA extensions (check if already built)
+        print("Checking CUDA extensions...")
+        check_extensions = self.run_command(
+            "python -c \"import diff_surfel_rasterization; import simple_knn\" 2>/dev/null"
+        )
+        if check_extensions.returncode == 0:
+            print("✓ CUDA extensions already built")
+        else:
+            print("Building CUDA extensions...")
+            result = self.run_command("pip install submodules/diff-surfel-rasterization")
+            if result.returncode != 0:
+                print(f"Failed to build diff-surfel-rasterization: {result.stderr}")
+                return False
 
-        result = self.run_command("pip install submodules/simple-knn")
-        if result.returncode != 0:
-            print(f"Failed to build simple-knn: {result.stderr}")
-            return False
+            result = self.run_command("pip install submodules/simple-knn")
+            if result.returncode != 0:
+                print(f"Failed to build simple-knn: {result.stderr}")
+                return False
 
         print("✓ 2DGS setup complete")
         return True
