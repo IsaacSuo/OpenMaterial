@@ -27,6 +27,7 @@ import open3d as o3d
 from scene.app_model import AppModel
 import copy
 from collections import deque
+from pathlib import Path
 
 def clean_mesh(mesh, min_len=1000):
     with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Debug) as cm:
@@ -146,10 +147,20 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
 
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-        volume = o3d.pipelines.integration.ScalableTSDFVolume(
-            voxel_length=voxel_size,
-            sdf_trunc=4.0*voxel_size,
-            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8)
+
+        # Use GPU TSDF if available
+        try:
+            import sys
+            sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'methods'))
+            from utils.gpu_tsdf import create_tsdf_volume
+            volume = create_tsdf_volume(voxel_size=voxel_size, use_gpu=True)
+            print(f"✓ Using GPU-accelerated TSDF (voxel_size={voxel_size})")
+        except Exception as e:
+            print(f"GPU TSDF not available ({e}), using CPU fallback")
+            volume = o3d.pipelines.integration.ScalableTSDFVolume(
+                voxel_length=voxel_size,
+                sdf_trunc=4.0*voxel_size,
+                color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8)
 
         if not skip_train:
             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), scene, gaussians, pipeline, background, 

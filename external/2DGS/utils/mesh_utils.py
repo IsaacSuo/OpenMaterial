@@ -153,11 +153,21 @@ class GaussianExtractor(object):
         print(f'sdf_trunc: {sdf_trunc}')
         print(f'depth_truc: {depth_trunc}')
 
-        volume = o3d.pipelines.integration.ScalableTSDFVolume(
-            voxel_length= voxel_size,
-            sdf_trunc=sdf_trunc,
-            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
-        )
+        # Use GPU TSDF if available
+        try:
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'methods'))
+            from utils.gpu_tsdf import create_tsdf_volume
+            volume = create_tsdf_volume(voxel_size=voxel_size, use_gpu=True)
+            print(f"✓ Using GPU-accelerated TSDF (voxel_size={voxel_size})")
+        except Exception as e:
+            print(f"GPU TSDF not available ({e}), using CPU fallback")
+            volume = o3d.pipelines.integration.ScalableTSDFVolume(
+                voxel_length= voxel_size,
+                sdf_trunc=sdf_trunc,
+                color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+            )
 
         for i, cam_o3d in tqdm(enumerate(to_cam_open3d(self.viewpoint_stack)), desc="TSDF integration progress"):
             rgb = self.rgbmaps[i]
