@@ -135,9 +135,16 @@ class PGSRMethod(BaseMethod):
         config.update(kwargs)
 
         iterations = config.get('iterations', 30000)
-        densify_abs_grad_threshold = config.get('densify_abs_grad_threshold', 0.0002)
-        max_abs_split_points = config.get('max_abs_split_points', 0)
-        opacity_cull_threshold = config.get('opacity_cull_threshold', 0.05)
+        densify_abs_grad_threshold = config.get('densify_abs_grad_threshold', 0.0008)
+        max_abs_split_points = config.get('max_abs_split_points', 50000)
+        opacity_cull_threshold = config.get('opacity_cull_threshold', 0.005)
+
+        # Print actual parameters being used
+        print(f"PGSR Training Parameters:")
+        print(f"  iterations: {iterations}")
+        print(f"  densify_abs_grad_threshold: {densify_abs_grad_threshold}")
+        print(f"  max_abs_split_points: {max_abs_split_points}")
+        print(f"  opacity_cull_threshold: {opacity_cull_threshold}")
 
         # Use absolute paths since train.py runs in external/PGSR directory
         abs_data_path = Path(data_path).absolute()
