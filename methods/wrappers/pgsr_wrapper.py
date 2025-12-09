@@ -146,6 +146,7 @@ class PGSRMethod(BaseMethod):
         multi_view_geo_weight = config.get('multi_view_geo_weight', 0.2)
         multi_view_ncc_weight = config.get('multi_view_ncc_weight', 0.3)
         multi_view_weight_from_iter = config.get('multi_view_weight_from_iter', 1500)
+        multi_view_sample_num = config.get('multi_view_sample_num', 51200)
         multi_view_pixel_noise_th = config.get('multi_view_pixel_noise_th', 1.0)
 
         # Print actual parameters being used
@@ -160,6 +161,7 @@ class PGSRMethod(BaseMethod):
         print(f"  multi_view_geo_weight: {multi_view_geo_weight}")
         print(f"  multi_view_ncc_weight: {multi_view_ncc_weight}")
         print(f"  multi_view_weight_from_iter: {multi_view_weight_from_iter}")
+        print(f"  multi_view_sample_num: {multi_view_sample_num}")
         print(f"  multi_view_pixel_noise_th: {multi_view_pixel_noise_th}")
 
         # Use absolute paths since train.py runs in external/PGSR directory
@@ -180,6 +182,7 @@ class PGSRMethod(BaseMethod):
             --multi_view_geo_weight {multi_view_geo_weight} \
             --multi_view_ncc_weight {multi_view_ncc_weight} \
             --multi_view_weight_from_iter {multi_view_weight_from_iter} \
+            --multi_view_sample_num {multi_view_sample_num} \
             --multi_view_pixel_noise_th {multi_view_pixel_noise_th} \
             --eval \
             --white_background"""
@@ -282,6 +285,7 @@ class PGSRMethod(BaseMethod):
             'multi_view_geo_weight': 0.2,  # Multi-view geometry constraint (original: 0.03)
             'multi_view_ncc_weight': 0.3,  # Multi-view photometric constraint (original: 0.15)
             'multi_view_weight_from_iter': 1500,  # Enable early (original: 7000)
+            'multi_view_sample_num': 51200,  # Sample points for geometry constraint (original: 102400, reduced to save memory)
             'multi_view_pixel_noise_th': 1.0,  # Pixel noise threshold
             # Mesh extraction parameters
             'voxel_size': 0.004,
