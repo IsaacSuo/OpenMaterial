@@ -76,12 +76,12 @@ def setup_eval_environment() -> bool:
         print(f"Failed to create environment: {result.stderr}")
         return False
 
-    # Install PyTorch
+    # Install PyTorch (use CUDA 12.1 to match system CUDA)
     print("Installing PyTorch...")
     install_cmd = f"""
     source $(conda info --base)/etc/profile.d/conda.sh && \
     conda activate {env_name} && \
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+    pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
     """
     result = subprocess.run(
         install_cmd,
@@ -94,70 +94,28 @@ def setup_eval_environment() -> bool:
         print(f"Failed to install PyTorch: {result.stderr}")
         return False
 
-    # Install PyTorch3D
-    print("Installing PyTorch3D...")
-
-    # Method 1: Try prebuilt wheel from PyPI first (fastest)
-    print("Trying PyPI wheel...")
-    pytorch3d_pip = f"""
+    # Install PyTorch3D (build from source with --no-build-isolation for CUDA 12.1)
+    print("Installing PyTorch3D from source...")
+    pytorch3d_cmd = f"""
     source $(conda info --base)/etc/profile.d/conda.sh && \
     conda activate {env_name} && \
-    pip install pytorch3d
+    pip install --no-build-isolation 'git+https://github.com/facebookresearch/pytorch3d.git'
     """
     result = subprocess.run(
-        pytorch3d_pip,
+        pytorch3d_cmd,
         shell=True,
         executable='/bin/bash',
         capture_output=True,
         text=True
     )
 
-    # Method 2: If PyPI fails, build from source with --no-build-isolation
     if result.returncode != 0:
-        print("PyPI installation failed, building from source...")
-        print("Installing build dependencies first...")
-
-        # Install build dependencies
-        build_deps_cmd = f"""
-        source $(conda info --base)/etc/profile.d/conda.sh && \
-        conda activate {env_name} && \
-        pip install ninja 'fvcore>=0.1.5'
-        """
-        result = subprocess.run(
-            build_deps_cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode != 0:
-            print(f"Warning: Failed to install build dependencies: {result.stderr}")
-
-        # Build from source with --no-build-isolation
-        pytorch3d_source = f"""
-        source $(conda info --base)/etc/profile.d/conda.sh && \
-        conda activate {env_name} && \
-        pip install --no-build-isolation 'git+https://github.com/facebookresearch/pytorch3d.git'
-        """
-        result = subprocess.run(
-            pytorch3d_source,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode != 0:
-            print(f"Failed to install PyTorch3D from source: {result.stderr}")
-            print("\nPlease install PyTorch3D manually:")
-            print("  conda activate openmaterial_eval")
-            print("  pip install pytorch3d")
-            print("  # Or build from source:")
-            print("  pip install ninja 'fvcore>=0.1.5'")
-            print("  pip install --no-build-isolation 'git+https://github.com/facebookresearch/pytorch3d.git'")
-            print("\nThen run the evaluation script again.")
-            return False
+        print(f"Failed to install PyTorch3D: {result.stderr}")
+        print("\nPlease install PyTorch3D manually:")
+        print("  conda activate openmaterial_eval")
+        print("  pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121")
+        print("  pip install --no-build-isolation 'git+https://github.com/facebookresearch/pytorch3d.git'")
+        return False
 
     # Install other dependencies
     print("Installing evaluation dependencies...")
