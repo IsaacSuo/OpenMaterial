@@ -63,59 +63,102 @@ def setup_eval_environment() -> bool:
     print(f"\nSetting up evaluation environment: {env_name}")
     print("This may take a few minutes...")
 
-    # Create environment
-    print("Creating conda environment...")
-    result = subprocess.run(
-        f"conda create -n {env_name} python=3.10 -y",
+    # Check if environment exists
+    check_env = subprocess.run(
+        f"conda env list | grep {env_name}",
         shell=True,
         executable='/bin/bash',
-        capture_output=True,
-        text=True
+        capture_output=True
     )
-    if result.returncode != 0:
-        print(f"Failed to create environment: {result.stderr}")
-        return False
 
-    # Install PyTorch (use CUDA 12.1 to match system CUDA)
-    print("Installing PyTorch...")
-    install_cmd = f"""
-    source $(conda info --base)/etc/profile.d/conda.sh && \
-    conda activate {env_name} && \
-    pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
-    """
-    result = subprocess.run(
-        install_cmd,
-        shell=True,
-        executable='/bin/bash',
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        print(f"Failed to install PyTorch: {result.stderr}")
-        return False
+    # Create environment only if it doesn't exist
+    if check_env.returncode != 0:
+        print("Creating conda environment...")
+        result = subprocess.run(
+            f"conda create -n {env_name} python=3.10 -y",
+            shell=True,
+            executable='/bin/bash',
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            print(f"Failed to create environment: {result.stderr}")
+            return False
+    else:
+        print(f"✓ Conda environment '{env_name}' already exists")
 
-    # Install PyTorch3D (build from source with --no-build-isolation for CUDA 12.1)
-    print("Installing PyTorch3D from source...")
-    pytorch3d_cmd = f"""
-    source $(conda info --base)/etc/profile.d/conda.sh && \
-    conda activate {env_name} && \
-    pip install --no-build-isolation 'git+https://github.com/facebookresearch/pytorch3d.git'
-    """
-    result = subprocess.run(
-        pytorch3d_cmd,
+    # Install PyTorch (check if already installed)
+    print("Checking PyTorch...")
+    check_torch = subprocess.run(
+        f"""
+        source $(conda info --base)/etc/profile.d/conda.sh && \
+        conda activate {env_name} && \
+        python -c "import torch; print(torch.__version__)" 2>/dev/null
+        """,
         shell=True,
         executable='/bin/bash',
         capture_output=True,
         text=True
     )
 
-    if result.returncode != 0:
-        print(f"Failed to install PyTorch3D: {result.stderr}")
-        print("\nPlease install PyTorch3D manually:")
-        print("  conda activate openmaterial_eval")
-        print("  pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121")
-        print("  pip install --no-build-isolation 'git+https://github.com/facebookresearch/pytorch3d.git'")
-        return False
+    if check_torch.returncode == 0 and "2.3.1" in check_torch.stdout:
+        print(f"✓ PyTorch 2.3.1 already installed")
+    else:
+        print("Installing PyTorch 2.3.1 (CUDA 12.1)...")
+        install_cmd = f"""
+        source $(conda info --base)/etc/profile.d/conda.sh && \
+        conda activate {env_name} && \
+        pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+        """
+        result = subprocess.run(
+            install_cmd,
+            shell=True,
+            executable='/bin/bash',
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            print(f"Failed to install PyTorch: {result.stderr}")
+            return False
+
+    # Install PyTorch3D (check if already installed)
+    print("Checking PyTorch3D...")
+    check_pytorch3d = subprocess.run(
+        f"""
+        source $(conda info --base)/etc/profile.d/conda.sh && \
+        conda activate {env_name} && \
+        python -c "import pytorch3d; print(pytorch3d.__version__)" 2>/dev/null
+        """,
+        shell=True,
+        executable='/bin/bash',
+        capture_output=True,
+        text=True
+    )
+
+    if check_pytorch3d.returncode == 0:
+        print(f"✓ PyTorch3D already installed")
+    else:
+        print("Installing PyTorch3D from source (this may take several minutes)...")
+        pytorch3d_cmd = f"""
+        source $(conda info --base)/etc/profile.d/conda.sh && \
+        conda activate {env_name} && \
+        pip install --no-build-isolation 'git+https://github.com/facebookresearch/pytorch3d.git'
+        """
+        result = subprocess.run(
+            pytorch3d_cmd,
+            shell=True,
+            executable='/bin/bash',
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            print(f"Failed to install PyTorch3D: {result.stderr}")
+            print("\nPlease install PyTorch3D manually:")
+            print("  conda activate openmaterial_eval")
+            print("  pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121")
+            print("  pip install --no-build-isolation 'git+https://github.com/facebookresearch/pytorch3d.git'")
+            return False
 
     # Install other dependencies
     print("Installing evaluation dependencies...")
