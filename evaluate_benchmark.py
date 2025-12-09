@@ -96,13 +96,16 @@ def setup_eval_environment() -> bool:
 
     # Install PyTorch3D
     print("Installing PyTorch3D...")
-    pytorch3d_cmd = f"""
+
+    # Try conda-forge first (most reliable)
+    print("Trying conda-forge...")
+    pytorch3d_conda = f"""
     source $(conda info --base)/etc/profile.d/conda.sh && \
     conda activate {env_name} && \
-    pip install pytorch3d -i https://pypi.tuna.tsinghua.edu.cn/simple
+    conda install -c conda-forge pytorch3d -y
     """
     result = subprocess.run(
-        pytorch3d_cmd,
+        pytorch3d_conda,
         shell=True,
         executable='/bin/bash',
         capture_output=True,
@@ -110,21 +113,33 @@ def setup_eval_environment() -> bool:
     )
 
     if result.returncode != 0:
-        print("PyPI installation failed, trying from source...")
-        pytorch3d_source = f"""
+        print("conda-forge installation failed, trying PyPI...")
+        pytorch3d_cmd = f"""
         source $(conda info --base)/etc/profile.d/conda.sh && \
         conda activate {env_name} && \
-        pip install "git+https://github.com/facebookresearch/pytorch3d.git"
+        pip install pytorch3d -i https://pypi.tuna.tsinghua.edu.cn/simple
         """
         result = subprocess.run(
-            pytorch3d_source,
+            pytorch3d_cmd,
             shell=True,
             executable='/bin/bash',
             capture_output=True,
             text=True
         )
+
         if result.returncode != 0:
-            print(f"Failed to install PyTorch3D: {result.stderr}")
+            print("\n" + "="*60)
+            print(" PyTorch3D Installation Failed")
+            print("="*60)
+            print("\nPlease install PyTorch3D manually:")
+            print("\n  conda activate openmaterial_eval")
+            print("  # Try one of these:")
+            print("  conda install -c conda-forge pytorch3d")
+            print("  # or")
+            print("  pip install pytorch3d")
+            print("  # or (if you have good network)")
+            print('  pip install "git+https://github.com/facebookresearch/pytorch3d.git"')
+            print("\nAfter installation, run the evaluation script again.\n")
             return False
 
     # Install other dependencies
