@@ -96,26 +96,45 @@ def setup_eval_environment() -> bool:
 
     # Install PyTorch3D
     print("Installing PyTorch3D...")
-    pytorch3d_cmd = f"""
+
+    # Method 1: Try prebuilt wheel from PyPI first (fastest)
+    print("Trying PyPI wheel...")
+    pytorch3d_pip = f"""
     source $(conda info --base)/etc/profile.d/conda.sh && \
     conda activate {env_name} && \
-    git clone https://github.com/facebookresearch/pytorch3d.git /tmp/pytorch3d_tmp && \
-    cd /tmp/pytorch3d_tmp && \
-    pip install -e . && \
-    cd - && \
-    rm -rf /tmp/pytorch3d_tmp
+    pip install pytorch3d
     """
     result = subprocess.run(
-        pytorch3d_cmd,
+        pytorch3d_pip,
         shell=True,
         executable='/bin/bash',
         capture_output=True,
         text=True
     )
 
+    # Method 2: If PyPI fails, build from source
     if result.returncode != 0:
-        print(f"Failed to install PyTorch3D: {result.stderr}")
-        return False
+        print("PyPI installation failed, building from source...")
+        pytorch3d_source = f"""
+        source $(conda info --base)/etc/profile.d/conda.sh && \
+        conda activate {env_name} && \
+        pip install 'git+https://github.com/facebookresearch/pytorch3d.git'
+        """
+        result = subprocess.run(
+            pytorch3d_source,
+            shell=True,
+            executable='/bin/bash',
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            print(f"Failed to install PyTorch3D: {result.stderr}")
+            print("\nPlease install PyTorch3D manually:")
+            print("  conda activate openmaterial_eval")
+            print("  pip install pytorch3d")
+            print("Then run the evaluation script again.")
+            return False
 
     # Install other dependencies
     print("Installing evaluation dependencies...")
