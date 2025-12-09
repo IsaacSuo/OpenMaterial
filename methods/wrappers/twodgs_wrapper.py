@@ -130,6 +130,16 @@ class TwoDGSMethod(BaseMethod):
         lambda_dist = config.get('lambda_dist', 0.0)
         depth_ratio = config.get('depth_ratio', 0)
 
+        # Memory optimization parameters
+        densify_until_iter = config.get('densify_until_iter', 12000)
+        densify_grad_threshold = config.get('densify_grad_threshold', 0.0003)
+
+        # Print actual parameters being used
+        print(f"2DGS Training Parameters:")
+        print(f"  iterations: {iterations}")
+        print(f"  densify_until_iter: {densify_until_iter}")
+        print(f"  densify_grad_threshold: {densify_grad_threshold}")
+
         # Use absolute paths since train.py runs in external/2DGS directory
         abs_data_path = Path(data_path).absolute()
         abs_output_path = Path(output_path).absolute()
@@ -142,6 +152,8 @@ class TwoDGSMethod(BaseMethod):
             --lambda_normal {lambda_normal} \
             --lambda_dist {lambda_dist} \
             --depth_ratio {depth_ratio} \
+            --densify_until_iter {densify_until_iter} \
+            --densify_grad_threshold {densify_grad_threshold} \
             --eval \
             --white_background"""
 
@@ -225,11 +237,17 @@ class TwoDGSMethod(BaseMethod):
             return False
 
     def get_default_config(self) -> Dict[str, Any]:
-        """Get default 2DGS configuration"""
+        """Get default 2DGS configuration
+
+        Memory optimization: reduce densification to prevent OOM
+        """
         return {
             'iterations': 30000,
             'lambda_normal': 0.0,
             'lambda_dist': 0.0,
             'depth_ratio': 0,
             'mesh_res': 1024,
+            # Memory optimization parameters
+            'densify_until_iter': 12000,  # Stop densification earlier (original: 15000)
+            'densify_grad_threshold': 0.0003,  # Higher threshold = fewer splits (original: 0.0002)
         }
