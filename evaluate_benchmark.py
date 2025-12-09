@@ -96,16 +96,17 @@ def setup_eval_environment() -> bool:
 
     # Install PyTorch3D
     print("Installing PyTorch3D...")
-
-    # Try conda-forge first (most reliable)
-    print("Trying conda-forge...")
-    pytorch3d_conda = f"""
+    pytorch3d_cmd = f"""
     source $(conda info --base)/etc/profile.d/conda.sh && \
     conda activate {env_name} && \
-    conda install -c conda-forge pytorch3d -y
+    git clone https://github.com/facebookresearch/pytorch3d.git /tmp/pytorch3d_tmp && \
+    cd /tmp/pytorch3d_tmp && \
+    pip install -e . && \
+    cd - && \
+    rm -rf /tmp/pytorch3d_tmp
     """
     result = subprocess.run(
-        pytorch3d_conda,
+        pytorch3d_cmd,
         shell=True,
         executable='/bin/bash',
         capture_output=True,
@@ -113,34 +114,8 @@ def setup_eval_environment() -> bool:
     )
 
     if result.returncode != 0:
-        print("conda-forge installation failed, trying PyPI...")
-        pytorch3d_cmd = f"""
-        source $(conda info --base)/etc/profile.d/conda.sh && \
-        conda activate {env_name} && \
-        pip install pytorch3d -i https://pypi.tuna.tsinghua.edu.cn/simple
-        """
-        result = subprocess.run(
-            pytorch3d_cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode != 0:
-            print("\n" + "="*60)
-            print(" PyTorch3D Installation Failed")
-            print("="*60)
-            print("\nPlease install PyTorch3D manually:")
-            print("\n  conda activate openmaterial_eval")
-            print("  # Try one of these:")
-            print("  conda install -c conda-forge pytorch3d")
-            print("  # or")
-            print("  pip install pytorch3d")
-            print("  # or (if you have good network)")
-            print('  pip install "git+https://github.com/facebookresearch/pytorch3d.git"')
-            print("\nAfter installation, run the evaluation script again.\n")
-            return False
+        print(f"Failed to install PyTorch3D: {result.stderr}")
+        return False
 
     # Install other dependencies
     print("Installing evaluation dependencies...")
