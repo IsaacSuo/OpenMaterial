@@ -139,12 +139,28 @@ class PGSRMethod(BaseMethod):
         max_abs_split_points = config.get('max_abs_split_points', 50000)
         opacity_cull_threshold = config.get('opacity_cull_threshold', 0.005)
 
+        # Geometry constraint parameters
+        scale_loss_weight = config.get('scale_loss_weight', 150.0)
+        single_view_weight = config.get('single_view_weight', 0.1)
+        single_view_weight_from_iter = config.get('single_view_weight_from_iter', 1000)
+        multi_view_geo_weight = config.get('multi_view_geo_weight', 0.2)
+        multi_view_ncc_weight = config.get('multi_view_ncc_weight', 0.3)
+        multi_view_weight_from_iter = config.get('multi_view_weight_from_iter', 1500)
+        multi_view_pixel_noise_th = config.get('multi_view_pixel_noise_th', 1.0)
+
         # Print actual parameters being used
         print(f"PGSR Training Parameters:")
         print(f"  iterations: {iterations}")
         print(f"  densify_abs_grad_threshold: {densify_abs_grad_threshold}")
         print(f"  max_abs_split_points: {max_abs_split_points}")
         print(f"  opacity_cull_threshold: {opacity_cull_threshold}")
+        print(f"  scale_loss_weight: {scale_loss_weight}")
+        print(f"  single_view_weight: {single_view_weight}")
+        print(f"  single_view_weight_from_iter: {single_view_weight_from_iter}")
+        print(f"  multi_view_geo_weight: {multi_view_geo_weight}")
+        print(f"  multi_view_ncc_weight: {multi_view_ncc_weight}")
+        print(f"  multi_view_weight_from_iter: {multi_view_weight_from_iter}")
+        print(f"  multi_view_pixel_noise_th: {multi_view_pixel_noise_th}")
 
         # Use absolute paths since train.py runs in external/PGSR directory
         abs_data_path = Path(data_path).absolute()
@@ -158,6 +174,13 @@ class PGSRMethod(BaseMethod):
             --densify_abs_grad_threshold {densify_abs_grad_threshold} \
             --max_abs_split_points {max_abs_split_points} \
             --opacity_cull_threshold {opacity_cull_threshold} \
+            --scale_loss_weight {scale_loss_weight} \
+            --single_view_weight {single_view_weight} \
+            --single_view_weight_from_iter {single_view_weight_from_iter} \
+            --multi_view_geo_weight {multi_view_geo_weight} \
+            --multi_view_ncc_weight {multi_view_ncc_weight} \
+            --multi_view_weight_from_iter {multi_view_weight_from_iter} \
+            --multi_view_pixel_noise_th {multi_view_pixel_noise_th} \
             --eval \
             --white_background"""
 
@@ -245,12 +268,22 @@ class PGSRMethod(BaseMethod):
         """Get default PGSR configuration
 
         Note: use_depth_filter is disabled due to incorrect ray direction in world space
+        Enhanced geometry constraints for better depth quality
         """
         return {
             'iterations': 30000,
             'densify_abs_grad_threshold': 0.0008,
             'max_abs_split_points': 50000,
             'opacity_cull_threshold': 0.005,
+            # Geometry constraint parameters (enhanced for OpenMaterial)
+            'scale_loss_weight': 150.0,  # Force Gaussians to be flat (original: 100.0)
+            'single_view_weight': 0.1,  # Single-view normal constraint (original: 0.015)
+            'single_view_weight_from_iter': 1000,  # Enable early (original: 7000)
+            'multi_view_geo_weight': 0.2,  # Multi-view geometry constraint (original: 0.03)
+            'multi_view_ncc_weight': 0.3,  # Multi-view photometric constraint (original: 0.15)
+            'multi_view_weight_from_iter': 1500,  # Enable early (original: 7000)
+            'multi_view_pixel_noise_th': 1.0,  # Pixel noise threshold
+            # Mesh extraction parameters
             'voxel_size': 0.004,
             'max_depth': 5.0,
             'num_cluster': 1,
