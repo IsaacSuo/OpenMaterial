@@ -216,18 +216,15 @@ class PGSRMethod(BaseMethod):
     def get_default_config(self) -> Dict[str, Any]:
         """Get default PGSR configuration
 
-        For OpenMaterial's complex materials (conductors, dielectrics):
-        - max_abs_split_points=0: Disable absolute splitting for weakly textured scenes
-        - opacity_cull_threshold=0.05: Higher threshold to remove unreliable Gaussians
-        - use_depth_filter=True: Filter inaccurate depth points
+        Note: use_depth_filter is disabled due to incorrect ray direction in world space
         """
         return {
             'iterations': 30000,
-            'densify_abs_grad_threshold': 0.0002,
-            'max_abs_split_points': 0,
-            'opacity_cull_threshold': 0.05,
+            'densify_abs_grad_threshold': 0.0008,
+            'max_abs_split_points': 50000,
+            'opacity_cull_threshold': 0.005,
             'voxel_size': 0.004,
             'max_depth': 5.0,
             'num_cluster': 1,
-            'use_depth_filter': True,
+            'use_depth_filter': False,  # Disabled: get_rays() returns camera-space rays, not world-space
         }
