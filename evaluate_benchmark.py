@@ -275,7 +275,8 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
         'method': method,
         'scenes': [],
         'chamfer_distances': [],
-        'mean_chamfer': 0.0
+        'mean_chamfer': 0.0,
+        'by_material': {}  # Per-material statistics
     }
 
     # Find all generated meshes
@@ -294,6 +295,13 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
         object_name = pred_mesh.parent.name
         scene_name = pred_mesh.stem
 
+        # Extract material from scene name (format: environment-material)
+        # e.g., "symmetrical_garden_4k-plastic" -> material = "plastic"
+        if '-' in scene_name:
+            material = scene_name.split('-')[-1]
+        else:
+            material = 'unknown'
+
         # Find ground truth mesh
         gt_mesh = Path(gt_dir) / object_name / f"clean_{object_name}.ply"
 
@@ -302,6 +310,7 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
             results['scenes'].append({
                 'scene': scene_name,
                 'object': object_name,
+                'material': material,
                 'error': 'Ground truth not found'
             })
             continue
@@ -313,19 +322,31 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
             results['scenes'].append({
                 'scene': scene_name,
                 'object': object_name,
+                'material': material,
                 'chamfer_distance_cm': float(chamfer),
                 'pred_mesh': str(pred_mesh),
                 'gt_mesh': str(gt_mesh)
             })
             results['chamfer_distances'].append(float(chamfer))
 
-            print(f"{scene_name}: {chamfer:.5f} cm")
+            # Add to per-material statistics
+            if material not in results['by_material']:
+                results['by_material'][material] = {
+                    'chamfer_distances': [],
+                    'count': 0,
+                    'mean_chamfer': 0.0
+                }
+            results['by_material'][material]['chamfer_distances'].append(float(chamfer))
+            results['by_material'][material]['count'] += 1
+
+            print(f"{scene_name} ({material}): {chamfer:.5f} cm")
 
         except Exception as e:
             print(f"Error evaluating {scene_name}: {e}")
             results['scenes'].append({
                 'scene': scene_name,
                 'object': object_name,
+                'material': material,
                 'error': str(e)
             })
 
@@ -337,6 +358,16 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
             results['mean_chamfer'] = sum(valid_distances) / len(valid_distances)
         results['valid_scenes'] = len(valid_distances)
         results['nan_scenes'] = len(results['chamfer_distances']) - len(valid_distances)
+
+    # Compute per-material means
+    for material, mat_data in results['by_material'].items():
+        if mat_data['chamfer_distances']:
+            import math
+            valid_dists = [d for d in mat_data['chamfer_distances'] if not math.isnan(d)]
+            if valid_dists:
+                mat_data['mean_chamfer'] = sum(valid_dists) / len(valid_dists)
+                mat_data['valid_count'] = len(valid_dists)
+                mat_data['nan_count'] = len(mat_data['chamfer_distances']) - len(valid_dists)
 
     return results
 
@@ -418,11 +449,22 @@ def main():
             print(f"{result['method']}: {result['error']}")
         else:
             num_scenes = len([s for s in result['scenes'] if 'chamfer_distance_cm' in s])
-            print(f"{result['method']}:")
-            print(f"  Scenes evaluated: {num_scenes}")
-            print(f"  Mean Chamfer Distance: {result['mean_chamfer']:.5f} cm")
+            print(f"\n{result['method']}:")
+            print(f"  Total scenes evaluated: {num_scenes}")
+            print(f"  Overall Mean Chamfer Distance: {result['mean_chamfer']:.5f} cm")
 
-    print(f"\nResults saved to: {output_path}")
+            # Print per-material statistics
+            if result.get('by_material'):
+                print(f"\n  Per-Material Results:")
+                # Sort materials for consistent output
+                sorted_materials = sorted(result['by_material'].items())
+                for material, mat_data in sorted_materials:
+                    if 'mean_chamfer' in mat_data:
+                        print(f"    {material:20s}: {mat_data['mean_chamfer']:.5f} cm ({mat_data.get('valid_count', 0)} scenes)")
+
+    print(f"\n{'='*60}")
+    print(f"Results saved to: {output_path}")
+    print(f"{'='*60}\n")
 
 
 if __name__ == '__main__':
