@@ -175,7 +175,7 @@ def run_grid_search(test_scene, output_dir):
     voxel_size_values = [0.003, 0.004, 0.005, 0.006]
 
     dataset_dir = "/opt/data/private/dataset/OpenMaterial_ablation"
-    gt_dir = "/opt/data/private/dataset/OpenMaterial_groundtruth"
+    gt_dir = "/opt/data/private/dataset/OpenMaterial_ablation/groundtruth_ablation"
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
