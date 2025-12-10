@@ -276,36 +276,35 @@ class PGSRMethod(BaseMethod):
     def get_default_config(self) -> Dict[str, Any]:
         """Get default PGSR configuration
 
-        Strategy: Squeeze tactics to kill near-field artifact shell
-        1. Frequent reset: Give center points chance to emerge (opacity_reset_interval)
-        2. Squeeze tactics: Penalize large shells (high scale_loss_weight)
-        3. Support policy: Lower threshold for center point splitting (lower densify_grad_threshold)
-        4. Visual penetration: High tolerance for MVS to see through shell (high multi_view_pixel_noise_th)
+        Strategy: Extreme strict standards - only perfection survives
+        1. Extreme multi-view constraint: 1-pixel tolerance only
+        2. Frequent reset: Keep giving center points chance to emerge
+        3. High survival threshold: Kill weak candidates early
         """
         return {
             'iterations': 30000,
 
-            # 1. Frequent Reset - Give center points chance to emerge
-            'opacity_reset_interval': 3000,  # Keep default, reset every 3000 iter
-
-            # 2. Squeeze Tactics - Penalize large shells
-            'densify_abs_grad_threshold': 0.0008,  # High threshold - prevent noisy splitting
-            'max_abs_split_points': 50000,
-            'opacity_cull_threshold': 0.05,  # Extremely high! Kill all semi-transparent points
-            'scale_loss_weight': 300.0,  # High pressure on large gaussians
-
-            # 3. Support Policy - Lower threshold for center point splitting
-            'densify_grad_threshold': 0.00015,  # Lower threshold, encourage internal growth
-
-            # 4. Visual Penetration - MVS must see through shell to find interior
-            'multi_view_pixel_noise_th': 10.0,  # Critical! Must be tolerant or MVS stops at shell
-            'multi_view_ncc_weight': 0.4,  # High NCC - confirm interior is the true surface
+            # 1. Extreme Multi-View Constraint - Wrong by 1 pixel = death
+            'multi_view_pixel_noise_th': 1.0,  # Extremely strict! No tolerance for error
+            'multi_view_ncc_weight': 0.4,  # High NCC for texture consistency
             'multi_view_geo_weight': 0.1,  # Multi-view geometry constraint
             'multi_view_weight_from_iter': 2500,  # Enable after RGB convergence
             'multi_view_sample_num': 51200,  # Sample points for geometry constraint
 
+            # 2. Frequent Reset - Give center points chance to emerge
+            'opacity_reset_interval': 3000,  # Keep default, reset every 3000 iter
+
+            # 3. High Survival Threshold - Kill weak candidates
+            'densify_abs_grad_threshold': 0.0008,  # High threshold - prevent noisy splitting
+            'densify_grad_threshold': 0.00015,  # Lower threshold, encourage internal growth
+            'max_abs_split_points': 50000,
+            'opacity_cull_threshold': 0.05,  # High survival bar! Kill all semi-transparent
+
+            # Planar constraint
+            'scale_loss_weight': 300.0,  # Force Gaussians to be large and flat
+
             # Auxiliary smoothing (keep low to avoid circular learning)
-            'single_view_weight': 0.005,  # Single-view normal constraint as auxiliary smoothing
+            'single_view_weight': 0.005,  # Single-view normal constraint as auxiliary
             'single_view_weight_from_iter': 2500,  # Enable after RGB convergence
 
             # Mesh extraction parameters
