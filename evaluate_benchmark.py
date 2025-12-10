@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import subprocess
 from pathlib import Path
@@ -318,7 +319,6 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
             clean_cmd = f"""
             source $(conda info --base)/etc/profile.d/conda.sh && \
             conda activate openmaterial_eval && \
-            export DRJIT_LIBOPTIX=0 && \
             cd Openmaterial-main && \
             python eval/clean_mesh.py \
                 --dataset_dir {Path(dataset_dir).absolute()} \
@@ -328,12 +328,17 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
                 --object_name {object_name}
             """
 
+            # Set environment variables for subprocess
+            env = os.environ.copy()
+            env['DRJIT_LIBOPTIX'] = '0'
+
             result = subprocess.run(
                 clean_cmd,
                 shell=True,
                 executable='/bin/bash',
                 capture_output=True,
-                text=True
+                text=True,
+                env=env
             )
 
             if result.returncode != 0:
