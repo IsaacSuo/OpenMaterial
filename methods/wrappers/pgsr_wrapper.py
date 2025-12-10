@@ -136,8 +136,10 @@ class PGSRMethod(BaseMethod):
 
         iterations = config.get('iterations', 30000)
         densify_abs_grad_threshold = config.get('densify_abs_grad_threshold', 0.0008)
+        densify_grad_threshold = config.get('densify_grad_threshold', 0.0002)
         max_abs_split_points = config.get('max_abs_split_points', 50000)
         opacity_cull_threshold = config.get('opacity_cull_threshold', 0.005)
+        opacity_reset_interval = config.get('opacity_reset_interval', 3000)
 
         # Geometry constraint parameters
         scale_loss_weight = config.get('scale_loss_weight', 150.0)
@@ -152,9 +154,11 @@ class PGSRMethod(BaseMethod):
         # Print actual parameters being used
         print(f"PGSR Training Parameters:")
         print(f"  iterations: {iterations}")
+        print(f"  densify_grad_threshold: {densify_grad_threshold}")
         print(f"  densify_abs_grad_threshold: {densify_abs_grad_threshold}")
         print(f"  max_abs_split_points: {max_abs_split_points}")
         print(f"  opacity_cull_threshold: {opacity_cull_threshold}")
+        print(f"  opacity_reset_interval: {opacity_reset_interval}")
         print(f"  scale_loss_weight: {scale_loss_weight}")
         print(f"  single_view_weight: {single_view_weight}")
         print(f"  single_view_weight_from_iter: {single_view_weight_from_iter}")
@@ -173,9 +177,11 @@ class PGSRMethod(BaseMethod):
             -m {abs_output_path} \
             -r 1 \
             --iterations {iterations} \
+            --densify_grad_threshold {densify_grad_threshold} \
             --densify_abs_grad_threshold {densify_abs_grad_threshold} \
             --max_abs_split_points {max_abs_split_points} \
             --opacity_cull_threshold {opacity_cull_threshold} \
+            --opacity_reset_interval {opacity_reset_interval} \
             --scale_loss_weight {scale_loss_weight} \
             --single_view_weight {single_view_weight} \
             --single_view_weight_from_iter {single_view_weight_from_iter} \
@@ -270,29 +276,33 @@ class PGSRMethod(BaseMethod):
     def get_default_config(self) -> Dict[str, Any]:
         """Get default PGSR configuration
 
-        Strategy: Brutal pruning + Wide geometric guidance + Strong planar constraint
-        - High opacity threshold: Kill volumetric fog, keep only surfaces
-        - High densify threshold: Prevent noisy point splitting
-        - Wide pixel noise tolerance: Allow random initialization to find surfaces
-        - Strong NCC weight: Only signal to distinguish surface from interior
-        - Very high scale loss: Force survivors to be large and flat
+        Strategy: Squeeze tactics to kill near-field artifact shell
+        1. Frequent reset: Give center points chance to emerge (opacity_reset_interval)
+        2. Squeeze tactics: Penalize large shells (high scale_loss_weight)
+        3. Support policy: Lower threshold for center point splitting (lower densify_grad_threshold)
+        4. Visual penetration: High tolerance for MVS to see through shell (high multi_view_pixel_noise_th)
         """
         return {
             'iterations': 30000,
-            # 1. Brutal Pruning - Kill volumetric fog, keep only surfaces
+
+            # 1. Frequent Reset - Give center points chance to emerge
+            'opacity_reset_interval': 3000,  # Keep default, reset every 3000 iter
+
+            # 2. Squeeze Tactics - Penalize large shells
             'densify_abs_grad_threshold': 0.0008,  # High threshold - prevent noisy splitting
             'max_abs_split_points': 50000,
             'opacity_cull_threshold': 0.05,  # Extremely high! Kill all semi-transparent points
+            'scale_loss_weight': 300.0,  # High pressure on large gaussians
 
-            # 2. Geometric Guidance - Allow wide search in early stage with random init
-            'multi_view_pixel_noise_th': 20.0,  # Must be tolerant, or random points never align
-            'multi_view_ncc_weight': 0.4,  # NCC is the only signal to distinguish surface from interior
+            # 3. Support Policy - Lower threshold for center point splitting
+            'densify_grad_threshold': 0.00015,  # Lower threshold, encourage internal growth
+
+            # 4. Visual Penetration - MVS must see through shell to find interior
+            'multi_view_pixel_noise_th': 10.0,  # Critical! Must be tolerant or MVS stops at shell
+            'multi_view_ncc_weight': 0.4,  # High NCC - confirm interior is the true surface
             'multi_view_geo_weight': 0.1,  # Multi-view geometry constraint
             'multi_view_weight_from_iter': 2500,  # Enable after RGB convergence
             'multi_view_sample_num': 51200,  # Sample points for geometry constraint
-
-            # 3. Planar Constraint - Force survivors to be large and flat
-            'scale_loss_weight': 500.0,  # Very high! Force Gaussians to expand and flatten
 
             # Auxiliary smoothing (keep low to avoid circular learning)
             'single_view_weight': 0.005,  # Single-view normal constraint as auxiliary smoothing
