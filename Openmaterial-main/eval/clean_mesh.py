@@ -4,6 +4,10 @@ import os
 from glob import glob
 import trimesh
 import argparse
+
+# Set DRJIT_LIBOPTIX=0 before importing mitsuba to disable OptiX
+os.environ.setdefault('DRJIT_LIBOPTIX', '0')
+
 import mitsuba as mi
 mi.set_variant('cuda_ad_rgb')
 from mitsuba import ScalarTransform4f as T
