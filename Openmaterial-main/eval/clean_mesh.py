@@ -33,7 +33,9 @@ def gen_camera_intrinsic(width, height, fov_x, fov_y):
     return fx, fy
 
 def clean_points_by_mask(points, bsdf_name, scene_name, imgs_idx=None, minimal_vis=0, mask_dilated_size=11):
-    json_path = glob(f'{args.dataset_dir}/{bsdf_name}/{scene_name}/transforms_train.json')[0]
+    # Note: Despite confusing names, bsdf_name=environment, scene_name=UUID
+    # Actual data structure: {dataset_dir}/{UUID}/{environment}/
+    json_path = glob(f'{args.dataset_dir}/{scene_name}/{bsdf_name}/transforms_train.json')[0]
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     fov_x = 37.8492
@@ -56,7 +58,7 @@ def clean_points_by_mask(points, bsdf_name, scene_name, imgs_idx=None, minimal_v
     bottom = np.array([0, 0, 0, 1.]).reshape([1, 4])
     scale_mat = np.diag([1.0, 1.0, 1.0, 1.0])
 
-    mask_lis = sorted(glob(f'{args.dataset_dir}/{bsdf_name}/{scene_name}/train/mask/*.png'))
+    mask_lis = sorted(glob(f'{args.dataset_dir}/{scene_name}/{bsdf_name}/train/mask/*.png'))
     n_images = len(mask_lis)
     inside_mask = np.zeros(len(points))
 
@@ -101,7 +103,9 @@ def clean_points_by_mask(points, bsdf_name, scene_name, imgs_idx=None, minimal_v
 
 
 def clean_points_by_visualhull(points, bsdf_name, scene_name, imgs_idx=None, minimal_vis=0, mask_dilated_size=11):
-    json_path = glob(f'{args.dataset_dir}/{bsdf_name}/{scene_name}/transforms_train.json')[0]
+    # Note: Despite confusing names, bsdf_name=environment, scene_name=UUID
+    # Actual data structure: {dataset_dir}/{UUID}/{environment}/
+    json_path = glob(f'{args.dataset_dir}/{scene_name}/{bsdf_name}/transforms_train.json')[0]
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     fov_x = 37.8492
@@ -124,7 +128,7 @@ def clean_points_by_visualhull(points, bsdf_name, scene_name, imgs_idx=None, min
     ])
     bottom = np.array([0, 0, 0, 1.]).reshape([1, 4])
     scale_mat = np.diag([1.0, 1.0, 1.0, 1.0])
-    mask_lis = sorted(glob(f'{args.dataset_dir}/{bsdf_name}/{scene_name}/train/mask/*.png'))
+    mask_lis = sorted(glob(f'{args.dataset_dir}/{scene_name}/{bsdf_name}/train/mask/*.png'))
     n_images = len(mask_lis)
     outside_mask = np.zeros(len(points))
     if imgs_idx is None:
