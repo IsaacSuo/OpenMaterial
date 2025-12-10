@@ -315,6 +315,24 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
         for object_name in object_names:
             print(f"  Cleaning meshes for object: {object_name}")
 
+            # Check if this object has mask files in the dataset
+            object_path = Path(dataset_dir) / object_name
+            has_masks = False
+            if object_path.exists():
+                # Check if any scene under this object has mask directory
+                for scene_dir in object_path.iterdir():
+                    if scene_dir.is_dir():
+                        mask_dir = scene_dir / "train" / "mask"
+                        if mask_dir.exists() and list(mask_dir.glob("*.png")):
+                            has_masks = True
+                            break
+
+            if not has_masks:
+                print(f"  ⚠ Skipping {object_name}: No masks found in dataset (cannot clean mesh)")
+                # Remove this object's meshes from evaluation list
+                mesh_files = [m for m in mesh_files if m.parent.name != object_name]
+                continue
+
             # Call official clean_mesh.py with DRJIT_LIBOPTIX=0 to disable OptiX (fallback to CUDA)
             clean_cmd = f"""
             source $(conda info --base)/etc/profile.d/conda.sh && \
