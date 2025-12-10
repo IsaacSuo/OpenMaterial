@@ -279,14 +279,14 @@ class PGSRMethod(BaseMethod):
             'max_abs_split_points': 50000,
             'opacity_cull_threshold': 0.005,
             # Geometry constraint parameters (enhanced for OpenMaterial)
-            'scale_loss_weight': 150.0,  # Force Gaussians to be flat (original: 100.0)
-            'single_view_weight': 0.1,  # Single-view normal constraint (original: 0.015)
-            'single_view_weight_from_iter': 1000,  # Enable early (original: 7000)
-            'multi_view_geo_weight': 0.2,  # Multi-view geometry constraint (original: 0.03)
-            'multi_view_ncc_weight': 0.3,  # Multi-view photometric constraint (original: 0.15)
-            'multi_view_weight_from_iter': 1500,  # Enable early (original: 7000)
+            'scale_loss_weight': 120.0,  # Force Gaussians to be flat (original: 100.0)
+            'single_view_weight': 0.005,  # Single-view normal constraint as auxiliary smoothing (original: 0.015, reduced to prevent depth-normal circular learning)
+            'single_view_weight_from_iter': 2500,  # Enable after RGB convergence (original: 7000)
+            'multi_view_geo_weight': 0.1,  # Multi-view geometry constraint (original: 0.03, 3x increase)
+            'multi_view_ncc_weight': 0.25,  # Multi-view photometric constraint (original: 0.15, increased for texture alignment)
+            'multi_view_weight_from_iter': 2500,  # Enable after RGB convergence (original: 7000)
             'multi_view_sample_num': 51200,  # Sample points for geometry constraint (original: 102400, reduced to save memory)
-            'multi_view_pixel_noise_th': 1.0,  # Pixel noise threshold
+            'multi_view_pixel_noise_th': 4.0,  # Pixel noise threshold - allow 4-pixel projection error (original: 1.0)
             # Mesh extraction parameters
             'voxel_size': 0.004,
             'max_depth': 5.0,
