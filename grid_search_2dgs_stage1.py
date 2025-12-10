@@ -105,11 +105,33 @@ def clean_mesh_pipeline(raw_mesh_path, dataset_dir, object_name, scene_name, gt_
     dataset_dir = Path(dataset_dir)
     gt_dir = Path(gt_dir)
 
+    print(f"    Debug: raw_mesh_path = {raw_mesh_path}")
+    print(f"    Debug: dataset_dir = {dataset_dir}")
+    print(f"    Debug: object_name = {object_name}")
+    print(f"    Debug: scene_name = {scene_name}")
+    print(f"    Debug: gt_dir = {gt_dir}")
+
     # Paths
     scene_dir = dataset_dir / object_name / scene_name
     transforms_path = scene_dir / "transforms_train.json"
     mask_dir = scene_dir / "train" / "mask"
-    gt_mesh_path = list((gt_dir / object_name).glob("*.ply"))[0]
+
+    print(f"    Debug: scene_dir = {scene_dir}")
+    print(f"    Debug: transforms_path exists = {transforms_path.exists()}")
+    print(f"    Debug: mask_dir exists = {mask_dir.exists()}")
+
+    gt_object_dir = gt_dir / object_name
+    print(f"    Debug: gt_object_dir = {gt_object_dir}")
+    print(f"    Debug: gt_object_dir exists = {gt_object_dir.exists()}")
+
+    gt_meshes = list(gt_object_dir.glob("*.ply"))
+    print(f"    Debug: Found {len(gt_meshes)} GT meshes: {gt_meshes}")
+
+    if len(gt_meshes) == 0:
+        raise FileNotFoundError(f"No GT mesh found in {gt_object_dir}")
+
+    gt_mesh_path = gt_meshes[0]
+    print(f"    Debug: Using GT mesh = {gt_mesh_path}")
 
     # Output paths
     clean_dir = raw_mesh_path.parent / "cleaned"
@@ -230,7 +252,10 @@ def run_grid_search(test_scene, output_dir):
                     gt_dir
                 )
             except Exception as e:
+                import traceback
                 print(f"  ✗ Cleaning failed: {e}")
+                print(f"  ✗ Full traceback:")
+                traceback.print_exc()
                 results.append({
                     'mesh_res': mesh_res,
                     'voxel_size': voxel_size,
