@@ -270,23 +270,34 @@ class PGSRMethod(BaseMethod):
     def get_default_config(self) -> Dict[str, Any]:
         """Get default PGSR configuration
 
-        Note: use_depth_filter is disabled due to incorrect ray direction in world space
-        Enhanced geometry constraints for better depth quality
+        Strategy: Brutal pruning + Wide geometric guidance + Strong planar constraint
+        - High opacity threshold: Kill volumetric fog, keep only surfaces
+        - High densify threshold: Prevent noisy point splitting
+        - Wide pixel noise tolerance: Allow random initialization to find surfaces
+        - Strong NCC weight: Only signal to distinguish surface from interior
+        - Very high scale loss: Force survivors to be large and flat
         """
         return {
             'iterations': 30000,
-            'densify_abs_grad_threshold': 0.0008,
+            # 1. Brutal Pruning - Kill volumetric fog, keep only surfaces
+            'densify_abs_grad_threshold': 0.0008,  # High threshold - prevent noisy splitting
             'max_abs_split_points': 50000,
-            'opacity_cull_threshold': 0.005,
-            # Geometry constraint parameters (enhanced for OpenMaterial)
-            'scale_loss_weight': 120.0,  # Force Gaussians to be flat (original: 100.0)
-            'single_view_weight': 0.005,  # Single-view normal constraint as auxiliary smoothing (original: 0.015, reduced to prevent depth-normal circular learning)
-            'single_view_weight_from_iter': 2500,  # Enable after RGB convergence (original: 7000)
-            'multi_view_geo_weight': 0.1,  # Multi-view geometry constraint (original: 0.03, 3x increase)
-            'multi_view_ncc_weight': 0.25,  # Multi-view photometric constraint (original: 0.15, increased for texture alignment)
-            'multi_view_weight_from_iter': 2500,  # Enable after RGB convergence (original: 7000)
-            'multi_view_sample_num': 51200,  # Sample points for geometry constraint (original: 102400, reduced to save memory)
-            'multi_view_pixel_noise_th': 4.0,  # Pixel noise threshold - allow 4-pixel projection error (original: 1.0)
+            'opacity_cull_threshold': 0.05,  # Extremely high! Kill all semi-transparent points
+
+            # 2. Geometric Guidance - Allow wide search in early stage with random init
+            'multi_view_pixel_noise_th': 20.0,  # Must be tolerant, or random points never align
+            'multi_view_ncc_weight': 0.4,  # NCC is the only signal to distinguish surface from interior
+            'multi_view_geo_weight': 0.1,  # Multi-view geometry constraint
+            'multi_view_weight_from_iter': 2500,  # Enable after RGB convergence
+            'multi_view_sample_num': 51200,  # Sample points for geometry constraint
+
+            # 3. Planar Constraint - Force survivors to be large and flat
+            'scale_loss_weight': 500.0,  # Very high! Force Gaussians to expand and flatten
+
+            # Auxiliary smoothing (keep low to avoid circular learning)
+            'single_view_weight': 0.005,  # Single-view normal constraint as auxiliary smoothing
+            'single_view_weight_from_iter': 2500,  # Enable after RGB convergence
+
             # Mesh extraction parameters
             'voxel_size': 0.004,
             'max_depth': 5.0,
