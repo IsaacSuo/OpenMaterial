@@ -314,12 +314,12 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
         for object_name in object_names:
             print(f"  Cleaning meshes for object: {object_name}")
 
-            # Call official clean_mesh.py
+            # Call official clean_mesh.py with DRJIT_LIBOPTIX=0 to disable OptiX (fallback to CUDA)
             clean_cmd = f"""
             source $(conda info --base)/etc/profile.d/conda.sh && \
             conda activate openmaterial_eval && \
             cd Openmaterial-main && \
-            python eval/clean_mesh.py \
+            DRJIT_LIBOPTIX=0 python eval/clean_mesh.py \
                 --dataset_dir {Path(dataset_dir).absolute()} \
                 --groundtruth_dir {Path(gt_dir).absolute()} \
                 --method {method} \
