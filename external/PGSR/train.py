@@ -159,8 +159,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             pipe.debug = True
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # return_plane must be enabled before multi_view starts (it needs plane_depth)
+        need_plane = iteration > min(opt.single_view_weight_from_iter, opt.multi_view_weight_from_iter)
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, app_model=app_model,
-                            return_plane=iteration>opt.single_view_weight_from_iter, return_depth_normal=iteration>opt.single_view_weight_from_iter)
+                            return_plane=need_plane, return_depth_normal=need_plane)
         image, viewspace_point_tensor, visibility_filter, radii = \
             render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         
