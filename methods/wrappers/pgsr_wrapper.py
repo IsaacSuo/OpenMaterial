@@ -276,36 +276,37 @@ class PGSRMethod(BaseMethod):
     def get_default_config(self) -> Dict[str, Any]:
         """Get default PGSR configuration
 
-        Strategy: Extreme strict standards - only perfection survives
-        1. Extreme multi-view constraint: 1-pixel tolerance only
-        2. Frequent reset: Keep giving center points chance to emerge
-        3. High survival threshold: Kill weak candidates early
+        Strategy: Early Intervention - Prevent shell formation at the source
+        1. Ultra-early MVS: Intervene at iter 500 before shell forms
+        2. Pragmatic tolerance: 10px appropriate for early training
+        3. Strong geometric authority: High NCC to fight RGB laziness
+        4. Aggressive pruning: Kill weak artifacts early
         """
         return {
             'iterations': 30000,
 
-            # 1. Extreme Multi-View Constraint - Wrong by 1 pixel = death
-            'multi_view_pixel_noise_th': 1.0,  # Extremely strict! No tolerance for error
-            'multi_view_ncc_weight': 0.4,  # High NCC for texture consistency
+            # 1. Early Multi-View Intervention - Attack before shell forms!
+            'multi_view_pixel_noise_th': 10.0,  # Pragmatic for early training
+            'multi_view_ncc_weight': 0.4,  # High NCC fights RGB laziness
             'multi_view_geo_weight': 0.1,  # Multi-view geometry constraint
-            'multi_view_weight_from_iter': 2500,  # Enable after RGB convergence
+            'multi_view_weight_from_iter': 500,  # Ultra-early! Before shell formation
             'multi_view_sample_num': 51200,  # Sample points for geometry constraint
 
-            # 2. Frequent Reset - Give center points chance to emerge
-            'opacity_reset_interval': 3000,  # Keep default, reset every 3000 iter
+            # 2. Single-View as Support
+            'single_view_weight': 0.005,  # Keep low to avoid circular learning
+            'single_view_weight_from_iter': 1000,  # Start slightly later than MVS
 
-            # 3. High Survival Threshold - Kill weak candidates
+            # 3. Frequent Reset - Give center points chance to emerge
+            'opacity_reset_interval': 3000,  # Reset every 3000 iter
+
+            # 4. Aggressive Survival Threshold
             'densify_abs_grad_threshold': 0.0008,  # High threshold - prevent noisy splitting
             'densify_grad_threshold': 0.00015,  # Lower threshold, encourage internal growth
             'max_abs_split_points': 50000,
-            'opacity_cull_threshold': 0.05,  # High survival bar! Kill all semi-transparent
+            'opacity_cull_threshold': 0.03,  # Stricter! Kill weak artifacts
 
-            # Planar constraint
-            'scale_loss_weight': 300.0,  # Force Gaussians to be large and flat
-
-            # Auxiliary smoothing (keep low to avoid circular learning)
-            'single_view_weight': 0.005,  # Single-view normal constraint as auxiliary
-            'single_view_weight_from_iter': 2500,  # Enable after RGB convergence
+            # 5. Planar constraint
+            'scale_loss_weight': 200.0,  # Force Gaussians to be large and flat
 
             # Mesh extraction parameters
             'voxel_size': 0.004,
