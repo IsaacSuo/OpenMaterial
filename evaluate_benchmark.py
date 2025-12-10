@@ -39,7 +39,7 @@ def check_eval_environment() -> bool:
     check_cmd = f"""
     source $(conda info --base)/etc/profile.d/conda.sh && \
     conda activate {env_name} && \
-    python -c "import torch; import pytorch3d; import trimesh"
+    python -c "import torch; import pytorch3d; import trimesh; import cv2; import mitsuba"
     """
     result = subprocess.run(
         check_cmd,
@@ -165,7 +165,7 @@ def setup_eval_environment() -> bool:
     deps_cmd = f"""
     source $(conda info --base)/etc/profile.d/conda.sh && \
     conda activate {env_name} && \
-    pip install trimesh tqdm -i https://pypi.tuna.tsinghua.edu.cn/simple
+    pip install trimesh tqdm opencv-python mitsuba -i https://pypi.tuna.tsinghua.edu.cn/simple
     """
     result = subprocess.run(
         deps_cmd,
@@ -288,6 +288,44 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
     print(f" Found {len(mesh_files)} meshes")
     print(f"{'='*60}\n")
 
+    # Clean meshes using official OpenMaterial eval script if dataset_dir is provided
+    if dataset_dir:
+        print("Running mesh cleaning using official OpenMaterial pipeline...")
+
+        # Get unique object names from mesh files
+        object_names = set(mesh.parent.name for mesh in mesh_files)
+
+        for object_name in object_names:
+            print(f"  Cleaning meshes for object: {object_name}")
+
+            # Call official clean_mesh.py
+            clean_cmd = f"""
+            source $(conda info --base)/etc/profile.d/conda.sh && \
+            conda activate openmaterial_eval && \
+            cd Openmaterial-main && \
+            python eval/clean_mesh.py \
+                --dataset_dir {Path(dataset_dir).absolute()} \
+                --groundtruth_dir {Path(gt_dir).absolute()} \
+                --method {method} \
+                --directory {method_dir.absolute()} \
+                --object_name {object_name}
+            """
+
+            result = subprocess.run(
+                clean_cmd,
+                shell=True,
+                executable='/bin/bash',
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode != 0:
+                print(f"  Warning: Mesh cleaning failed for {object_name}: {result.stderr}")
+            else:
+                print(f"  ✓ Meshes cleaned for {object_name}")
+
+        print("Mesh cleaning complete\n")
+
     from tqdm import tqdm
 
     for pred_mesh in tqdm(mesh_files, desc=f"Evaluating {method}"):
@@ -317,39 +355,15 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
             continue
 
         try:
-            # Clean predicted mesh if dataset_dir is provided
+            # Use cleaned mesh if available (from official cleaning pipeline)
             cleaned_pred_mesh = pred_mesh
             if dataset_dir:
-                from eval_utils.clean_mesh import clean_mesh_by_mask
-                import trimesh
-
-                # Get cut_y from GT mesh bbox
-                gt_mesh_obj = trimesh.load(str(gt_mesh))
-                cut_y = gt_mesh_obj.bounds[0, 1]  # min Y coordinate
-
-                # Find transforms and mask dir for this scene
-                transforms_path = Path(dataset_dir) / object_name / scene_name / "transforms_train.json"
-                mask_dir = Path(dataset_dir) / object_name / scene_name / "train" / "mask"
-
-                if transforms_path.exists() and mask_dir.exists():
-                    # Create cleaned mesh directory
-                    cleaned_mesh_dir = method_dir / "cleaned_meshes" / object_name
-                    cleaned_mesh_dir.mkdir(parents=True, exist_ok=True)
-                    cleaned_pred_mesh = cleaned_mesh_dir / f"{scene_name}.ply"
-
-                    # Clean mesh if not already done
-                    if not cleaned_pred_mesh.exists():
-                        clean_mesh_by_mask(
-                            str(pred_mesh),
-                            str(cleaned_pred_mesh),
-                            str(transforms_path),
-                            str(mask_dir),
-                            cut_y=cut_y,
-                            minimal_vis=2,
-                            mask_dilated_size=11
-                        )
+                # Official script outputs to: {method_dir}/CleanedMesh/{object_name}/{scene_name}.ply
+                cleaned_mesh_path = method_dir / "CleanedMesh" / object_name / f"{scene_name}.ply"
+                if cleaned_mesh_path.exists():
+                    cleaned_pred_mesh = cleaned_mesh_path
                 else:
-                    print(f"Warning: Transforms or masks not found for {scene_name}, using uncleaned mesh")
+                    print(f"Warning: Cleaned mesh not found for {scene_name}, using original mesh")
 
             # Compute Chamfer Distance
             chamfer = compute_chamfer_distance(str(cleaned_pred_mesh), str(gt_mesh))
