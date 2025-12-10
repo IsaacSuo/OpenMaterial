@@ -318,8 +318,9 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
             clean_cmd = f"""
             source $(conda info --base)/etc/profile.d/conda.sh && \
             conda activate openmaterial_eval && \
+            export DRJIT_LIBOPTIX=0 && \
             cd Openmaterial-main && \
-            DRJIT_LIBOPTIX=0 python eval/clean_mesh.py \
+            python eval/clean_mesh.py \
                 --dataset_dir {Path(dataset_dir).absolute()} \
                 --groundtruth_dir {Path(gt_dir).absolute()} \
                 --method {method} \
