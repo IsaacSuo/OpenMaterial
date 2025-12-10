@@ -66,6 +66,10 @@ def clean_points_by_mask(points, bsdf_name, scene_name, imgs_idx=None, minimal_v
         imgs_idx = [i for i in range(n_images)]
 
     for i, frame in enumerate(data['frames']):
+        # Stop if we've processed all masks
+        if i >= len(mask_lis):
+            break
+
         cam_pose_ = np.matmul(frame['transform_matrix'], flip_mat)
         cam_pose = np.array(cam_pose_)
         R, T = gen_w2c(cam_pose)
@@ -95,9 +99,6 @@ def clean_points_by_mask(points, bsdf_name, scene_name, imgs_idx=None, minimal_v
         curr_mask = curr_mask.astype(np.float32) * in_mask
 
         inside_mask += curr_mask
-
-        if i > len(imgs_idx):
-            break
 
     return inside_mask > minimal_vis
 
@@ -132,8 +133,13 @@ def clean_points_by_visualhull(points, bsdf_name, scene_name, imgs_idx=None, min
     n_images = len(mask_lis)
     outside_mask = np.zeros(len(points))
     if imgs_idx is None:
-        imgs_idx = [i for i in range(n_images)]
+        # Use minimum of mask count and frame count to avoid index errors
+        imgs_idx = [i for i in range(min(n_images, len(data['frames'])))]
     for i in imgs_idx:
+        # Safety check: skip if index out of range
+        if i >= len(mask_lis) or i >= len(data['frames']):
+            continue
+
         cam_pose_ = np.matmul(data['frames'][i]['transform_matrix'], flip_mat)
         cam_pose = np.array(cam_pose_)
         R, T = gen_w2c(cam_pose)
