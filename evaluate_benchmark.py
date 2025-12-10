@@ -22,7 +22,23 @@ def check_eval_environment() -> bool:
     Returns:
         bool: True if environment is ready
     """
+    import os
+
     env_name = "openmaterial_eval"
+
+    # Check if we're already in the correct environment
+    current_env = os.environ.get('CONDA_DEFAULT_ENV', '')
+    if current_env == env_name:
+        # Already in the right environment, just check packages
+        try:
+            import torch
+            import pytorch3d
+            import trimesh
+            import cv2
+            import mitsuba
+            return True
+        except ImportError:
+            return False
 
     # Check if conda env exists
     result = subprocess.run(
@@ -429,18 +445,17 @@ def main():
     print("Checking evaluation environment...")
     if not check_eval_environment():
         print("\n" + "="*60)
-        print(" Evaluation Environment Not Found")
+        print(" Evaluation Environment Setup Required")
         print("="*60)
-        print("\nThe evaluation requires a separate conda environment")
-        print("with PyTorch3D and dependencies.")
-        print("\nWould you like to set it up now? This will take a few minutes.")
+        print("\nThe openmaterial_eval environment exists but is missing dependencies.")
+        print("Required packages: torch, pytorch3d, trimesh, opencv-python, mitsuba")
+        print("\nWould you like to install missing dependencies now?")
 
-        response = input("\nSetup evaluation environment? (y/n): ")
+        response = input("\nInstall dependencies? (y/n): ")
         if response.lower() != 'y':
-            print("\nPlease setup the environment manually:")
-            print("  conda create -n openmaterial_eval python=3.10")
+            print("\nPlease install dependencies manually:")
             print("  conda activate openmaterial_eval")
-            print("  pip install torch pytorch3d trimesh")
+            print("  pip install torch pytorch3d trimesh opencv-python mitsuba")
             sys.exit(1)
 
         if not setup_eval_environment():
