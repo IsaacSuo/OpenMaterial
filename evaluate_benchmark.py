@@ -3,8 +3,8 @@
 Evaluate benchmark results: compute Chamfer Distance between predicted and ground truth meshes
 
 Usage:
-    python evaluate_benchmark.py --method 2dgs --gt_dir /path/to/groundtruth --output results.json
-    python evaluate_benchmark.py --method all --gt_dir /path/to/groundtruth --output results.json
+    python evaluate_benchmark.py --method 2dgs --gt_dir /path/to/groundtruth --dataset_dir /path/to/dataset --output results.json
+    python evaluate_benchmark.py --method all --gt_dir /path/to/groundtruth --dataset_dir /path/to/dataset --output results.json
 """
 
 import argparse
@@ -252,7 +252,7 @@ def compute_chamfer_distance(pred_mesh_path: str, gt_mesh_path: str,
     return chamfer
 
 
-def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
+def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: str = None) -> Dict:
     """
     Evaluate a single method
 
@@ -260,6 +260,7 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
         method: Method name (e.g., '2dgs', 'pgsr')
         benchmark_dir: Base benchmark output directory
         gt_dir: Ground truth directory
+        dataset_dir: Dataset directory containing transforms and masks (for mesh cleaning)
 
     Returns:
         Dict with evaluation results
@@ -316,8 +317,42 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
             continue
 
         try:
+            # Clean predicted mesh if dataset_dir is provided
+            cleaned_pred_mesh = pred_mesh
+            if dataset_dir:
+                from eval_utils.clean_mesh import clean_mesh_by_mask
+                import trimesh
+
+                # Get cut_y from GT mesh bbox
+                gt_mesh_obj = trimesh.load(str(gt_mesh))
+                cut_y = gt_mesh_obj.bounds[0, 1]  # min Y coordinate
+
+                # Find transforms and mask dir for this scene
+                transforms_path = Path(dataset_dir) / object_name / scene_name / "transforms_train.json"
+                mask_dir = Path(dataset_dir) / object_name / scene_name / "train" / "mask"
+
+                if transforms_path.exists() and mask_dir.exists():
+                    # Create cleaned mesh directory
+                    cleaned_mesh_dir = method_dir / "cleaned_meshes" / object_name
+                    cleaned_mesh_dir.mkdir(parents=True, exist_ok=True)
+                    cleaned_pred_mesh = cleaned_mesh_dir / f"{scene_name}.ply"
+
+                    # Clean mesh if not already done
+                    if not cleaned_pred_mesh.exists():
+                        clean_mesh_by_mask(
+                            str(pred_mesh),
+                            str(cleaned_pred_mesh),
+                            str(transforms_path),
+                            str(mask_dir),
+                            cut_y=cut_y,
+                            minimal_vis=2,
+                            mask_dilated_size=11
+                        )
+                else:
+                    print(f"Warning: Transforms or masks not found for {scene_name}, using uncleaned mesh")
+
             # Compute Chamfer Distance
-            chamfer = compute_chamfer_distance(str(pred_mesh), str(gt_mesh))
+            chamfer = compute_chamfer_distance(str(cleaned_pred_mesh), str(gt_mesh))
 
             results['scenes'].append({
                 'scene': scene_name,
@@ -325,6 +360,7 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
                 'material': material,
                 'chamfer_distance_cm': float(chamfer),
                 'pred_mesh': str(pred_mesh),
+                'cleaned_pred_mesh': str(cleaned_pred_mesh) if cleaned_pred_mesh != pred_mesh else None,
                 'gt_mesh': str(gt_mesh)
             })
             results['chamfer_distances'].append(float(chamfer))
@@ -343,6 +379,8 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str) -> Dict:
 
         except Exception as e:
             print(f"Error evaluating {scene_name}: {e}")
+            import traceback
+            traceback.print_exc()
             results['scenes'].append({
                 'scene': scene_name,
                 'object': object_name,
@@ -408,6 +446,9 @@ def main():
     parser.add_argument('--gt_dir', type=str, required=True,
                         help='Ground truth meshes directory')
 
+    parser.add_argument('--dataset_dir', type=str, default=None,
+                        help='Dataset directory (for mesh cleaning with transforms and masks)')
+
     parser.add_argument('--output', type=str, default='evaluation_results.json',
                         help='Output JSON file for results')
 
@@ -429,7 +470,7 @@ def main():
     # Evaluate each method
     all_results = []
     for method in methods:
-        results = evaluate_method(method, args.benchmark_dir, args.gt_dir)
+        results = evaluate_method(method, args.benchmark_dir, args.gt_dir, args.dataset_dir)
         all_results.append(results)
 
     # Save results
