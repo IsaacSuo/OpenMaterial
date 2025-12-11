@@ -192,9 +192,10 @@ def run_grid_search(test_scene, output_dir):
         output_dir: directory to save results
     """
 
-    # Configuration - Higher resolution, smaller voxel size
+    # Configuration - GPU TSDF working, use smaller voxel_size for better quality
     mesh_res_values = [2048, 3072, 4096, 5120]
-    voxel_size_values = [0.002, 0.0025, 0.003, 0.0035]
+    voxel_size_values = [0.0015, 0.002, 0.0025, 0.003]
+    # Total: 4 × 4 = 16 configurations
 
     dataset_dir = "/opt/data/private/dataset/OpenMaterial_ablation"
     gt_dir = "/opt/data/private/dataset/OpenMaterial_ablation/groundtruth_ablation"
