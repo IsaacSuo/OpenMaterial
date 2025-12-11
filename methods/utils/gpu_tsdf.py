@@ -72,20 +72,17 @@ class GPUTSDFVolume:
         intrinsic_tensor = intrinsic
         extrinsic_tensor = extrinsic
 
-        # For compute_unique_block_coordinates, need CPU versions
-        depth_tensor_cpu = depth_tensor.to(o3c.Device("CPU:0"))
-        intrinsic_tensor_cpu = intrinsic_tensor.to(o3c.Device("CPU:0"))
-        extrinsic_tensor_cpu = extrinsic_tensor.to(o3c.Device("CPU:0"))
-
         # Compute frustum block coordinates (only update visible blocks)
-        depth_np = depth_tensor_cpu.as_tensor().numpy()
+        # VoxelBlockGrid is on GPU, so all operations must use GPU tensors
+        depth_np = depth_tensor.as_tensor().cpu().numpy()
         depth_scale = 1.0
         depth_max = depth_np.max() if depth_np.max() > 0 else 10.0
 
+        # All tensors must be on GPU for GPU VoxelBlockGrid
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
-            depth_tensor_cpu,
-            intrinsic_tensor_cpu,
-            extrinsic_tensor_cpu,
+            depth_tensor,  # Keep on GPU
+            intrinsic_tensor,  # Keep on GPU
+            extrinsic_tensor,  # Keep on GPU
             depth_scale=depth_scale,
             depth_max=depth_max,
             trunc_voxel_multiplier=4.0
