@@ -51,7 +51,7 @@ class GPUTSDFVolume:
             attr_channels=((1), (1), (3)),
             voxel_size=self.voxel_size,
             block_resolution=16,
-            block_count=150000,  # ~11GB VRAM for large scenes
+            block_count=100000,  # ~7.6GB VRAM for large scenes
             device=self.device
         )
 
@@ -129,7 +129,7 @@ class GPUTSDFVolume:
         # 打印本帧新增的 block 数量
         new_blocks = frustum_block_coords.shape[0]
         total_blocks = self.vbg.hashmap().size()
-        print(f"[TSDF] This frame: {new_blocks} blocks, Total: {total_blocks} / 150000")
+        print(f"[TSDF] This frame: {new_blocks} blocks, Total: {total_blocks} / 100000")
 
     def extract_triangle_mesh(self):
         """
