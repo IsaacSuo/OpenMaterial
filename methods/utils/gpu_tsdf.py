@@ -51,7 +51,7 @@ class GPUTSDFVolume:
             attr_channels=((1), (1), (3)),
             voxel_size=self.voxel_size,
             block_resolution=16,
-            block_count=500000,  # Large capacity for big scenes like Garden
+            block_count=100000,  # Moderate capacity to avoid OOM at init
             device=self.device
         )
 
