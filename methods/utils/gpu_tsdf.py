@@ -126,7 +126,8 @@ class GPUTSDFVolume:
             intrinsic_tensor_gpu,  # color intrinsic = depth intrinsic
             extrinsic_tensor_gpu,  # Use GPU version for integrate
             depth_scale=depth_scale,
-            depth_max=depth_max
+            depth_max=depth_max,
+            trunc_voxel_multiplier=4.0  # Match compute_unique_block_coordinates value
         )
 
     def extract_triangle_mesh(self):
