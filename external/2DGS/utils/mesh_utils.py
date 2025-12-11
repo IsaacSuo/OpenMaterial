@@ -157,7 +157,15 @@ class GaussianExtractor(object):
         try:
             import sys
             from pathlib import Path
-            sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'methods'))
+            # Get absolute path to OpenMaterial root
+            mesh_utils_file = Path(__file__).resolve()  # Force absolute path
+            openmaterial_root = mesh_utils_file.parent.parent.parent.parent
+            methods_path = str(openmaterial_root / 'methods')
+
+            if methods_path not in sys.path:
+                sys.path.insert(0, methods_path)
+
+            print(f"[DEBUG] Trying to import GPU TSDF from: {methods_path}")
             from utils.gpu_tsdf import create_tsdf_volume
             volume = create_tsdf_volume(voxel_size=voxel_size, use_gpu=True)
             print(f"✓ Using GPU-accelerated TSDF (voxel_size={voxel_size})")
