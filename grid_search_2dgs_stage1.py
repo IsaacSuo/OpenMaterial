@@ -192,9 +192,9 @@ def run_grid_search(test_scene, output_dir):
         output_dir: directory to save results
     """
 
-    # Configuration
-    mesh_res_values = [1024, 1536, 2048, 3072]
-    voxel_size_values = [0.003, 0.004, 0.005, 0.006]
+    # Configuration - Higher resolution, smaller voxel size
+    mesh_res_values = [2048, 3072, 4096, 5120]
+    voxel_size_values = [0.002, 0.0025, 0.003, 0.0035]
 
     dataset_dir = "/opt/data/private/dataset/OpenMaterial_ablation"
     gt_dir = "/opt/data/private/dataset/OpenMaterial_ablation/groundtruth_ablation"
