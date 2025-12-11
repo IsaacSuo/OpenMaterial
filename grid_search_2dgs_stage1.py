@@ -75,23 +75,12 @@ def extract_mesh_with_params(model_path, data_path, output_mesh_path, mesh_res, 
         cmd,
         shell=True,
         executable='/bin/bash',
-        capture_output=True,
+        capture_output=False,  # Let output go to terminal directly
         text=True
     )
 
-    # Check if GPU TSDF was used
-    if "Using GPU TSDF" in result.stdout or "GPU-accelerated TSDF" in result.stdout:
-        print(f"  ✓ Using GPU TSDF")
-    elif "GPU TSDF not available" in result.stdout or "CPU TSDF" in result.stdout:
-        print(f"  ⚠ Using CPU TSDF (slower, more RAM)")
-
-    # Print TSDF-related output for debugging
-    for line in result.stdout.split('\n'):
-        if 'TSDF' in line or 'GPU' in line or 'voxel_size' in line:
-            print(f"    {line}")
-
     if result.returncode != 0:
-        print(f"  ✗ Mesh extraction failed: {result.stderr}")
+        print(f"  ✗ Mesh extraction failed (return code: {result.returncode})")
         return False
 
     # Copy extracted mesh to output location
