@@ -64,23 +64,35 @@ class GPUTSDFVolume:
             intrinsic: o3c.Tensor (3x3, float64, on GPU)
             extrinsic: o3c.Tensor (4x4, float64, on GPU)
         """
-        # 1. 拆解 RGBD
+        # ------------------------------------------------------------
+        # 1. 图像数据：必须在 GPU，且类型必须是 Float32
+        # ------------------------------------------------------------
         depth_img = rgbd.depth
 
-        # [关键点 A] 将 Color 转换为 Float32
-        # 必须先转为 Float32，否则后面积分时会报 (Float32, UInt8) 错误
+        # Color 必须转为 Float32 以匹配 Depth (解决 Float32/UInt8 冲突)
         color_img = rgbd.color.to(o3c.Dtype.Float32)
 
+        # ------------------------------------------------------------
         # 2. 计算depth参数
+        # ------------------------------------------------------------
         depth_np = depth_img.as_tensor().cpu().numpy()
         depth_scale = 1.0
         depth_max = float(depth_np.max()) if depth_np.max() > 0 else 10.0
 
-        # 3. 准备 CPU 矩阵 (用于 Frustum 计算)
-        intrinsic_cpu = intrinsic.to(o3c.Device("CPU:0"))
-        extrinsic_cpu = extrinsic.to(o3c.Device("CPU:0"))
+        # ------------------------------------------------------------
+        # 3. 矩阵参数：必须在 CPU !!! (解决 TransformIndexer 报错)
+        # ------------------------------------------------------------
+        # C++ 会在 Host 端读取这些矩阵来设置 Kernel 参数
+        # 如果它们在 GPU，CPU 读取时会报错
+        cpu_device = o3c.Device("CPU:0")
 
-        # 4. 计算活跃块坐标 (在 CPU 上进行)
+        intrinsic_cpu = intrinsic.to(cpu_device)
+        extrinsic_cpu = extrinsic.to(cpu_device)
+
+        # ------------------------------------------------------------
+        # 4. 计算活跃块 (Frustum Culling)
+        # ------------------------------------------------------------
+        # 这里混合使用了 GPU(深度) 和 CPU(矩阵)，Open3D 支持这种写法
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
             depth_img, intrinsic_cpu, extrinsic_cpu,
             depth_scale=depth_scale,
@@ -88,18 +100,28 @@ class GPUTSDFVolume:
             trunc_voxel_multiplier=4.0
         )
 
-        # [关键点 B] 修复 .to() 报错，使用链式调用
-        # 不要写在一起，分两步走，最稳妥
-        frustum_block_coords = frustum_block_coords.to(o3c.Device("CUDA:0"))  # 先搬到 GPU
-        frustum_block_coords = frustum_block_coords.to(o3c.int32)              # 再转为 Int32
+        # ------------------------------------------------------------
+        # 5. 坐标索引：必须搬回 GPU 且为 Int32
+        # ------------------------------------------------------------
+        gpu_device = o3c.Device("CUDA:0")
 
-        # 5. 执行积分
+        # 分两步转，防止报错
+        frustum_block_coords = frustum_block_coords.to(gpu_device)
+        frustum_block_coords = frustum_block_coords.to(o3c.int32)
+
+        # ------------------------------------------------------------
+        # 6. 执行积分
+        # ------------------------------------------------------------
+        # 配置：
+        # - Coords: GPU, Int32 (√)
+        # - Images: GPU, Float32 (√)
+        # - Matrix: CPU, Float64 (√) -> 必须 CPU！
         self.vbg.integrate(
             frustum_block_coords,
             depth_img,
             color_img,
-            intrinsic,
-            extrinsic,
+            intrinsic_cpu,  # 必须 CPU！
+            extrinsic_cpu,  # 必须 CPU！
             float(depth_scale),
             float(depth_max)
         )
