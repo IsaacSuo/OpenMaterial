@@ -69,32 +69,37 @@ class GPUTSDFVolume:
         depth_tensor = rgbd.depth
 
         # intrinsic and extrinsic are already tensors on GPU
-        intrinsic_tensor = intrinsic
-        extrinsic_tensor = extrinsic
+        intrinsic_tensor_gpu = intrinsic
+        extrinsic_tensor_gpu = extrinsic
 
         # Compute frustum block coordinates (only update visible blocks)
-        # VoxelBlockGrid is on GPU, so all operations must use GPU tensors
+        # Open3D's compute_unique_block_coordinates calls InverseTransformation internally,
+        # which ONLY works on CPU. So we need CPU copies for this step.
         depth_np = depth_tensor.as_tensor().cpu().numpy()
         depth_scale = 1.0
         depth_max = depth_np.max() if depth_np.max() > 0 else 10.0
 
-        # All tensors must be on GPU for GPU VoxelBlockGrid
+        # Create CPU copies for compute_unique_block_coordinates
+        # (depth stays on GPU, Open3D supports this mixed mode)
+        intrinsic_tensor_cpu = intrinsic_tensor_gpu.to(o3c.Device("CPU:0"))
+        extrinsic_tensor_cpu = extrinsic_tensor_gpu.to(o3c.Device("CPU:0"))
+
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
-            depth_tensor,  # Keep on GPU
-            intrinsic_tensor,  # Keep on GPU
-            extrinsic_tensor,  # Keep on GPU
+            depth_tensor,  # Keep on GPU (for parallel computation)
+            intrinsic_tensor_cpu,  # Use CPU (for InverseTransformation)
+            extrinsic_tensor_cpu,  # Use CPU (for InverseTransformation)
             depth_scale=depth_scale,
             depth_max=depth_max,
             trunc_voxel_multiplier=4.0
         )
 
-        # Integrate (use GPU tensors)
+        # Integrate: Must use GPU tensors for parallel CUDA computation
         self.vbg.integrate(
             frustum_block_coords,
-            depth_tensor,
-            color_tensor,
-            intrinsic_tensor,
-            extrinsic_tensor,
+            depth_tensor,  # GPU
+            color_tensor,  # GPU
+            intrinsic_tensor_gpu,  # GPU (not CPU!)
+            extrinsic_tensor_gpu,  # GPU (not CPU!)
             depth_scale=depth_scale,
             depth_max=depth_max,
             trunc_voxel_multiplier=4.0
