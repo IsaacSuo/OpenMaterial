@@ -93,31 +93,23 @@ class GPUTSDFVolume:
 
         # ================== 关键修复 ==================
         # 5. 必须将 block_coords 搬运回 GPU！
-        # 否则 integrate 函数会因为设备不统一而报 TypeError
-        print(f"[DEBUG] block_coords before: device={frustum_block_coords.device}, dtype={frustum_block_coords.dtype}")
-
-        # 使用更可靠的方式：先转numpy再创建CUDA tensor
-        block_coords_np = frustum_block_coords.cpu().numpy()
-        frustum_block_coords = o3c.Tensor(block_coords_np, dtype=frustum_block_coords.dtype, device=self.device)
-
-        print(f"[DEBUG] block_coords after: device={frustum_block_coords.device}")
-        print(f"[DEBUG] depth_img device: {depth_img.device}")
-        print(f"[DEBUG] color_img device: {color_img.device}")
-        print(f"[DEBUG] intrinsic device: {intrinsic.device}")
-        print(f"[DEBUG] extrinsic device: {extrinsic.device}")
+        # 并且强制转换为 Int32（Open3D 哈希表索引要求32位整数）
+        block_coords_np = frustum_block_coords.cpu().numpy().astype('int32')
+        frustum_block_coords = o3c.Tensor(block_coords_np, dtype=o3c.int32, device=self.device)
         # ============================================
 
         # 6. 执行积分 (所有变量现在都在 GPU 上了)
         # 这里使用 Open3D 支持的第 2 种重载：同时传入 depth 和 color
         # 确保 intrinsic 和 extrinsic 是 GPU 版 (解决 Float64/Device 报错)
+        # 确保 depth_scale 和 depth_max 是纯 Python float（C++绑定要求）
         self.vbg.integrate(
             frustum_block_coords,
             depth_img,
             color_img,
             intrinsic,  # GPU version
             extrinsic,  # GPU version
-            depth_scale=depth_scale,
-            depth_max=depth_max,
+            depth_scale=float(depth_scale),  # 强制纯Python float
+            depth_max=float(depth_max),      # 强制纯Python float
             trunc_voxel_multiplier=4.0
         )
         # ===================================================
