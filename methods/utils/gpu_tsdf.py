@@ -55,85 +55,49 @@ class GPUTSDFVolume:
             device=self.device
         )
 
-    def integrate(self, rgbd_image, intrinsic, extrinsic):
+    def integrate(self, rgbd, intrinsic, extrinsic):
         """
         Integrate an RGBD image into the TSDF volume
 
         Args:
-            rgbd_image: o3d.geometry.RGBDImage (legacy format)
-            intrinsic: o3d.camera.PinholeCameraIntrinsic
-            extrinsic: 4x4 numpy array (camera pose)
+            rgbd: o3d.t.geometry.RGBDImage (tensor format, already on GPU)
+            intrinsic: o3c.Tensor (3x3, float64, on GPU)
+            extrinsic: o3c.Tensor (4x4, float64, on GPU)
         """
-        # Convert legacy RGBD to Tensor format
-        color_legacy = np.asarray(rgbd_image.color)
-        depth_legacy = np.asarray(rgbd_image.depth)
+        # Extract color and depth from tensor RGBD
+        color_tensor = rgbd.color
+        depth_tensor = rgbd.depth
 
-        # Convert to Open3D Tensor Images
-        # Need both CPU and GPU versions for different operations
-        color_tensor_cpu = o3d.t.geometry.Image(
-            o3c.Tensor(color_legacy, dtype=o3c.uint8, device=o3c.Device("CPU:0"))
-        )
-        depth_tensor_cpu = o3d.t.geometry.Image(
-            o3c.Tensor(depth_legacy, dtype=o3c.float32, device=o3c.Device("CPU:0"))
-        )
+        # intrinsic and extrinsic are already tensors on GPU
+        intrinsic_tensor = intrinsic
+        extrinsic_tensor = extrinsic
 
-        color_tensor_gpu = o3d.t.geometry.Image(
-            o3c.Tensor(color_legacy, dtype=o3c.uint8, device=self.device)
-        )
-        depth_tensor_gpu = o3d.t.geometry.Image(
-            o3c.Tensor(depth_legacy, dtype=o3c.float32, device=self.device)
-        )
-
-        # Convert intrinsic to Tensor
-        # Note: For Open3D 0.18, compute_unique_block_coordinates needs CPU intrinsic with float64
-        intrinsic_tensor_cpu = o3c.Tensor(
-            intrinsic.intrinsic_matrix,
-            dtype=o3c.float64,
-            device=o3c.Device("CPU:0")
-        )
-
-        intrinsic_tensor_gpu = o3c.Tensor(
-            intrinsic.intrinsic_matrix,
-            dtype=o3c.float64,
-            device=self.device
-        )
-
-        # Convert extrinsic to Tensor
-        # Note: For Open3D 0.18, compute_unique_block_coordinates may need CPU extrinsic with float64
-        extrinsic_tensor_cpu = o3c.Tensor(
-            extrinsic,
-            dtype=o3c.float64,
-            device=o3c.Device("CPU:0")  # Use CPU for compatibility with Open3D 0.18
-        )
-
-        extrinsic_tensor_gpu = o3c.Tensor(
-            extrinsic,
-            dtype=o3c.float64,
-            device=self.device
-        )
+        # For compute_unique_block_coordinates, need CPU versions
+        depth_tensor_cpu = depth_tensor.to(o3c.Device("CPU:0"))
+        intrinsic_tensor_cpu = intrinsic_tensor.to(o3c.Device("CPU:0"))
+        extrinsic_tensor_cpu = extrinsic_tensor.to(o3c.Device("CPU:0"))
 
         # Compute frustum block coordinates (only update visible blocks)
-        # Use CPU tensors for compute_unique_block_coordinates
+        depth_np = depth_tensor_cpu.as_tensor().numpy()
         depth_scale = 1.0
-        depth_max = depth_legacy.max() if depth_legacy.max() > 0 else 10.0
+        depth_max = depth_np.max() if depth_np.max() > 0 else 10.0
 
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
-            depth_tensor_cpu,  # Use CPU version
-            intrinsic_tensor_cpu,  # Use CPU version
-            extrinsic_tensor_cpu,  # Use CPU version
+            depth_tensor_cpu,
+            intrinsic_tensor_cpu,
+            extrinsic_tensor_cpu,
             depth_scale=depth_scale,
             depth_max=depth_max,
             trunc_voxel_multiplier=4.0
         )
 
-        # Integrate (use overload 2: shared intrinsic for depth and color)
-        # Use GPU tensors for integrate
+        # Integrate (use GPU tensors)
         self.vbg.integrate(
-            frustum_block_coords,  # This comes from CPU operation
-            depth_tensor_gpu,  # Use GPU version
-            color_tensor_gpu,  # Use GPU version
-            intrinsic_tensor_gpu,  # Shared intrinsic for both depth and color
-            extrinsic_tensor_gpu,
+            frustum_block_coords,
+            depth_tensor,
+            color_tensor,
+            intrinsic_tensor,
+            extrinsic_tensor,
             depth_scale=depth_scale,
             depth_max=depth_max,
             trunc_voxel_multiplier=4.0

@@ -209,7 +209,43 @@ class GaussianExtractor(object):
                 depth_scale = 1.0
             )
 
-            volume.integrate(rgbd, intrinsic=cam_o3d.intrinsic, extrinsic=cam_o3d.extrinsic)
+            # Check if using GPU TSDF and move data to GPU
+            if hasattr(volume, 'device'):  # GPUTSDFVolume has device attribute
+                # Convert to tensor format and move to GPU
+                import open3d.core as o3c
+
+                # Convert RGBD to tensor format on GPU
+                color_np = np.asarray(rgbd.color)
+                depth_np = np.asarray(rgbd.depth)
+
+                color_tensor = o3d.t.geometry.Image(
+                    o3c.Tensor(color_np, dtype=o3c.uint8, device=volume.device)
+                )
+                depth_tensor = o3d.t.geometry.Image(
+                    o3c.Tensor(depth_np, dtype=o3c.float32, device=volume.device)
+                )
+                rgbd_gpu = o3d.t.geometry.RGBDImage(color_tensor, depth_tensor)
+
+                # Convert intrinsic and extrinsic to GPU tensors
+                intrinsic_gpu = o3c.Tensor(
+                    cam_o3d.intrinsic.intrinsic_matrix,
+                    dtype=o3c.float64,
+                    device=volume.device
+                )
+                extrinsic_gpu = o3c.Tensor(
+                    cam_o3d.extrinsic,
+                    dtype=o3c.float64,
+                    device=volume.device
+                )
+
+                print(f"[DEBUG] Frame {i}: Passing GPU tensors to integrate (device={volume.device})")
+
+                # Call integrate with tensor format (not legacy format)
+                # Note: This requires gpu_tsdf.py to handle tensor RGBD format
+                volume.integrate(rgbd_gpu, intrinsic_gpu, extrinsic_gpu)
+            else:
+                # CPU TSDF: use legacy format
+                volume.integrate(rgbd, intrinsic=cam_o3d.intrinsic, extrinsic=cam_o3d.extrinsic)
 
         mesh = volume.extract_triangle_mesh()
         return mesh
