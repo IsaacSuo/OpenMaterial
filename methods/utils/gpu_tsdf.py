@@ -51,7 +51,7 @@ class GPUTSDFVolume:
             attr_channels=((1), (1), (3)),
             voxel_size=self.voxel_size,
             block_resolution=16,
-            block_count=100000,  # Moderate capacity to avoid OOM at init
+            block_count=200000,  # ~15GB VRAM for large scenes
             device=self.device
         )
 
