@@ -67,11 +67,9 @@ class GPUTSDFVolume:
         # 1. 拆解 RGBD
         depth_img = rgbd.depth
 
-        # ================== 关键修复 ==================
-        # 将 Color 转换为 Float32，以匹配 Depth 的类型
-        # 解决报错: Received (Float32 UInt8), Expected (float, float)
+        # [关键点 A] 将 Color 转换为 Float32
+        # 必须先转为 Float32，否则后面积分时会报 (Float32, UInt8) 错误
         color_img = rgbd.color.to(o3c.Dtype.Float32)
-        # ============================================
 
         # 2. 计算depth参数
         depth_np = depth_img.as_tensor().cpu().numpy()
@@ -90,13 +88,12 @@ class GPUTSDFVolume:
             trunc_voxel_multiplier=4.0
         )
 
-        # 5. 搬运回 GPU 并转为 Int32
-        frustum_block_coords = frustum_block_coords.to(
-            device=self.device,
-            dtype=o3c.int32
-        )
+        # [关键点 B] 修复 .to() 报错，使用链式调用
+        # 不要写在一起，分两步走，最稳妥
+        frustum_block_coords = frustum_block_coords.to(o3c.Device("CUDA:0"))  # 先搬到 GPU
+        frustum_block_coords = frustum_block_coords.to(o3c.int32)              # 再转为 Int32
 
-        # 6. 执行积分
+        # 5. 执行积分
         self.vbg.integrate(
             frustum_block_coords,
             depth_img,
