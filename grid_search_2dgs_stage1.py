@@ -75,13 +75,16 @@ def extract_mesh_with_params(model_path, data_path, output_mesh_path, mesh_res, 
         cmd,
         shell=True,
         executable='/bin/bash',
-        capture_output=False,  # Let output go to terminal directly
-        text=True,
-        stderr=subprocess.STDOUT  # Redirect stderr to stdout so we see all output
+        capture_output=True,
+        text=True
     )
 
     if result.returncode != 0:
         print(f"  ✗ Mesh extraction failed (return code: {result.returncode})")
+        if result.stdout:
+            print(f"  stdout: {result.stdout[-500:]}")  # Last 500 chars
+        if result.stderr:
+            print(f"  stderr: {result.stderr[-500:]}")  # Last 500 chars
         return False
 
     # Copy extracted mesh to output location
