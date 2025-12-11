@@ -196,10 +196,10 @@ def run_grid_search(test_scene, output_dir):
         output_dir: directory to save results
     """
 
-    # Configuration - Test with single parameter set first
+    # Configuration - Fixed parameters for testing
     mesh_res_values = [3072]
-    voxel_size_values = [0.002]
-    # Total: 1 configuration (for testing)
+    voxel_size_values = [0.003]
+    # Total: 1 configuration
 
     dataset_dir = "/opt/data/private/dataset/OpenMaterial_ablation"
     gt_dir = "/opt/data/private/dataset/OpenMaterial_ablation/groundtruth_ablation"
