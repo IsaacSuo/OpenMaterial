@@ -157,7 +157,11 @@ def run_method_on_scenes(method_name: str, scenes: List[str],
             object_name = Path(scene_path).parent.name
             mesh_output = method_output_dir / "meshes" / object_name / f"{scene_name}.ply"
 
-            if mesh_output.exists():
+            # Also check if training checkpoint exists (for --skip-mesh case)
+            checkpoint_dir = method_output_dir / "models" / object_name / scene_name / "point_cloud" / "iteration_30000"
+            training_done = checkpoint_dir.exists()
+
+            if mesh_output.exists() or training_done:
                 print(f"[{method_name}] ✓ Scene already completed: {scene_name}, skipping")
                 results['scenes_processed'] += 1
                 results['scenes_success'] += 1
