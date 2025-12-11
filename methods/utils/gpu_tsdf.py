@@ -81,6 +81,7 @@ class GPUTSDFVolume:
         extrinsic_cpu = extrinsic.to(o3c.Device("CPU:0"))
 
         # 4. 计算活跃块 (使用拆解出来的 depth_img)
+        # 注意：混合设备计算（Depth在GPU，参数在CPU），结果可能在CPU上
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
             depth_img,
             intrinsic_cpu,
@@ -90,7 +91,13 @@ class GPUTSDFVolume:
             trunc_voxel_multiplier=4.0
         )
 
-        # 5. 执行积分
+        # ================== 关键修复 ==================
+        # 5. 必须将 block_coords 搬运回 GPU！
+        # 否则 integrate 函数会因为设备不统一而报 TypeError
+        frustum_block_coords = frustum_block_coords.to(self.device)
+        # ============================================
+
+        # 6. 执行积分 (所有变量现在都在 GPU 上了)
         # 这里使用 Open3D 支持的第 2 种重载：同时传入 depth 和 color
         # 确保 intrinsic 和 extrinsic 是 GPU 版 (解决 Float64/Device 报错)
         self.vbg.integrate(
