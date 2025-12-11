@@ -69,10 +69,18 @@ class GPUTSDFVolume:
         depth_legacy = np.asarray(rgbd_image.depth)
 
         # Convert to Open3D Tensor Images
-        color_tensor = o3d.t.geometry.Image(
+        # Need both CPU and GPU versions for different operations
+        color_tensor_cpu = o3d.t.geometry.Image(
+            o3c.Tensor(color_legacy, dtype=o3c.uint8, device=o3c.Device("CPU:0"))
+        )
+        depth_tensor_cpu = o3d.t.geometry.Image(
+            o3c.Tensor(depth_legacy, dtype=o3c.float32, device=o3c.Device("CPU:0"))
+        )
+
+        color_tensor_gpu = o3d.t.geometry.Image(
             o3c.Tensor(color_legacy, dtype=o3c.uint8, device=self.device)
         )
-        depth_tensor = o3d.t.geometry.Image(
+        depth_tensor_gpu = o3d.t.geometry.Image(
             o3c.Tensor(depth_legacy, dtype=o3c.float32, device=self.device)
         )
 
@@ -105,11 +113,12 @@ class GPUTSDFVolume:
         )
 
         # Compute frustum block coordinates (only update visible blocks)
+        # Use CPU tensors for compute_unique_block_coordinates
         depth_scale = 1.0
         depth_max = depth_legacy.max() if depth_legacy.max() > 0 else 10.0
 
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
-            depth_tensor,
+            depth_tensor_cpu,  # Use CPU version
             intrinsic_tensor_cpu,  # Use CPU version
             extrinsic_tensor_cpu,  # Use CPU version
             depth_scale=depth_scale,
@@ -118,10 +127,11 @@ class GPUTSDFVolume:
         )
 
         # Integrate (use overload 2: shared intrinsic for depth and color)
+        # Use GPU tensors for integrate
         self.vbg.integrate(
-            frustum_block_coords,
-            depth_tensor,
-            color_tensor,
+            frustum_block_coords,  # This comes from CPU operation
+            depth_tensor_gpu,  # Use GPU version
+            color_tensor_gpu,  # Use GPU version
             intrinsic_tensor_gpu,  # Shared intrinsic for both depth and color
             extrinsic_tensor_gpu,
             depth_scale=depth_scale,
