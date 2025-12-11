@@ -64,55 +64,48 @@ class GPUTSDFVolume:
             intrinsic: o3c.Tensor (3x3, float64, on GPU)
             extrinsic: o3c.Tensor (4x4, float64, on GPU)
         """
-        # ==================== 终极修改版 ====================
-
-        # 1. 拆解 RGBDImage
-        # Open3D 接口要求深度和颜色分开传
+        # 1. 拆解 RGBD
         depth_img = rgbd.depth
-        color_img = rgbd.color
+
+        # ================== 关键修复 ==================
+        # 将 Color 转换为 Float32，以匹配 Depth 的类型
+        # 解决报错: Received (Float32 UInt8), Expected (float, float)
+        color_img = rgbd.color.to(o3c.Dtype.Float32)
+        # ============================================
 
         # 2. 计算depth参数
         depth_np = depth_img.as_tensor().cpu().numpy()
         depth_scale = 1.0
-        depth_max = depth_np.max() if depth_np.max() > 0 else 10.0
+        depth_max = float(depth_np.max()) if depth_np.max() > 0 else 10.0
 
-        # 3. 准备 CPU 矩阵用于 Frustum 计算 (解决 InverseTransformation 报错)
+        # 3. 准备 CPU 矩阵 (用于 Frustum 计算)
         intrinsic_cpu = intrinsic.to(o3c.Device("CPU:0"))
         extrinsic_cpu = extrinsic.to(o3c.Device("CPU:0"))
 
-        # 4. 计算活跃块 (使用拆解出来的 depth_img)
-        # 注意：混合设备计算（Depth在GPU，参数在CPU），结果可能在CPU上
+        # 4. 计算活跃块坐标 (在 CPU 上进行)
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
-            depth_img,
-            intrinsic_cpu,
-            extrinsic_cpu,
+            depth_img, intrinsic_cpu, extrinsic_cpu,
             depth_scale=depth_scale,
             depth_max=depth_max,
             trunc_voxel_multiplier=4.0
         )
 
-        # ================== 关键修复 ==================
-        # 5. 必须将 block_coords 搬运回 GPU！
-        # 并且强制转换为 Int32（Open3D 哈希表索引要求32位整数）
-        block_coords_np = frustum_block_coords.cpu().numpy().astype('int32')
-        frustum_block_coords = o3c.Tensor(block_coords_np, dtype=o3c.int32, device=self.device)
-        # ============================================
+        # 5. 搬运回 GPU 并转为 Int32
+        frustum_block_coords = frustum_block_coords.to(
+            device=self.device,
+            dtype=o3c.int32
+        )
 
-        # 6. 执行积分 (所有变量现在都在 GPU 上了)
-        # 这里使用 Open3D 支持的第 2 种重载：同时传入 depth 和 color
-        # 确保 intrinsic 和 extrinsic 是 GPU 版 (解决 Float64/Device 报错)
-        # 确保 depth_scale 和 depth_max 是纯 Python float（C++绑定要求）
+        # 6. 执行积分
         self.vbg.integrate(
             frustum_block_coords,
             depth_img,
             color_img,
-            intrinsic,  # GPU version
-            extrinsic,  # GPU version
-            depth_scale=float(depth_scale),  # 强制纯Python float
-            depth_max=float(depth_max),      # 强制纯Python float
-            trunc_voxel_multiplier=4.0
+            intrinsic,
+            extrinsic,
+            float(depth_scale),
+            float(depth_max)
         )
-        # ===================================================
 
     def extract_triangle_mesh(self):
         """
