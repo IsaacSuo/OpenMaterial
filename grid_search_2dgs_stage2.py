@@ -198,7 +198,7 @@ def run_grid_search(test_scene, output_dir):
     # Configuration - Stage 2: Search sdf_trunc and depth_trunc
     # Fixed from Stage 1
     mesh_res = 3072
-    voxel_size = 0.004
+    voxel_size = 0.005
 
     # Search ranges
     # sdf_trunc = multiplier * voxel_size
