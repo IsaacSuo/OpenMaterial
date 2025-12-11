@@ -159,9 +159,9 @@ def run_method_on_scenes(method_name: str, scenes: List[str],
 
             # Check completion based on what we're doing
             if skip_mesh:
-                # If skipping mesh, check if training checkpoint exists
-                checkpoint_dir = method_output_dir / "models" / object_name / scene_name / "point_cloud" / "iteration_30000"
-                is_completed = checkpoint_dir.exists()
+                # If skipping mesh, check if training checkpoint is complete
+                checkpoint_file = method_output_dir / "models" / object_name / scene_name / "point_cloud" / "iteration_30000" / "point_cloud.ply"
+                is_completed = checkpoint_file.exists()
             else:
                 # If extracting mesh, check if mesh exists
                 is_completed = mesh_output.exists()
