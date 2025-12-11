@@ -166,8 +166,21 @@ class GaussianExtractor(object):
                 sys.path.insert(0, methods_path)
 
             print(f"[DEBUG] Trying to import GPU TSDF from: {methods_path}")
-            from utils.gpu_tsdf import create_tsdf_volume
-            volume = create_tsdf_volume(voxel_size=voxel_size, use_gpu=True)
+            print(f"[DEBUG] sys.path[0]: {sys.path[0]}")
+
+            # Import using importlib for better error messages
+            import importlib.util
+            gpu_tsdf_path = openmaterial_root / 'methods' / 'utils' / 'gpu_tsdf.py'
+            print(f"[DEBUG] GPU TSDF file exists: {gpu_tsdf_path.exists()}")
+
+            if not gpu_tsdf_path.exists():
+                raise FileNotFoundError(f"GPU TSDF module not found at {gpu_tsdf_path}")
+
+            spec = importlib.util.spec_from_file_location("gpu_tsdf_module", gpu_tsdf_path)
+            gpu_tsdf_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(gpu_tsdf_module)
+
+            volume = gpu_tsdf_module.create_tsdf_volume(voxel_size=voxel_size, use_gpu=True)
             print(f"✓ Using GPU-accelerated TSDF (voxel_size={voxel_size})")
         except Exception as e:
             print(f"⚠ GPU TSDF not available: {type(e).__name__}: {e}")
