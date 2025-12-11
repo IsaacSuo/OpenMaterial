@@ -76,31 +76,31 @@ class GPUTSDFVolume:
             o3c.Tensor(depth_legacy, dtype=o3c.float32, device=self.device)
         )
 
-        # Convert intrinsic to Tensor
+        # Convert intrinsic to Tensor (use float32 for CUDA compatibility)
         # Note: For Open3D 0.18, compute_unique_block_coordinates needs CPU intrinsic
         intrinsic_tensor_cpu = o3c.Tensor(
-            intrinsic.intrinsic_matrix,
-            dtype=o3c.float64,
+            intrinsic.intrinsic_matrix.astype(np.float32),
+            dtype=o3c.float32,
             device=o3c.Device("CPU:0")
         )
 
         intrinsic_tensor_gpu = o3c.Tensor(
-            intrinsic.intrinsic_matrix,
-            dtype=o3c.float64,
+            intrinsic.intrinsic_matrix.astype(np.float32),
+            dtype=o3c.float32,
             device=self.device
         )
 
-        # Convert extrinsic to Tensor
+        # Convert extrinsic to Tensor (use float32 for CUDA compatibility)
         # Note: For Open3D 0.18, compute_unique_block_coordinates may need CPU extrinsic
         extrinsic_tensor_cpu = o3c.Tensor(
-            extrinsic,
-            dtype=o3c.float64,
+            np.asarray(extrinsic, dtype=np.float32),
+            dtype=o3c.float32,
             device=o3c.Device("CPU:0")  # Use CPU for compatibility with Open3D 0.18
         )
 
         extrinsic_tensor_gpu = o3c.Tensor(
-            extrinsic,
-            dtype=o3c.float64,
+            np.asarray(extrinsic, dtype=np.float32),
+            dtype=o3c.float32,
             device=self.device
         )
 
