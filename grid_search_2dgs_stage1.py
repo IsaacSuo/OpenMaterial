@@ -76,7 +76,8 @@ def extract_mesh_with_params(model_path, data_path, output_mesh_path, mesh_res, 
         shell=True,
         executable='/bin/bash',
         capture_output=False,  # Let output go to terminal directly
-        text=True
+        text=True,
+        stderr=subprocess.STDOUT  # Redirect stderr to stdout so we see all output
     )
 
     if result.returncode != 0:
