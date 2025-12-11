@@ -94,7 +94,17 @@ class GPUTSDFVolume:
         # ================== 关键修复 ==================
         # 5. 必须将 block_coords 搬运回 GPU！
         # 否则 integrate 函数会因为设备不统一而报 TypeError
-        frustum_block_coords = frustum_block_coords.to(self.device)
+        print(f"[DEBUG] block_coords before: device={frustum_block_coords.device}, dtype={frustum_block_coords.dtype}")
+
+        # 使用更可靠的方式：先转numpy再创建CUDA tensor
+        block_coords_np = frustum_block_coords.cpu().numpy()
+        frustum_block_coords = o3c.Tensor(block_coords_np, dtype=frustum_block_coords.dtype, device=self.device)
+
+        print(f"[DEBUG] block_coords after: device={frustum_block_coords.device}")
+        print(f"[DEBUG] depth_img device: {depth_img.device}")
+        print(f"[DEBUG] color_img device: {color_img.device}")
+        print(f"[DEBUG] intrinsic device: {intrinsic.device}")
+        print(f"[DEBUG] extrinsic device: {extrinsic.device}")
         # ============================================
 
         # 6. 执行积分 (所有变量现在都在 GPU 上了)
