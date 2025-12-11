@@ -162,7 +162,10 @@ class GaussianExtractor(object):
             volume = create_tsdf_volume(voxel_size=voxel_size, use_gpu=True)
             print(f"✓ Using GPU-accelerated TSDF (voxel_size={voxel_size})")
         except Exception as e:
-            print(f"GPU TSDF not available ({e}), using CPU fallback")
+            print(f"⚠ GPU TSDF not available: {type(e).__name__}: {e}")
+            print(f"⚠ Falling back to CPU TSDF (will be slower and use more RAM)")
+            import traceback
+            traceback.print_exc()
             volume = o3d.pipelines.integration.ScalableTSDFVolume(
                 voxel_length= voxel_size,
                 sdf_trunc=sdf_trunc,
