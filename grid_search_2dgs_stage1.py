@@ -198,7 +198,7 @@ def run_grid_search(test_scene, output_dir):
 
     # Configuration - Fixed parameters for testing
     mesh_res_values = [3072]
-    voxel_size_values = [0.006]
+    voxel_size_values = [0.005]
     # Total: 1 configuration
 
     dataset_dir = "/opt/data/private/dataset/OpenMaterial_ablation"
