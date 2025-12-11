@@ -84,10 +84,11 @@ class GPUTSDFVolume:
         )
 
         # Convert extrinsic to Tensor
+        # Note: For Open3D 0.18, compute_unique_block_coordinates may need CPU extrinsic
         extrinsic_tensor = o3c.Tensor(
             extrinsic,
             dtype=o3c.float64,
-            device=self.device
+            device=o3c.Device("CPU:0")  # Use CPU for compatibility with Open3D 0.18
         )
 
         # Compute frustum block coordinates (only update visible blocks)
@@ -103,6 +104,13 @@ class GPUTSDFVolume:
             trunc_voxel_multiplier=4.0
         )
 
+        # Convert extrinsic back to GPU for integrate
+        extrinsic_tensor_gpu = o3c.Tensor(
+            extrinsic,
+            dtype=o3c.float64,
+            device=self.device
+        )
+
         # Integrate
         self.vbg.integrate(
             frustum_block_coords,
@@ -110,7 +118,7 @@ class GPUTSDFVolume:
             color_tensor,
             intrinsic_tensor,
             intrinsic_tensor,  # color intrinsic = depth intrinsic
-            extrinsic_tensor,
+            extrinsic_tensor_gpu,  # Use GPU version for integrate
             depth_scale=depth_scale,
             depth_max=depth_max
         )
