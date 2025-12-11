@@ -117,17 +117,16 @@ class GPUTSDFVolume:
             trunc_voxel_multiplier=4.0
         )
 
-        # Integrate
+        # Integrate (use overload 2: shared intrinsic for depth and color)
         self.vbg.integrate(
             frustum_block_coords,
             depth_tensor,
             color_tensor,
-            intrinsic_tensor_gpu,  # Use GPU version for integrate
-            intrinsic_tensor_gpu,  # color intrinsic = depth intrinsic
-            extrinsic_tensor_gpu,  # Use GPU version for integrate
+            intrinsic_tensor_gpu,  # Shared intrinsic for both depth and color
+            extrinsic_tensor_gpu,
             depth_scale=depth_scale,
             depth_max=depth_max,
-            trunc_voxel_multiplier=4.0  # Match compute_unique_block_coordinates value
+            trunc_voxel_multiplier=4.0
         )
 
     def extract_triangle_mesh(self):
