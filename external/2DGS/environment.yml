@@ -5,21 +5,22 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - ffmpeg=4.2.2
-  - pillow=10.2.0
-  - pip=23.3.1
-  - python=3.8.18
-  - pytorch=2.0.0
-  - torchaudio=2.0.0
-  - torchvision=0.15.0
-  - typing_extensions=4.9.0
+  - ffmpeg=6.1
+  - pillow=10.4.0
+  - pip=24.0
+  - python=3.12
+  - pytorch=2.9.0
+  - pytorch-cuda=13.0
+  - torchaudio=2.9.0
+  - torchvision=0.24.0
+  - typing_extensions=4.12.0
   - pip:
     - open3d==0.18.0
-    - mediapy==1.1.2
+    - mediapy==1.2.2
     - lpips==0.1.4
-    - scikit-image==0.21.0
-    - tqdm==4.66.2
-    - trimesh==4.3.2
+    - scikit-image==0.24.0
+    - tqdm==4.67.0
+    - trimesh==4.5.0
     - submodules/diff-surfel-rasterization
     - submodules/simple-knn
     - plyfile

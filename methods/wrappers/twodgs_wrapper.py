@@ -2,6 +2,7 @@
 2DGS (2D Gaussian Splatting) Method Wrapper
 """
 
+import subprocess
 from pathlib import Path
 from typing import Dict, Any
 from ..base_method import BaseMethod
@@ -14,74 +15,106 @@ class TwoDGSMethod(BaseMethod):
         super().__init__(
             method_name="2dgs",
             repo_path=repo_path,
-            conda_env="surfel_splatting"
+            conda_env=""  # Not using conda
         )
 
     def setup(self) -> bool:
-        """Setup 2DGS environment"""
-        if not self.check_environment():
-            print(f"Creating conda environment: {self.conda_env}")
-            result = self.run_command(
-                f"conda create -n {self.conda_env} python=3.8 -y",
-                use_conda=False
-            )
-            if result.returncode != 0:
-                return False
+        """Setup 2DGS environment
 
-        # Install PyTorch (check if already installed)
-        print("Checking PyTorch...")
-        check_torch = self.run_command(
-            "python -c \"import torch; print(torch.__version__)\" 2>/dev/null"
+        Verifies that required dependencies are available in current Python environment.
+        """
+        # Verify CUDA extensions are available
+        result = subprocess.run(
+            "python -c \"import diff_surfel_rasterization; import simple_knn\"",
+            shell=True, capture_output=True, text=True
         )
-        if check_torch.returncode == 0 and "2.3.1" in check_torch.stdout:
-            print(f"✓ PyTorch 2.3.1 already installed, skipping download")
-        else:
-            print("Installing PyTorch...")
-            result = self.run_command(
-                "pip install torch==2.3.1 torchvision==0.18.1 "
-                "-i https://pypi.tuna.tsinghua.edu.cn/simple"
-            )
-            if result.returncode != 0:
-                return False
+        if result.returncode != 0:
+            print("CUDA extensions not found. Please build them:")
+            print("  cd external/2DGS")
+            print("  pip install submodules/diff-surfel-rasterization")
+            print("  pip install submodules/simple-knn")
+            return False
 
-        # Install dependencies
-        print("Checking dependencies...")
-        check_deps = self.run_command(
-            "python -c \"import plyfile; import open3d; import lpips; import trimesh\" 2>/dev/null"
-        )
-        if check_deps.returncode == 0:
-            print("✓ Dependencies already installed")
-        else:
-            print("Installing dependencies...")
-            result = self.run_command(
-                "pip install plyfile tqdm opencv-python mediapy open3d==0.18.0 lpips scikit-image trimesh "
-                "-i https://pypi.tuna.tsinghua.edu.cn/simple"
-            )
-            if result.returncode != 0:
-                print(f"Failed to install dependencies: {result.stderr}")
-                return False
-
-        # Build CUDA extensions (check if already built)
-        print("Checking CUDA extensions...")
-        check_extensions = self.run_command(
-            "python -c \"import diff_surfel_rasterization; import simple_knn\" 2>/dev/null"
-        )
-        if check_extensions.returncode == 0:
-            print("✓ CUDA extensions already built")
-        else:
-            print("Building CUDA extensions...")
-            result = self.run_command("pip install submodules/diff-surfel-rasterization")
-            if result.returncode != 0:
-                print(f"Failed to build diff-surfel-rasterization: {result.stderr}")
-                return False
-
-            result = self.run_command("pip install submodules/simple-knn")
-            if result.returncode != 0:
-                print(f"Failed to build simple-knn: {result.stderr}")
-                return False
-
-        print("✓ 2DGS setup complete")
+        print("✓ 2DGS environment ready")
         return True
+
+    def run_command(self, cmd: str, cwd=None, use_conda: bool = False,
+                   log_output: bool = False, log_dir=None):
+        """Run command without conda activation"""
+        if cwd is None:
+            cwd = str(self.repo_path)
+
+        if log_output and log_dir:
+            import re
+            import time
+            log_dir_path = Path(log_dir)
+            log_dir_path.mkdir(parents=True, exist_ok=True)
+
+            stdout_log = log_dir_path / "training.log"
+            print(f"Training logs: {stdout_log}")
+
+            with open(stdout_log, 'w') as f_out:
+                process = subprocess.Popen(
+                    cmd,
+                    shell=True,
+                    cwd=cwd,
+                    executable='/bin/bash',
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True
+                )
+
+                progress_patterns = [
+                    r'Iteration.*?(\d+)',
+                    r'Iter.*?(\d+)',
+                    r'Step.*?(\d+)',
+                    r'Epoch.*?(\d+)',
+                    r'\d+%',
+                    r'Loss',
+                    r'PSNR',
+                ]
+
+                last_progress = None
+                last_update_time = time.time()
+
+                for line in process.stdout:
+                    f_out.write(line)
+                    f_out.flush()
+
+                    current_time = time.time()
+                    is_progress = any(re.search(p, line, re.IGNORECASE) for p in progress_patterns)
+
+                    if is_progress and (current_time - last_update_time > 0.5):
+                        clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line.strip())
+                        print(f"\r{clean_line[:120]:<120}", end='', flush=True)
+                        last_progress = clean_line
+                        last_update_time = current_time
+                    elif any(keyword in line.lower() for keyword in ['error', 'warning', 'failed', 'exception']):
+                        print(f"\n{line.strip()}")
+
+                returncode = process.wait()
+
+                if last_progress:
+                    print(f"\r{last_progress[:120]:<120}")
+                print(f"\nTraining completed with return code: {returncode}")
+
+            with open(stdout_log, 'r') as f:
+                stdout_content = f.read()
+
+            class Result:
+                def __init__(self, rc, out, err):
+                    self.returncode = rc
+                    self.stdout = out
+                    self.stderr = err
+
+            return Result(returncode, stdout_content, "")
+        else:
+            return subprocess.run(
+                cmd, shell=True, cwd=cwd, executable='/bin/bash',
+                capture_output=True, text=True
+            )
 
     def convert_data(self, input_path: str, output_path: str) -> bool:
         """2DGS uses transforms.json format directly, create symlink to avoid data duplication"""
