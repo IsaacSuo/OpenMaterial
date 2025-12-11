@@ -64,46 +64,46 @@ class GPUTSDFVolume:
             intrinsic: o3c.Tensor (3x3, float64, on GPU)
             extrinsic: o3c.Tensor (4x4, float64, on GPU)
         """
-        # Extract color and depth from tensor RGBD
-        color_tensor = rgbd.color
-        depth_tensor = rgbd.depth
+        # ==================== 终极修改版 ====================
 
-        # intrinsic and extrinsic are already tensors on GPU
-        intrinsic_tensor_gpu = intrinsic
-        extrinsic_tensor_gpu = extrinsic
+        # 1. 拆解 RGBDImage
+        # Open3D 接口要求深度和颜色分开传
+        depth_img = rgbd.depth
+        color_img = rgbd.color
 
-        # Compute frustum block coordinates (only update visible blocks)
-        # Open3D's compute_unique_block_coordinates calls InverseTransformation internally,
-        # which ONLY works on CPU. So we need CPU copies for this step.
-        depth_np = depth_tensor.as_tensor().cpu().numpy()
+        # 2. 计算depth参数
+        depth_np = depth_img.as_tensor().cpu().numpy()
         depth_scale = 1.0
         depth_max = depth_np.max() if depth_np.max() > 0 else 10.0
 
-        # Create CPU copies for compute_unique_block_coordinates
-        # (depth stays on GPU, Open3D supports this mixed mode)
-        intrinsic_tensor_cpu = intrinsic_tensor_gpu.to(o3c.Device("CPU:0"))
-        extrinsic_tensor_cpu = extrinsic_tensor_gpu.to(o3c.Device("CPU:0"))
+        # 3. 准备 CPU 矩阵用于 Frustum 计算 (解决 InverseTransformation 报错)
+        intrinsic_cpu = intrinsic.to(o3c.Device("CPU:0"))
+        extrinsic_cpu = extrinsic.to(o3c.Device("CPU:0"))
 
+        # 4. 计算活跃块 (使用拆解出来的 depth_img)
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
-            depth_tensor,  # Keep on GPU (for parallel computation)
-            intrinsic_tensor_cpu,  # Use CPU (for InverseTransformation)
-            extrinsic_tensor_cpu,  # Use CPU (for InverseTransformation)
+            depth_img,
+            intrinsic_cpu,
+            extrinsic_cpu,
             depth_scale=depth_scale,
             depth_max=depth_max,
             trunc_voxel_multiplier=4.0
         )
 
-        # Integrate: Must use GPU tensors for parallel CUDA computation
+        # 5. 执行积分
+        # 这里使用 Open3D 支持的第 2 种重载：同时传入 depth 和 color
+        # 确保 intrinsic 和 extrinsic 是 GPU 版 (解决 Float64/Device 报错)
         self.vbg.integrate(
             frustum_block_coords,
-            depth_tensor,  # GPU
-            color_tensor,  # GPU
-            intrinsic_tensor_gpu,  # GPU (not CPU!)
-            extrinsic_tensor_gpu,  # GPU (not CPU!)
+            depth_img,
+            color_img,
+            intrinsic,  # GPU version
+            extrinsic,  # GPU version
             depth_scale=depth_scale,
             depth_max=depth_max,
             trunc_voxel_multiplier=4.0
         )
+        # ===================================================
 
     def extract_triangle_mesh(self):
         """
