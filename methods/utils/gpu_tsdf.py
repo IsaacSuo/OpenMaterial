@@ -126,6 +126,11 @@ class GPUTSDFVolume:
             float(depth_max)
         )
 
+        # 打印本帧新增的 block 数量
+        new_blocks = frustum_block_coords.shape[0]
+        total_blocks = self.vbg.hashmap().size()
+        print(f"[TSDF] This frame: {new_blocks} blocks, Total: {total_blocks} / 200000")
+
     def extract_triangle_mesh(self):
         """
         Extract triangle mesh from TSDF volume
