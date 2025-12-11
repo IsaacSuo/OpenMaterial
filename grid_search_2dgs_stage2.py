@@ -200,12 +200,12 @@ def run_grid_search(test_scene, output_dir):
     mesh_res = 3072
     voxel_size = 0.003
 
-    # Search ranges
+    # Search ranges - Single parameter for testing
     # sdf_trunc = multiplier * voxel_size
-    sdf_trunc_multipliers = [3.0, 4.0, 5.0, 6.0]  # Default is 5.0
+    sdf_trunc_multipliers = [5.0]  # Default is 5.0
     # depth_trunc = multiplier * radius (radius ~2.4m)
-    depth_trunc_values = [4.5, 5.0, 5.5, 6.0]  # Default is ~4.8 (2.0 * radius)
-    # Total: 4 × 4 = 16 configurations
+    depth_trunc_values = [5.0]  # Default is ~4.8 (2.0 * radius)
+    # Total: 1 configuration
 
     dataset_dir = "/opt/data/private/dataset/OpenMaterial_ablation"
     gt_dir = "/opt/data/private/dataset/OpenMaterial_ablation/groundtruth_ablation"
