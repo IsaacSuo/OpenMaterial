@@ -462,7 +462,7 @@ def compute_chamfer_distance(pred_mesh_path: str, gt_mesh_path: str,
     return chamfer
 
 
-def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: str = None) -> Dict:
+def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: str = None, generate_masks: bool = False) -> Dict:
     """
     Evaluate a single method
 
@@ -471,6 +471,7 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
         benchmark_dir: Base benchmark output directory
         gt_dir: Ground truth directory
         dataset_dir: Dataset directory containing transforms and masks (for mesh cleaning)
+        generate_masks: If True, generate masks from GT for scenes missing masks; if False, skip those scenes
 
     Returns:
         Dict with evaluation results
@@ -501,24 +502,38 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
     # Clean meshes using official OpenMaterial eval script if dataset_dir is provided
     if dataset_dir:
         print("Running mesh cleaning using official OpenMaterial pipeline...")
-        print("(Will generate masks from GT mesh if missing)\n")
+        if generate_masks:
+            print("(Will generate masks from GT mesh if missing)\n")
+        else:
+            print("(Scenes without masks will be skipped)\n")
 
         # Track scenes that can be cleaned
         cleanable_scenes = []
         skipped_scenes = []
 
-        # First pass: ensure masks exist for all scenes
+        # First pass: check/ensure masks exist for all scenes
         for pred_mesh in mesh_files:
             object_name = pred_mesh.parent.name
             scene_name = pred_mesh.stem
 
-            print(f"  Checking masks for {object_name}/{scene_name}...")
+            # Check if masks exist
+            scene_dir = Path(dataset_dir) / object_name / scene_name
+            mask_dir = scene_dir / "train" / "mask"
+            has_masks = mask_dir.exists() and len(list(mask_dir.glob("*.png"))) > 0
 
-            # Try to ensure masks exist (will generate from GT if missing)
-            if ensure_masks_exist(dataset_dir, gt_dir, object_name, scene_name):
+            if has_masks:
                 cleanable_scenes.append(pred_mesh)
+            elif generate_masks:
+                # Try to generate masks from GT
+                print(f"  Checking masks for {object_name}/{scene_name}...")
+                if ensure_masks_exist(dataset_dir, gt_dir, object_name, scene_name):
+                    cleanable_scenes.append(pred_mesh)
+                else:
+                    print(f"    ⚠ Skipping {object_name}/{scene_name}: Cannot generate masks")
+                    skipped_scenes.append((object_name, scene_name))
             else:
-                print(f"    ⚠ Skipping {object_name}/{scene_name}: Cannot get masks")
+                # Skip scenes without masks
+                print(f"  Skipping {object_name}/{scene_name}: No masks found")
                 skipped_scenes.append((object_name, scene_name))
 
         print(f"\n  Scenes with masks: {len(cleanable_scenes)}")
@@ -718,6 +733,9 @@ def main():
     parser.add_argument('--dataset_dir', type=str, default=None,
                         help='Dataset directory (for mesh cleaning with transforms and masks)')
 
+    parser.add_argument('--generate_masks', action='store_true',
+                        help='Generate masks from GT mesh for scenes missing masks (default: skip those scenes)')
+
     parser.add_argument('--output', type=str, default='evaluation_results.json',
                         help='Output JSON file for results')
 
@@ -739,7 +757,7 @@ def main():
     # Evaluate each method
     all_results = []
     for method in methods:
-        results = evaluate_method(method, args.benchmark_dir, args.gt_dir, args.dataset_dir)
+        results = evaluate_method(method, args.benchmark_dir, args.gt_dir, args.dataset_dir, args.generate_masks)
         all_results.append(results)
 
     # Save results
