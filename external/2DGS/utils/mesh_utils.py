@@ -140,7 +140,7 @@ class GaussianExtractor(object):
     def extract_mesh_bounded(self, voxel_size=0.004, sdf_trunc=0.02, depth_trunc=3, mask_backgrond=True):
         """
         Perform TSDF fusion given a fixed depth range, used in the paper.
-        
+
         voxel_size: the voxel size of the volume
         sdf_trunc: truncation value
         depth_trunc: maximum depth range, should depended on the scene's scales
@@ -151,27 +151,24 @@ class GaussianExtractor(object):
         print("Running tsdf volume integration ...")
         print(f'voxel_size: {voxel_size}')
         print(f'sdf_trunc: {sdf_trunc}')
-        print(f'depth_truc: {depth_trunc}')
+        print(f'depth_trunc: {depth_trunc}')
 
-        # Use GPU TSDF if available
+        # Try GPU TSDF first, fallback to CPU if any error occurs
+        use_gpu = False
+        volume = None
+
         try:
             import sys
             from pathlib import Path
-            # Get absolute path to OpenMaterial root
-            mesh_utils_file = Path(__file__).resolve()  # Force absolute path
+            mesh_utils_file = Path(__file__).resolve()
             openmaterial_root = mesh_utils_file.parent.parent.parent.parent
             methods_path = str(openmaterial_root / 'methods')
 
             if methods_path not in sys.path:
                 sys.path.insert(0, methods_path)
 
-            print(f"[DEBUG] Trying to import GPU TSDF from: {methods_path}")
-            print(f"[DEBUG] sys.path[0]: {sys.path[0]}")
-
-            # Import using importlib for better error messages
             import importlib.util
             gpu_tsdf_path = openmaterial_root / 'methods' / 'utils' / 'gpu_tsdf.py'
-            print(f"[DEBUG] GPU TSDF file exists: {gpu_tsdf_path.exists()}")
 
             if not gpu_tsdf_path.exists():
                 raise FileNotFoundError(f"GPU TSDF module not found at {gpu_tsdf_path}")
@@ -181,71 +178,97 @@ class GaussianExtractor(object):
             spec.loader.exec_module(gpu_tsdf_module)
 
             volume = gpu_tsdf_module.create_tsdf_volume(voxel_size=voxel_size, use_gpu=True)
+            use_gpu = True
             print(f"✓ Using GPU-accelerated TSDF (voxel_size={voxel_size})")
         except Exception as e:
-            print(f"⚠ GPU TSDF not available: {type(e).__name__}: {e}")
-            print(f"⚠ Falling back to CPU TSDF (will be slower and use more RAM)")
-            import traceback
-            traceback.print_exc()
-            volume = o3d.pipelines.integration.ScalableTSDFVolume(
-                voxel_length= voxel_size,
-                sdf_trunc=sdf_trunc,
-                color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
-            )
+            print(f"⚠ GPU TSDF init failed: {type(e).__name__}: {e}")
+            print(f"⚠ Using CPU TSDF")
+            use_gpu = False
+
+        if use_gpu:
+            # Try GPU TSDF integration and mesh extraction
+            try:
+                mesh = self._run_gpu_tsdf(volume, depth_trunc, mask_backgrond)
+                return mesh
+            except Exception as e:
+                print(f"⚠ GPU TSDF failed during processing: {type(e).__name__}: {e}")
+                print(f"⚠ Falling back to CPU TSDF")
+                import traceback
+                traceback.print_exc()
+
+        # CPU TSDF fallback
+        print(f"✓ Using CPU TSDF (voxel_size={voxel_size})")
+        volume = o3d.pipelines.integration.ScalableTSDFVolume(
+            voxel_length=voxel_size,
+            sdf_trunc=sdf_trunc,
+            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+        )
+        return self._run_cpu_tsdf(volume, depth_trunc, mask_backgrond)
+
+    @torch.no_grad()
+    def _run_gpu_tsdf(self, volume, depth_trunc, mask_backgrond):
+        """Run GPU TSDF integration and mesh extraction"""
+        import open3d.core as o3c
 
         for i, cam_o3d in tqdm(enumerate(to_cam_open3d(self.viewpoint_stack)), desc="TSDF integration progress"):
             rgb = self.rgbmaps[i]
             depth = self.depthmaps[i]
-            
-            # if we have mask provided, use it
+
             if mask_backgrond and (self.viewpoint_stack[i].gt_alpha_mask is not None):
                 depth[(self.viewpoint_stack[i].gt_alpha_mask < 0.5)] = 0
 
-            # make open3d rgbd
             rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
                 o3d.geometry.Image(np.asarray(np.clip(rgb.permute(1,2,0).cpu().numpy(), 0.0, 1.0) * 255, order="C", dtype=np.uint8)),
                 o3d.geometry.Image(np.asarray(depth.permute(1,2,0).cpu().numpy(), order="C")),
-                depth_trunc = depth_trunc, convert_rgb_to_intensity=False,
-                depth_scale = 1.0
+                depth_trunc=depth_trunc, convert_rgb_to_intensity=False,
+                depth_scale=1.0
             )
 
-            # Check if using GPU TSDF and move data to GPU
-            if hasattr(volume, 'device'):  # GPUTSDFVolume has device attribute
-                # Convert to tensor format and move to GPU
-                import open3d.core as o3c
+            color_np = np.asarray(rgbd.color)
+            depth_np = np.asarray(rgbd.depth)
 
-                # Convert RGBD to tensor format on GPU
-                color_np = np.asarray(rgbd.color)
-                depth_np = np.asarray(rgbd.depth)
+            color_tensor = o3d.t.geometry.Image(
+                o3c.Tensor(color_np, dtype=o3c.uint8, device=volume.device)
+            )
+            depth_tensor = o3d.t.geometry.Image(
+                o3c.Tensor(depth_np, dtype=o3c.float32, device=volume.device)
+            )
+            rgbd_gpu = o3d.t.geometry.RGBDImage(color_tensor, depth_tensor)
 
-                color_tensor = o3d.t.geometry.Image(
-                    o3c.Tensor(color_np, dtype=o3c.uint8, device=volume.device)
-                )
-                depth_tensor = o3d.t.geometry.Image(
-                    o3c.Tensor(depth_np, dtype=o3c.float32, device=volume.device)
-                )
-                rgbd_gpu = o3d.t.geometry.RGBDImage(color_tensor, depth_tensor)
+            intrinsic_gpu = o3c.Tensor(
+                cam_o3d.intrinsic.intrinsic_matrix,
+                dtype=o3c.float64,
+                device=volume.device
+            )
+            extrinsic_gpu = o3c.Tensor(
+                cam_o3d.extrinsic,
+                dtype=o3c.float64,
+                device=volume.device
+            )
 
-                # Convert intrinsic and extrinsic to GPU tensors
-                intrinsic_gpu = o3c.Tensor(
-                    cam_o3d.intrinsic.intrinsic_matrix,
-                    dtype=o3c.float64,
-                    device=volume.device
-                )
-                extrinsic_gpu = o3c.Tensor(
-                    cam_o3d.extrinsic,
-                    dtype=o3c.float64,
-                    device=volume.device
-                )
+            volume.integrate(rgbd_gpu, intrinsic_gpu, extrinsic_gpu)
 
-                print(f"[DEBUG] Frame {i}: Passing GPU tensors to integrate (device={volume.device})")
+        mesh = volume.extract_triangle_mesh()
+        return mesh
 
-                # Call integrate with tensor format (not legacy format)
-                # Note: This requires gpu_tsdf.py to handle tensor RGBD format
-                volume.integrate(rgbd_gpu, intrinsic_gpu, extrinsic_gpu)
-            else:
-                # CPU TSDF: use legacy format
-                volume.integrate(rgbd, intrinsic=cam_o3d.intrinsic, extrinsic=cam_o3d.extrinsic)
+    @torch.no_grad()
+    def _run_cpu_tsdf(self, volume, depth_trunc, mask_backgrond):
+        """Run CPU TSDF integration and mesh extraction"""
+        for i, cam_o3d in tqdm(enumerate(to_cam_open3d(self.viewpoint_stack)), desc="TSDF integration progress"):
+            rgb = self.rgbmaps[i]
+            depth = self.depthmaps[i]
+
+            if mask_backgrond and (self.viewpoint_stack[i].gt_alpha_mask is not None):
+                depth[(self.viewpoint_stack[i].gt_alpha_mask < 0.5)] = 0
+
+            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                o3d.geometry.Image(np.asarray(np.clip(rgb.permute(1,2,0).cpu().numpy(), 0.0, 1.0) * 255, order="C", dtype=np.uint8)),
+                o3d.geometry.Image(np.asarray(depth.permute(1,2,0).cpu().numpy(), order="C")),
+                depth_trunc=depth_trunc, convert_rgb_to_intensity=False,
+                depth_scale=1.0
+            )
+
+            volume.integrate(rgbd, intrinsic=cam_o3d.intrinsic, extrinsic=cam_o3d.extrinsic)
 
         mesh = volume.extract_triangle_mesh()
         return mesh
