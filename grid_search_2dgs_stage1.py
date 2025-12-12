@@ -359,10 +359,10 @@ def run_grid_search(test_scene, output_dir):
 if __name__ == "__main__":
     # Test scene configuration (plastic scene)
     test_scene = {
-        'object_name': '5c230ea126b943b8bc1da3f5865d5cd2',
+        'object_name': '01098ad7973647a9b558f41d2ebc5193',
         'scene_name': 'symmetrical_garden_4k-plastic',
-        'model_path': 'benchmark_output/2dgs/models/5c230ea126b943b8bc1da3f5865d5cd2/symmetrical_garden_4k-plastic',
-        'data_path': '/opt/data/private/dataset/OpenMaterial_ablation/5c230ea126b943b8bc1da3f5865d5cd2/symmetrical_garden_4k-plastic'
+        'model_path': 'benchmark_output/2dgs/models/01098ad7973647a9b558f41d2ebc5193/symmetrical_garden_4k-plastic',
+        'data_path': '/opt/data/private/dataset/OpenMaterial_ablation/01098ad7973647a9b558f41d2ebc5193/symmetrical_garden_4k-plastic'
     }
 
     output_dir = "grid_search_results/2dgs_stage1"
