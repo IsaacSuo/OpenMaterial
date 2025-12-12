@@ -59,8 +59,6 @@ def extract_mesh_with_params(model_path, data_path, output_mesh_path,
 
     # Run 2DGS mesh extraction
     cmd = f"""
-    source $(conda info --base)/etc/profile.d/conda.sh && \
-    conda activate surfel_splatting && \
     cd external/2DGS && \
     python render.py \
         -s {abs_data_path} \

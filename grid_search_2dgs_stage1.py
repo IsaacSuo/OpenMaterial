@@ -46,7 +46,8 @@ def compute_chamfer_distance(pred_mesh_path, gt_mesh_path, num_samples=10000):
     return chamfer_dist * 100  # Convert to cm
 
 
-def extract_mesh_with_params(model_path, data_path, output_mesh_path, mesh_res, voxel_size):
+def extract_mesh_with_params(model_path, data_path, output_mesh_path,
+                             mesh_res, voxel_size, sdf_trunc=None, depth_trunc=None):
     """Extract mesh from 2DGS model with specific parameters"""
 
     abs_model_path = Path(model_path).absolute()
@@ -56,10 +57,8 @@ def extract_mesh_with_params(model_path, data_path, output_mesh_path, mesh_res, 
     # Create output directory
     abs_output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Run 2DGS mesh extraction
+    # Build command with optional parameters
     cmd = f"""
-    source $(conda info --base)/etc/profile.d/conda.sh && \
-    conda activate surfel_splatting && \
     cd external/2DGS && \
     python render.py \
         -s {abs_data_path} \
@@ -68,8 +67,12 @@ def extract_mesh_with_params(model_path, data_path, output_mesh_path, mesh_res, 
         --skip_test \
         --skip_train \
         --mesh_res {mesh_res} \
-        --voxel_size {voxel_size}
-    """
+        --voxel_size {voxel_size}"""
+
+    if sdf_trunc is not None:
+        cmd += f" \\\n        --sdf_trunc {sdf_trunc}"
+    if depth_trunc is not None:
+        cmd += f" \\\n        --depth_trunc {depth_trunc}"
 
     result = subprocess.run(
         cmd,
@@ -189,17 +192,21 @@ def clean_mesh_pipeline(raw_mesh_path, dataset_dir, object_name, scene_name, gt_
 
 def run_grid_search(test_scene, output_dir):
     """
-    Run Stage 1 grid search
+    Run Stage 1 grid search - Search voxel_size with fixed other params
 
     Args:
         test_scene: dict with keys 'object_name', 'scene_name', 'model_path', 'data_path'
         output_dir: directory to save results
     """
 
-    # Configuration - Fixed parameters for testing
-    mesh_res_values = [3072]
-    voxel_size_values = [0.005]
-    # Total: 1 configuration
+    # Configuration - Fixed parameters from Stage 2 optimal results
+    mesh_res = 3072
+    sdf_trunc = 0.025  # Stage 2 optimal
+    depth_trunc = 5.0  # Stage 2 optimal
+
+    # Search voxel_size
+    voxel_size_values = [0.025, 0.03, 0.035, 0.04]
+    # Total: 4 configurations
 
     dataset_dir = "/opt/data/private/dataset/OpenMaterial_ablation"
     gt_dir = "/opt/data/private/dataset/OpenMaterial_ablation/groundtruth_ablation"
@@ -211,91 +218,107 @@ def run_grid_search(test_scene, output_dir):
     best_chamfer = float('inf')
     best_params = None
 
-    total_configs = len(mesh_res_values) * len(voxel_size_values)
+    total_configs = len(voxel_size_values)
     current = 0
 
     print("="*70)
-    print(f"2DGS Mesh Extraction Grid Search - Stage 1")
+    print(f"2DGS Mesh Extraction Grid Search - Stage 1 (voxel_size search)")
     print(f"Test scene: {test_scene['object_name']}/{test_scene['scene_name']}")
+    print(f"Fixed: mesh_res={mesh_res}, sdf_trunc={sdf_trunc}, depth_trunc={depth_trunc}")
+    print(f"Search: voxel_size={voxel_size_values}")
     print(f"Total configurations: {total_configs}")
     print("="*70)
 
-    for mesh_res in mesh_res_values:
-        for voxel_size in voxel_size_values:
-            current += 1
-            print(f"\n[{current}/{total_configs}] Testing: mesh_res={mesh_res}, voxel_size={voxel_size}")
+    for voxel_size in voxel_size_values:
+        current += 1
+        print(f"\n[{current}/{total_configs}] Testing: voxel_size={voxel_size}")
 
-            # Extract mesh with these parameters
-            raw_mesh_path = output_dir / f"raw_mesh_res{mesh_res}_voxel{voxel_size}.ply"
+        # Extract mesh with these parameters
+        raw_mesh_path = output_dir / f"raw_voxel{voxel_size}.ply"
 
-            print(f"  Extracting mesh...")
-            success = extract_mesh_with_params(
-                test_scene['model_path'],
-                test_scene['data_path'],
+        print(f"  Extracting mesh...")
+        success = extract_mesh_with_params(
+            test_scene['model_path'],
+            test_scene['data_path'],
+            raw_mesh_path,
+            mesh_res,
+            voxel_size,
+            sdf_trunc,
+            depth_trunc
+        )
+
+        if not success:
+            results.append({
+                'mesh_res': mesh_res,
+                'voxel_size': voxel_size,
+                'sdf_trunc': sdf_trunc,
+                'depth_trunc': depth_trunc,
+                'chamfer_distance_cm': None,
+                'status': 'extraction_failed'
+            })
+            continue
+
+        # Clean mesh
+        print(f"  Cleaning mesh...")
+        try:
+            cleaned_mesh_path, gt_mesh_path = clean_mesh_pipeline(
                 raw_mesh_path,
-                mesh_res,
-                voxel_size
+                dataset_dir,
+                test_scene['object_name'],
+                test_scene['scene_name'],
+                gt_dir
             )
+        except Exception as e:
+            import traceback
+            print(f"  ✗ Cleaning failed: {e}")
+            print(f"  ✗ Full traceback:")
+            traceback.print_exc()
+            results.append({
+                'mesh_res': mesh_res,
+                'voxel_size': voxel_size,
+                'sdf_trunc': sdf_trunc,
+                'depth_trunc': depth_trunc,
+                'chamfer_distance_cm': None,
+                'status': f'cleaning_failed: {e}'
+            })
+            continue
 
-            if not success:
-                results.append({
+        # Evaluate
+        print(f"  Computing Chamfer Distance...")
+        try:
+            chamfer_dist = compute_chamfer_distance(cleaned_mesh_path, gt_mesh_path)
+            print(f"  ✓ Chamfer Distance: {chamfer_dist:.4f} cm")
+
+            results.append({
+                'mesh_res': mesh_res,
+                'voxel_size': voxel_size,
+                'sdf_trunc': sdf_trunc,
+                'depth_trunc': depth_trunc,
+                'chamfer_distance_cm': chamfer_dist,
+                'status': 'success'
+            })
+
+            # Track best
+            if chamfer_dist < best_chamfer:
+                best_chamfer = chamfer_dist
+                best_params = {
                     'mesh_res': mesh_res,
                     'voxel_size': voxel_size,
-                    'chamfer_distance_cm': None,
-                    'status': 'extraction_failed'
-                })
-                continue
+                    'sdf_trunc': sdf_trunc,
+                    'depth_trunc': depth_trunc
+                }
+                print(f"  ★ New best! Chamfer: {chamfer_dist:.4f} cm")
 
-            # Clean mesh
-            print(f"  Cleaning mesh...")
-            try:
-                cleaned_mesh_path, gt_mesh_path = clean_mesh_pipeline(
-                    raw_mesh_path,
-                    dataset_dir,
-                    test_scene['object_name'],
-                    test_scene['scene_name'],
-                    gt_dir
-                )
-            except Exception as e:
-                import traceback
-                print(f"  ✗ Cleaning failed: {e}")
-                print(f"  ✗ Full traceback:")
-                traceback.print_exc()
-                results.append({
-                    'mesh_res': mesh_res,
-                    'voxel_size': voxel_size,
-                    'chamfer_distance_cm': None,
-                    'status': f'cleaning_failed: {e}'
-                })
-                continue
-
-            # Evaluate
-            print(f"  Computing Chamfer Distance...")
-            try:
-                chamfer_dist = compute_chamfer_distance(cleaned_mesh_path, gt_mesh_path)
-                print(f"  ✓ Chamfer Distance: {chamfer_dist:.4f} cm")
-
-                results.append({
-                    'mesh_res': mesh_res,
-                    'voxel_size': voxel_size,
-                    'chamfer_distance_cm': chamfer_dist,
-                    'status': 'success'
-                })
-
-                # Track best
-                if chamfer_dist < best_chamfer:
-                    best_chamfer = chamfer_dist
-                    best_params = {'mesh_res': mesh_res, 'voxel_size': voxel_size}
-                    print(f"  ★ New best! Chamfer: {chamfer_dist:.4f} cm")
-
-            except Exception as e:
-                print(f"  ✗ Evaluation failed: {e}")
-                results.append({
-                    'mesh_res': mesh_res,
-                    'voxel_size': voxel_size,
-                    'chamfer_distance_cm': None,
-                    'status': f'evaluation_failed: {e}'
-                })
+        except Exception as e:
+            print(f"  ✗ Evaluation failed: {e}")
+            results.append({
+                'mesh_res': mesh_res,
+                'voxel_size': voxel_size,
+                'sdf_trunc': sdf_trunc,
+                'depth_trunc': depth_trunc,
+                'chamfer_distance_cm': None,
+                'status': f'evaluation_failed: {e}'
+            })
 
     # Save results
     df = pd.DataFrame(results)
@@ -315,6 +338,8 @@ def run_grid_search(test_scene, output_dir):
         print(f"\n★ Best Parameters:")
         print(f"  mesh_res: {best_params['mesh_res']}")
         print(f"  voxel_size: {best_params['voxel_size']}")
+        print(f"  sdf_trunc: {best_params['sdf_trunc']}")
+        print(f"  depth_trunc: {best_params['depth_trunc']}")
         print(f"  Chamfer Distance: {best_chamfer:.4f} cm")
 
         # Save best params
