@@ -272,15 +272,15 @@ class TwoDGSMethod(BaseMethod):
     def get_default_config(self) -> Dict[str, Any]:
         """Get default 2DGS configuration
 
-        Memory optimization: reduce densification to prevent OOM
+        Uses official 2DGS default parameters for best reconstruction quality.
         """
         return {
             'iterations': 30000,
-            'lambda_normal': 0.0,
+            'lambda_normal': 0.05,  # Normal consistency regularization
             'lambda_dist': 0.0,
             'depth_ratio': 0,
             'mesh_res': 1024,
-            # Memory optimization parameters
-            'densify_until_iter': 12000,  # Stop densification earlier (original: 15000)
-            'densify_grad_threshold': 0.0003,  # Higher threshold = fewer splits (original: 0.0002)
+            # Official 2DGS densification parameters
+            'densify_until_iter': 15000,
+            'densify_grad_threshold': 0.0002,
         }
