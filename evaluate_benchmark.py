@@ -12,8 +12,107 @@ import json
 import os
 import sys
 import subprocess
+import math
 from pathlib import Path
 from typing import Dict, List
+
+import mitsuba as mi
+mi.set_variant('scalar_rgb')
+from mitsuba import ScalarTransform4f as T
+import numpy as np
+
+
+def render_mask_from_gt(gt_mesh_path, transform_matrix, width=1600, height=1200, fov_x=37.8492):
+    """
+    Render GT mesh from a camera viewpoint to get silhouette mask.
+    """
+    c2w = np.array(transform_matrix)
+    position = c2w[:3, 3]
+    forward = -c2w[:3, 2]
+    target = position + forward
+    up = c2w[:3, 1]
+
+    scene_dict = {
+        'type': 'scene',
+        'integrator': {'type': 'path', 'max_depth': 2},
+        'sensor': {
+            'type': 'perspective',
+            'fov': fov_x,
+            'to_world': T.look_at(origin=position.tolist(), target=target.tolist(), up=up.tolist()),
+            'film': {'type': 'hdrfilm', 'width': width, 'height': height, 'pixel_format': 'rgb'},
+            'sampler': {'type': 'independent', 'sample_count': 1},
+        },
+        'emitter': {'type': 'constant', 'radiance': {'type': 'rgb', 'value': [1.0, 1.0, 1.0]}},
+        'shape': {
+            'type': 'ply',
+            'filename': str(gt_mesh_path),
+            'bsdf': {'type': 'diffuse', 'reflectance': {'type': 'rgb', 'value': [1.0, 1.0, 1.0]}},
+        },
+    }
+
+    scene = mi.load_dict(scene_dict)
+    image = mi.render(scene)
+    image_np = np.array(image)
+    mask = np.sum(image_np, axis=2) > 0.01
+    return (mask * 255).astype(np.uint8)
+
+
+def generate_masks_for_scene(gt_mesh_path, transforms_path, output_mask_dir,
+                             width=1600, height=1200, fov_x=37.8492):
+    """Generate masks for all frames in a scene from GT mesh."""
+    from PIL import Image
+
+    with open(transforms_path, 'r') as f:
+        transforms = json.load(f)
+
+    output_mask_dir = Path(output_mask_dir)
+    output_mask_dir.mkdir(parents=True, exist_ok=True)
+
+    for i, frame in enumerate(transforms['frames']):
+        mask_uint8 = render_mask_from_gt(gt_mesh_path, frame['transform_matrix'], width, height, fov_x)
+        if 'file_path' in frame:
+            mask_filename = f"{Path(frame['file_path']).stem}.png"
+        else:
+            mask_filename = f"{i:04d}.png"
+        mask_img = Image.fromarray(mask_uint8, mode='L')
+        mask_rgb = Image.merge('RGB', [mask_img, mask_img, mask_img])
+        mask_rgb.save(output_mask_dir / mask_filename)
+
+    return True
+
+
+def ensure_masks_exist(dataset_dir, gt_dir, object_name, scene_name):
+    """Ensure masks exist for a scene, generate from GT if missing."""
+    dataset_dir = Path(dataset_dir)
+    gt_dir = Path(gt_dir)
+
+    scene_dir = dataset_dir / object_name / scene_name
+    mask_dir = scene_dir / "train" / "mask"
+    transforms_path = scene_dir / "transforms_train.json"
+
+    if mask_dir.exists() and len(list(mask_dir.glob("*.png"))) > 0:
+        return True
+
+    if not transforms_path.exists():
+        print(f"      No transforms_train.json found for {object_name}/{scene_name}")
+        return False
+
+    gt_obj_dir = gt_dir / object_name
+    gt_mesh_candidates = list(gt_obj_dir.glob("*.ply")) if gt_obj_dir.exists() else []
+
+    if not gt_mesh_candidates:
+        print(f"      No GT mesh found for {object_name}")
+        return False
+
+    print(f"      Generating masks from GT mesh for {object_name}/{scene_name}...")
+    try:
+        success = generate_masks_for_scene(gt_mesh_candidates[0], transforms_path, mask_dir)
+        if success:
+            print(f"      Generated {len(list(mask_dir.glob('*.png')))} masks")
+        return success
+    except Exception as e:
+        print(f"      Failed to generate masks: {e}")
+        return False
 
 
 def check_eval_environment() -> bool:
@@ -269,7 +368,7 @@ def compute_chamfer_distance(pred_mesh_path: str, gt_mesh_path: str,
     return chamfer
 
 
-def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: str = None) -> Dict:
+def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: str = None, generate_masks: bool = False) -> Dict:
     """
     Evaluate a single method
 
@@ -278,6 +377,7 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
         benchmark_dir: Base benchmark output directory
         gt_dir: Ground truth directory
         dataset_dir: Dataset directory containing transforms and masks (for mesh cleaning)
+        generate_masks: If True, generate masks from GT for scenes missing masks; if False, skip those scenes
 
     Returns:
         Dict with evaluation results
@@ -308,63 +408,91 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
     # Clean meshes using official OpenMaterial eval script if dataset_dir is provided
     if dataset_dir:
         print("Running mesh cleaning using official OpenMaterial pipeline...")
+        if generate_masks:
+            print("(Will generate masks from GT mesh if missing)\n")
+        else:
+            print("(Scenes without masks will be skipped)\n")
 
-        # Get unique object names from mesh files
-        object_names = set(mesh.parent.name for mesh in mesh_files)
+        # Track scenes that can be cleaned
+        cleanable_scenes = []
+        skipped_scenes = []
 
-        for object_name in object_names:
-            print(f"  Cleaning meshes for object: {object_name}")
+        # First pass: check/ensure masks exist for all scenes
+        for pred_mesh in mesh_files:
+            object_name = pred_mesh.parent.name
+            scene_name = pred_mesh.stem
 
-            # Check if this object has mask files in the dataset
-            object_path = Path(dataset_dir) / object_name
-            has_masks = False
-            if object_path.exists():
-                # Check if any scene under this object has mask directory
-                for scene_dir in object_path.iterdir():
-                    if scene_dir.is_dir():
-                        mask_dir = scene_dir / "train" / "mask"
-                        if mask_dir.exists() and list(mask_dir.glob("*.png")):
-                            has_masks = True
-                            break
+            # Check if masks exist
+            scene_dir = Path(dataset_dir) / object_name / scene_name
+            mask_dir = scene_dir / "train" / "mask"
+            has_masks = mask_dir.exists() and len(list(mask_dir.glob("*.png"))) > 0
 
-            if not has_masks:
-                print(f"  ⚠ Skipping {object_name}: No masks found in dataset (cannot clean mesh)")
-                # Remove this object's meshes from evaluation list
-                mesh_files = [m for m in mesh_files if m.parent.name != object_name]
-                continue
-
-            # Call official clean_mesh.py with DRJIT_LIBOPTIX=0 to disable OptiX (fallback to CUDA)
-            clean_cmd = f"""
-            source $(conda info --base)/etc/profile.d/conda.sh && \
-            conda activate openmaterial_eval && \
-            cd Openmaterial-main && \
-            python eval/clean_mesh.py \
-                --dataset_dir {Path(dataset_dir).absolute()} \
-                --groundtruth_dir {Path(gt_dir).absolute()} \
-                --method {method} \
-                --directory {method_dir.absolute()} \
-                --object_name {object_name}
-            """
-
-            # Set environment variables for subprocess
-            env = os.environ.copy()
-            env['DRJIT_LIBOPTIX'] = '0'
-
-            result = subprocess.run(
-                clean_cmd,
-                shell=True,
-                executable='/bin/bash',
-                capture_output=True,
-                text=True,
-                env=env
-            )
-
-            if result.returncode != 0:
-                print(f"  Warning: Mesh cleaning failed for {object_name}: {result.stderr}")
+            if has_masks:
+                cleanable_scenes.append(pred_mesh)
+            elif generate_masks:
+                # Try to generate masks from GT
+                print(f"  Checking masks for {object_name}/{scene_name}...")
+                if ensure_masks_exist(dataset_dir, gt_dir, object_name, scene_name):
+                    cleanable_scenes.append(pred_mesh)
+                else:
+                    print(f"    ⚠ Skipping {object_name}/{scene_name}: Cannot generate masks")
+                    skipped_scenes.append((object_name, scene_name))
             else:
-                print(f"  ✓ Meshes cleaned for {object_name}")
+                # Skip scenes without masks
+                print(f"  Skipping {object_name}/{scene_name}: No masks found")
+                skipped_scenes.append((object_name, scene_name))
 
-        print("Mesh cleaning complete\n")
+        print(f"\n  Scenes with masks: {len(cleanable_scenes)}")
+        print(f"  Scenes skipped (no masks): {len(skipped_scenes)}")
+
+        # Update mesh_files to only include cleanable scenes
+        mesh_files = cleanable_scenes
+
+        if not mesh_files:
+            print("\n  No scenes to clean, skipping mesh cleaning.")
+        else:
+            # Get unique object names from cleanable mesh files
+            object_names = set(mesh.parent.name for mesh in mesh_files)
+
+            print(f"\n  Cleaning meshes for {len(object_names)} objects...")
+
+            for object_name in object_names:
+                print(f"\n  Cleaning meshes for object: {object_name}")
+
+                # Call official clean_mesh.py with DRJIT_LIBOPTIX=0 to disable OptiX (fallback to CUDA)
+                clean_cmd = f"""
+                source $(conda info --base)/etc/profile.d/conda.sh && \
+                conda activate openmaterial_eval && \
+                cd Openmaterial-main && \
+                python eval/clean_mesh.py \
+                    --dataset_dir {Path(dataset_dir).absolute()} \
+                    --groundtruth_dir {Path(gt_dir).absolute()} \
+                    --method {method} \
+                    --directory {method_dir.absolute()} \
+                    --object_name {object_name}
+                """
+
+                # Set environment variables for subprocess
+                env = os.environ.copy()
+                env['DRJIT_LIBOPTIX'] = '0'
+
+                result = subprocess.run(
+                    clean_cmd,
+                    shell=True,
+                    executable='/bin/bash',
+                    capture_output=True,
+                    text=True,
+                    env=env
+                )
+
+                if result.returncode != 0:
+                    print(f"    Warning: Mesh cleaning failed for {object_name}")
+                    if result.stderr:
+                        print(f"    Error: {result.stderr[-200:]}")
+                else:
+                    print(f"    ✓ Meshes cleaned for {object_name}")
+
+        print("\nMesh cleaning complete\n")
 
     from tqdm import tqdm
 
@@ -395,15 +523,25 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
             continue
 
         try:
-            # Use cleaned mesh if available (from official cleaning pipeline)
-            cleaned_pred_mesh = pred_mesh
+            # Must use cleaned mesh when dataset_dir is provided
             if dataset_dir:
                 # Official script outputs to: {method_dir}/CleanedMesh/{object_name}/{scene_name}.ply
                 cleaned_mesh_path = method_dir / "CleanedMesh" / object_name / f"{scene_name}.ply"
                 if cleaned_mesh_path.exists():
                     cleaned_pred_mesh = cleaned_mesh_path
                 else:
-                    print(f"Warning: Cleaned mesh not found for {scene_name}, using original mesh")
+                    # Skip scene if cleaned mesh not found (don't use original)
+                    print(f"Skipping {scene_name}: Cleaned mesh not found (cleaning may have failed)")
+                    results['scenes'].append({
+                        'scene': scene_name,
+                        'object': object_name,
+                        'material': material,
+                        'error': 'Cleaned mesh not found'
+                    })
+                    continue
+            else:
+                # No dataset_dir provided, use original mesh
+                cleaned_pred_mesh = pred_mesh
 
             # Compute Chamfer Distance
             chamfer = compute_chamfer_distance(str(cleaned_pred_mesh), str(gt_mesh))
@@ -444,7 +582,6 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
 
     # Compute mean (ignoring nan values)
     if results['chamfer_distances']:
-        import math
         valid_distances = [d for d in results['chamfer_distances'] if not math.isnan(d)]
         if valid_distances:
             results['mean_chamfer'] = sum(valid_distances) / len(valid_distances)
@@ -454,7 +591,6 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
     # Compute per-material means
     for material, mat_data in results['by_material'].items():
         if mat_data['chamfer_distances']:
-            import math
             valid_dists = [d for d in mat_data['chamfer_distances'] if not math.isnan(d)]
             if valid_dists:
                 mat_data['mean_chamfer'] = sum(valid_dists) / len(valid_dists)
@@ -502,6 +638,9 @@ def main():
     parser.add_argument('--dataset_dir', type=str, default=None,
                         help='Dataset directory (for mesh cleaning with transforms and masks)')
 
+    parser.add_argument('--generate_masks', action='store_true',
+                        help='Generate masks from GT mesh for scenes missing masks (default: skip those scenes)')
+
     parser.add_argument('--output', type=str, default='evaluation_results.json',
                         help='Output JSON file for results')
 
@@ -523,7 +662,7 @@ def main():
     # Evaluate each method
     all_results = []
     for method in methods:
-        results = evaluate_method(method, args.benchmark_dir, args.gt_dir, args.dataset_dir)
+        results = evaluate_method(method, args.benchmark_dir, args.gt_dir, args.dataset_dir, args.generate_masks)
         all_results.append(results)
 
     # Save results
