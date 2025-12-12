@@ -164,27 +164,30 @@ class PyTorchTSDF:
                 global_j = chunk_j + j_start
                 global_k = chunk_k
 
-                # Update only valid voxels
-                update_mask = valid_proj.clone()
-                update_mask[valid_proj] = valid_sdf
+                # Get indices that pass projection test
+                proj_indices = torch.where(valid_proj)[0]
 
-                valid_global_i = global_i[update_mask]
-                valid_global_j = global_j[update_mask]
-                valid_global_k = global_k[update_mask]
+                # Among projected points, filter by valid SDF
+                valid_proj_global_i = global_i[proj_indices][valid_sdf]
+                valid_proj_global_j = global_j[proj_indices][valid_sdf]
+                valid_proj_global_k = global_k[proj_indices][valid_sdf]
                 valid_sdf_vals = sdf[valid_sdf]
                 valid_colors = colors_valid[valid_sdf]
 
+                if len(valid_sdf_vals) == 0:
+                    continue
+
                 # Weighted average update
-                old_weight = self.weight[valid_global_i, valid_global_j, valid_global_k]
-                old_tsdf = self.tsdf[valid_global_i, valid_global_j, valid_global_k]
-                old_color = self.color[valid_global_i, valid_global_j, valid_global_k]
+                old_weight = self.weight[valid_proj_global_i, valid_proj_global_j, valid_proj_global_k]
+                old_tsdf = self.tsdf[valid_proj_global_i, valid_proj_global_j, valid_proj_global_k]
+                old_color = self.color[valid_proj_global_i, valid_proj_global_j, valid_proj_global_k]
 
                 new_weight = old_weight + 1.0
-                self.tsdf[valid_global_i, valid_global_j, valid_global_k] = \
+                self.tsdf[valid_proj_global_i, valid_proj_global_j, valid_proj_global_k] = \
                     (old_weight * old_tsdf + valid_sdf_vals) / new_weight
-                self.color[valid_global_i, valid_global_j, valid_global_k] = \
+                self.color[valid_proj_global_i, valid_proj_global_j, valid_proj_global_k] = \
                     (old_weight.unsqueeze(-1) * old_color + valid_colors) / new_weight.unsqueeze(-1)
-                self.weight[valid_global_i, valid_global_j, valid_global_k] = new_weight
+                self.weight[valid_proj_global_i, valid_proj_global_j, valid_proj_global_k] = new_weight
 
     def extract_mesh(self, min_weight=1.0):
         """
