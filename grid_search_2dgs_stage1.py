@@ -201,12 +201,14 @@ def run_grid_search(test_scene, output_dir):
 
     # Configuration - Fixed parameters from Stage 2 optimal results
     mesh_res = 3072
-    sdf_trunc = 0.005  # Should be ~3x voxel_size
     depth_trunc = 5.0  # Stage 2 optimal
 
     # Search voxel_size - default is depth_trunc/mesh_res ≈ 0.00163
-    # Range should be around 0.001 to 0.004
-    voxel_size_values = [0.001, 0.0015, 0.002, 0.003]
+    # Larger voxel = less memory, coarser mesh
+    # Smaller voxel = more memory, finer mesh
+    voxel_size_values = [0.002, 0.003, 0.004, 0.005]
+
+    # sdf_trunc should be ~3-5x voxel_size, will be set per voxel_size
     # Total: 4 configurations
 
     dataset_dir = "/opt/data/private/dataset/OpenMaterial_ablation"
@@ -234,10 +236,13 @@ def run_grid_search(test_scene, output_dir):
         current += 1
         print(f"\n[{current}/{total_configs}] Testing: voxel_size={voxel_size}")
 
+        # sdf_trunc scales with voxel_size (3x)
+        sdf_trunc = 3.0 * voxel_size
+
         # Extract mesh with these parameters
         raw_mesh_path = output_dir / f"raw_voxel{voxel_size}.ply"
 
-        print(f"  Extracting mesh...")
+        print(f"  Extracting mesh (sdf_trunc={sdf_trunc:.4f})...")
         success = extract_mesh_with_params(
             test_scene['model_path'],
             test_scene['data_path'],
