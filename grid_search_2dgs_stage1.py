@@ -206,7 +206,8 @@ def run_grid_search(test_scene, output_dir):
     # Search voxel_size - default is depth_trunc/mesh_res ≈ 0.00163
     # Larger voxel = less memory, coarser mesh
     # Smaller voxel = more memory, finer mesh
-    voxel_size_values = [0.002, 0.003, 0.004, 0.005]
+    # Note: voxel_size=0.002 causes OOM, start from 0.004
+    voxel_size_values = [0.004, 0.005, 0.006, 0.008]
 
     # sdf_trunc should be ~3-5x voxel_size, will be set per voxel_size
     # Total: 4 configurations
