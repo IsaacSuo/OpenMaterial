@@ -462,7 +462,7 @@ def compute_chamfer_distance(pred_mesh_path: str, gt_mesh_path: str,
     return chamfer
 
 
-def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: str = None, generate_masks: bool = False) -> Dict:
+def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: str = None, generate_masks: bool = False, skip_clean: bool = False) -> Dict:
     """
     Evaluate a single method
 
@@ -472,6 +472,7 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
         gt_dir: Ground truth directory
         dataset_dir: Dataset directory containing transforms and masks (for mesh cleaning)
         generate_masks: If True, generate masks from GT for scenes missing masks; if False, skip those scenes
+        skip_clean: If True, skip cleaning for scenes that already have CleanedMesh
 
     Returns:
         Dict with evaluation results
@@ -503,18 +504,28 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
     if dataset_dir:
         print("Running mesh cleaning using official OpenMaterial pipeline...")
         if generate_masks:
-            print("(Will generate masks from GT mesh if missing)\n")
+            print("(Will generate masks from GT mesh if missing)")
         else:
-            print("(Scenes without masks will be skipped)\n")
+            print("(Scenes without masks will be skipped)")
+        if skip_clean:
+            print("(Will skip scenes with existing CleanedMesh)")
+        print()
 
         # Track scenes that can be cleaned
         cleanable_scenes = []
         skipped_scenes = []
+        already_cleaned = []
 
         # First pass: check/ensure masks exist for all scenes
         for pred_mesh in mesh_files:
             object_name = pred_mesh.parent.name
             scene_name = pred_mesh.stem
+
+            # Check if CleanedMesh already exists
+            cleaned_mesh_path = method_dir / "CleanedMesh" / object_name / f"{scene_name}.ply"
+            if skip_clean and cleaned_mesh_path.exists():
+                already_cleaned.append(pred_mesh)
+                continue
 
             # Check if masks exist
             scene_dir = Path(dataset_dir) / object_name / scene_name
@@ -536,17 +547,18 @@ def evaluate_method(method: str, benchmark_dir: str, gt_dir: str, dataset_dir: s
                 print(f"  Skipping {object_name}/{scene_name}: No masks found")
                 skipped_scenes.append((object_name, scene_name))
 
-        print(f"\n  Scenes with masks: {len(cleanable_scenes)}")
+        print(f"\n  Scenes to clean: {len(cleanable_scenes)}")
+        print(f"  Scenes already cleaned: {len(already_cleaned)}")
         print(f"  Scenes skipped (no masks): {len(skipped_scenes)}")
 
-        # Update mesh_files to only include cleanable scenes
-        mesh_files = cleanable_scenes
+        # Update mesh_files to include both cleanable and already_cleaned scenes
+        mesh_files = cleanable_scenes + already_cleaned
 
-        if not mesh_files:
-            print("\n  No scenes to clean, skipping mesh cleaning.")
+        if not cleanable_scenes:
+            print("\n  No new scenes to clean.")
         else:
-            # Get unique object names from cleanable mesh files
-            object_names = set(mesh.parent.name for mesh in mesh_files)
+            # Get unique object names from cleanable mesh files (not already_cleaned)
+            object_names = set(mesh.parent.name for mesh in cleanable_scenes)
 
             print(f"\n  Cleaning meshes for {len(object_names)} objects...")
 
@@ -736,6 +748,9 @@ def main():
     parser.add_argument('--generate_masks', action='store_true',
                         help='Generate masks from GT mesh for scenes missing masks (default: skip those scenes)')
 
+    parser.add_argument('--skip_clean', action='store_true',
+                        help='Skip cleaning for scenes that already have CleanedMesh')
+
     parser.add_argument('--output', type=str, default='evaluation_results.json',
                         help='Output JSON file for results')
 
@@ -757,7 +772,7 @@ def main():
     # Evaluate each method
     all_results = []
     for method in methods:
-        results = evaluate_method(method, args.benchmark_dir, args.gt_dir, args.dataset_dir, args.generate_masks)
+        results = evaluate_method(method, args.benchmark_dir, args.gt_dir, args.dataset_dir, args.generate_masks, args.skip_clean)
         all_results.append(results)
 
     # Save results
