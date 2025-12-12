@@ -140,7 +140,7 @@ class GaussianExtractor(object):
     def extract_mesh_bounded(self, voxel_size=0.004, sdf_trunc=0.02, depth_trunc=3, mask_backgrond=True):
         """
         Perform TSDF fusion given a fixed depth range, used in the paper.
-        
+
         voxel_size: the voxel size of the volume
         sdf_trunc: truncation value
         depth_trunc: maximum depth range, should depended on the scene's scales
@@ -151,52 +151,198 @@ class GaussianExtractor(object):
         print("Running tsdf volume integration ...")
         print(f'voxel_size: {voxel_size}')
         print(f'sdf_trunc: {sdf_trunc}')
-        print(f'depth_truc: {depth_trunc}')
+        print(f'depth_trunc: {depth_trunc}')
 
-        # Use CPU TSDF (GPU TSDF has compatibility issues with CUDA 13.0)
-        # Set USE_GPU_TSDF=1 environment variable to force GPU TSDF
         import os
+
+        # TSDF backend selection:
+        # USE_PYTORCH_TSDF=1 : Pure PyTorch implementation (most compatible)
+        # USE_GPU_TSDF=1     : Open3D GPU TSDF (fastest but may have CUDA issues)
+        # Default            : Open3D CPU TSDF
+        use_pytorch_tsdf = os.environ.get('USE_PYTORCH_TSDF', '1') == '1'  # Default to PyTorch
         use_gpu_tsdf = os.environ.get('USE_GPU_TSDF', '0') == '1'
 
-        if use_gpu_tsdf:
-            try:
-                import sys
-                from pathlib import Path
-                # Get absolute path to OpenMaterial root
-                mesh_utils_file = Path(__file__).resolve()  # Force absolute path
-                openmaterial_root = mesh_utils_file.parent.parent.parent.parent
-                methods_path = str(openmaterial_root / 'methods')
+        if use_pytorch_tsdf:
+            return self._extract_mesh_pytorch_tsdf(voxel_size, sdf_trunc, depth_trunc, mask_backgrond)
+        elif use_gpu_tsdf:
+            return self._extract_mesh_gpu_tsdf(voxel_size, sdf_trunc, depth_trunc, mask_backgrond)
+        else:
+            return self._extract_mesh_open3d_cpu(voxel_size, sdf_trunc, depth_trunc, mask_backgrond)
 
-                if methods_path not in sys.path:
-                    sys.path.insert(0, methods_path)
+    @torch.no_grad()
+    def _extract_mesh_pytorch_tsdf(self, voxel_size, sdf_trunc, depth_trunc, mask_backgrond):
+        """Pure PyTorch TSDF implementation - most compatible"""
+        print(f"✓ Using PyTorch TSDF (voxel_size={voxel_size})")
 
-                print(f"[DEBUG] Trying to import GPU TSDF from: {methods_path}")
+        from utils.pytorch_tsdf import PyTorchTSDF
+        import math
 
-                # Import using importlib for better error messages
-                import importlib.util
-                gpu_tsdf_path = openmaterial_root / 'methods' / 'utils' / 'gpu_tsdf.py'
+        # Compute scene bounds from depth maps and cameras
+        all_points = []
+        for i, vp in enumerate(self.viewpoint_stack):
+            depth = self.depthmaps[i]
+            valid_mask = (depth > 0) & (depth < depth_trunc)
+            if valid_mask.sum() > 0:
+                # Sample some depth points to estimate bounds
+                valid_depths = depth[valid_mask]
+                # Use center point at median depth
+                median_depth = valid_depths.median().item()
 
-                if not gpu_tsdf_path.exists():
-                    raise FileNotFoundError(f"GPU TSDF module not found at {gpu_tsdf_path}")
+                # Get camera center
+                R = vp.R
+                T = vp.T
+                if isinstance(R, np.ndarray):
+                    R = torch.from_numpy(R).float()
+                    T = torch.from_numpy(T).float()
+                cam_center = -R.T @ T
+                all_points.append(cam_center.cpu().numpy())
 
-                spec = importlib.util.spec_from_file_location("gpu_tsdf_module", gpu_tsdf_path)
-                gpu_tsdf_module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(gpu_tsdf_module)
+        if len(all_points) == 0:
+            print("Warning: No valid depth points found!")
+            return trimesh.Trimesh()
 
-                volume = gpu_tsdf_module.create_tsdf_volume(voxel_size=voxel_size, use_gpu=True)
-                print(f"✓ Using GPU-accelerated TSDF (voxel_size={voxel_size})")
-            except Exception as e:
-                print(f"⚠ GPU TSDF failed: {type(e).__name__}: {e}")
-                print(f"⚠ Falling back to CPU TSDF")
-                use_gpu_tsdf = False
+        all_points = np.array(all_points)
 
-        if not use_gpu_tsdf:
-            print(f"✓ Using CPU TSDF (voxel_size={voxel_size})")
-            volume = o3d.pipelines.integration.ScalableTSDFVolume(
-                voxel_length=voxel_size,
-                sdf_trunc=sdf_trunc,
-                color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+        # Compute bounds with margin
+        margin = self.radius if hasattr(self, 'radius') else 1.0
+        min_bound = all_points.min(axis=0) - margin
+        max_bound = all_points.max(axis=0) + margin
+
+        # Compute volume dimensions
+        dims = np.ceil((max_bound - min_bound) / voxel_size).astype(int)
+
+        # Limit maximum dimensions to avoid OOM (512^3 is about 4GB)
+        max_dim = 400
+        if dims.max() > max_dim:
+            scale = dims.max() / max_dim
+            voxel_size_adj = voxel_size * scale
+            dims = np.ceil((max_bound - min_bound) / voxel_size_adj).astype(int)
+            print(f"Warning: Volume too large, adjusting voxel_size from {voxel_size:.4f} to {voxel_size_adj:.4f}")
+            voxel_size = voxel_size_adj
+
+        print(f"TSDF Volume: dims={dims.tolist()}, voxel_size={voxel_size:.4f}")
+        print(f"  Bounds: {min_bound} to {max_bound}")
+
+        # Create TSDF volume
+        tsdf = PyTorchTSDF(
+            voxel_size=voxel_size,
+            origin=min_bound.tolist(),
+            dims=dims.tolist(),
+            sdf_trunc=sdf_trunc,
+            device='cuda' if torch.cuda.is_available() else 'cpu'
+        )
+
+        # Integrate all frames
+        for i, vp in tqdm(enumerate(self.viewpoint_stack), desc="TSDF integration", total=len(self.viewpoint_stack)):
+            rgb = self.rgbmaps[i]
+            depth = self.depthmaps[i]
+
+            # Apply mask if available
+            if mask_backgrond and (vp.gt_alpha_mask is not None):
+                depth = depth.clone()
+                depth[(vp.gt_alpha_mask < 0.5)] = 0
+
+            # Build intrinsic matrix from FoV
+            W, H = vp.image_width, vp.image_height
+            fx = W / (2 * math.tan(vp.FoVx / 2))
+            fy = H / (2 * math.tan(vp.FoVy / 2))
+
+            intrinsic = np.array([
+                [fx, 0, W / 2],
+                [0, fy, H / 2],
+                [0, 0, 1]
+            ], dtype=np.float32)
+
+            # Build extrinsic matrix
+            R = vp.R.cpu().numpy() if isinstance(vp.R, torch.Tensor) else vp.R
+            T = vp.T.cpu().numpy() if isinstance(vp.T, torch.Tensor) else vp.T
+
+            extrinsic = np.eye(4, dtype=np.float32)
+            extrinsic[:3, :3] = R.T
+            extrinsic[:3, 3] = T
+
+            # Handle depth format
+            if depth.dim() == 3:
+                depth = depth.squeeze(0)
+
+            # Handle RGB format [C, H, W] -> [H, W, C]
+            if rgb.dim() == 3 and rgb.shape[0] == 3:
+                rgb_np = rgb.permute(1, 2, 0).cpu().numpy()
+            else:
+                rgb_np = rgb.cpu().numpy()
+
+            if rgb_np.max() <= 1.0:
+                rgb_np = (rgb_np * 255).astype(np.uint8)
+
+            tsdf.integrate(
+                depth=depth.cpu(),
+                color=rgb_np,
+                intrinsic=intrinsic,
+                extrinsic=extrinsic,
+                depth_trunc=depth_trunc
             )
+
+        # Extract mesh
+        mesh_trimesh = tsdf.extract_mesh(min_weight=2.0)
+
+        # Convert trimesh to open3d mesh for compatibility
+        mesh_o3d = o3d.geometry.TriangleMesh()
+        mesh_o3d.vertices = o3d.utility.Vector3dVector(np.array(mesh_trimesh.vertices).copy())
+        mesh_o3d.triangles = o3d.utility.Vector3iVector(np.array(mesh_trimesh.faces).copy())
+        if mesh_trimesh.vertex_normals is not None and len(mesh_trimesh.vertex_normals) > 0:
+            mesh_o3d.vertex_normals = o3d.utility.Vector3dVector(np.array(mesh_trimesh.vertex_normals).copy())
+        if mesh_trimesh.visual.vertex_colors is not None and len(mesh_trimesh.visual.vertex_colors) > 0:
+            colors = np.array(mesh_trimesh.visual.vertex_colors).copy()
+            mesh_o3d.vertex_colors = o3d.utility.Vector3dVector(colors[:, :3] / 255.0)
+
+        return mesh_o3d
+
+    @torch.no_grad()
+    def _extract_mesh_gpu_tsdf(self, voxel_size, sdf_trunc, depth_trunc, mask_backgrond):
+        """Open3D GPU TSDF - fastest but may have CUDA compatibility issues"""
+        try:
+            import sys
+            from pathlib import Path
+            mesh_utils_file = Path(__file__).resolve()
+            openmaterial_root = mesh_utils_file.parent.parent.parent.parent
+            methods_path = str(openmaterial_root / 'methods')
+
+            if methods_path not in sys.path:
+                sys.path.insert(0, methods_path)
+
+            import importlib.util
+            gpu_tsdf_path = openmaterial_root / 'methods' / 'utils' / 'gpu_tsdf.py'
+
+            if not gpu_tsdf_path.exists():
+                raise FileNotFoundError(f"GPU TSDF module not found at {gpu_tsdf_path}")
+
+            spec = importlib.util.spec_from_file_location("gpu_tsdf_module", gpu_tsdf_path)
+            gpu_tsdf_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(gpu_tsdf_module)
+
+            volume = gpu_tsdf_module.create_tsdf_volume(voxel_size=voxel_size, use_gpu=True)
+            print(f"✓ Using GPU-accelerated TSDF (voxel_size={voxel_size})")
+        except Exception as e:
+            print(f"⚠ GPU TSDF failed: {type(e).__name__}: {e}")
+            print(f"⚠ Falling back to Open3D CPU TSDF")
+            return self._extract_mesh_open3d_cpu(voxel_size, sdf_trunc, depth_trunc, mask_backgrond)
+
+        return self._run_tsdf_integration(volume, sdf_trunc, depth_trunc, mask_backgrond, use_gpu=True)
+
+    @torch.no_grad()
+    def _extract_mesh_open3d_cpu(self, voxel_size, sdf_trunc, depth_trunc, mask_backgrond):
+        """Open3D CPU TSDF - reliable fallback"""
+        print(f"✓ Using Open3D CPU TSDF (voxel_size={voxel_size})")
+        volume = o3d.pipelines.integration.ScalableTSDFVolume(
+            voxel_length=voxel_size,
+            sdf_trunc=sdf_trunc,
+            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+        )
+        return self._run_tsdf_integration(volume, sdf_trunc, depth_trunc, mask_backgrond, use_gpu=False)
+
+    @torch.no_grad()
+    def _run_tsdf_integration(self, volume, sdf_trunc, depth_trunc, mask_backgrond, use_gpu=False):
+        """Run TSDF integration with Open3D volume"""
 
         for i, cam_o3d in tqdm(enumerate(to_cam_open3d(self.viewpoint_stack)), desc="TSDF integration progress"):
             rgb = self.rgbmaps[i]
