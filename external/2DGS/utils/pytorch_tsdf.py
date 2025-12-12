@@ -67,7 +67,8 @@ class PyTorchTSDF:
             depth: [H, W] depth image in meters
             color: [H, W, 3] or [3, H, W] RGB image (0-255 or 0-1)
             intrinsic: [3, 3] camera intrinsic matrix
-            extrinsic: [4, 4] camera extrinsic matrix (world to camera)
+            extrinsic: [4, 4] camera extrinsic matrix (world to camera, Open3D format)
+                       Format: [[R, 0], [t, 1]] where transformation is p @ extrinsic
             depth_trunc: Maximum depth to integrate
         """
         H, W = depth.shape[-2:]
@@ -115,11 +116,14 @@ class PyTorchTSDF:
                 # World coordinates [N, 3]
                 world_pts = torch.stack([gx, gy, gz], dim=-1).reshape(-1, 3)
 
-                # Transform to camera coordinates
-                # world_pts: [N, 3], extrinsic: [4, 4]
+                # Transform to camera coordinates using Open3D extrinsic convention
+                # Open3D uses row-vector post-multiplication: cam = world @ extrinsic
+                # extrinsic format: [[R, 0], [t, 1]]
+                # For homogeneous coords [x, y, z, 1] @ extrinsic = [R.T @ xyz + t, 1]
                 ones = torch.ones(world_pts.shape[0], 1, device=self.device)
                 world_pts_h = torch.cat([world_pts, ones], dim=1)  # [N, 4]
-                cam_pts = (extrinsic @ world_pts_h.T).T[:, :3]  # [N, 3]
+                cam_pts_h = world_pts_h @ extrinsic  # [N, 4] row-vector multiplication
+                cam_pts = cam_pts_h[:, :3]  # [N, 3]
 
                 # Project to image plane
                 z_cam = cam_pts[:, 2]
@@ -316,34 +320,27 @@ def integrate_rgbd_frames(tsdf, viewpoint_stack, rgbmaps, depthmaps, depth_trunc
         depthmaps: List of depth images [1, H, W]
         depth_trunc: Maximum depth
     """
+    import math
+
     for i, (vp, rgb, depth) in tqdm(enumerate(zip(viewpoint_stack, rgbmaps, depthmaps)),
                                      total=len(viewpoint_stack),
                                      desc="TSDF integration"):
-        # Get camera matrices
-        # Build intrinsic matrix
-        fx = vp.FoVx  # This might be FoV, need to convert
-        fy = vp.FoVy
+        # Build intrinsic matrix - use projection_matrix for consistency with Open3D path
         W, H = vp.image_width, vp.image_height
-
-        # Convert FoV to focal length if needed
-        import math
-        if fx < 10:  # Likely FoV in radians
-            fx = W / (2 * math.tan(fx / 2))
-            fy = H / (2 * math.tan(fy / 2))
+        ndc2pix = torch.tensor([
+            [W / 2, 0, 0, (W-1) / 2],
+            [0, H / 2, 0, (H-1) / 2],
+            [0, 0, 0, 1]]).float().to(vp.projection_matrix.device).T
+        intrins = (vp.projection_matrix @ ndc2pix)[:3,:3].T
 
         intrinsic = np.array([
-            [fx, 0, W / 2],
-            [0, fy, H / 2],
+            [intrins[0,0].item(), 0, intrins[0,2].item()],
+            [0, intrins[1,1].item(), intrins[1,2].item()],
             [0, 0, 1]
-        ])
+        ], dtype=np.float32)
 
-        # Build extrinsic matrix (world to camera)
-        R = vp.R.cpu().numpy() if isinstance(vp.R, torch.Tensor) else vp.R
-        T = vp.T.cpu().numpy() if isinstance(vp.T, torch.Tensor) else vp.T
-
-        extrinsic = np.eye(4)
-        extrinsic[:3, :3] = R.T  # Transpose for world-to-camera
-        extrinsic[:3, 3] = T
+        # Build extrinsic matrix - use world_view_transform directly (Open3D format)
+        extrinsic = vp.world_view_transform.T.cpu().numpy().astype(np.float32)
 
         # Integrate frame
         tsdf.integrate(

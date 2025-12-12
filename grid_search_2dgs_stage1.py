@@ -201,11 +201,12 @@ def run_grid_search(test_scene, output_dir):
 
     # Configuration - Fixed parameters from Stage 2 optimal results
     mesh_res = 3072
-    sdf_trunc = 0.025  # Stage 2 optimal
+    sdf_trunc = 0.005  # Should be ~3x voxel_size
     depth_trunc = 5.0  # Stage 2 optimal
 
-    # Search voxel_size
-    voxel_size_values = [0.025, 0.03, 0.035, 0.04]
+    # Search voxel_size - default is depth_trunc/mesh_res ≈ 0.00163
+    # Range should be around 0.001 to 0.004
+    voxel_size_values = [0.001, 0.0015, 0.002, 0.003]
     # Total: 4 configurations
 
     dataset_dir = "/opt/data/private/dataset/OpenMaterial_ablation"

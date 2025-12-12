@@ -159,7 +159,7 @@ class GaussianExtractor(object):
         # USE_PYTORCH_TSDF=1 : Pure PyTorch implementation (most compatible)
         # USE_GPU_TSDF=1     : Open3D GPU TSDF (fastest but may have CUDA issues)
         # Default            : Open3D CPU TSDF
-        use_pytorch_tsdf = os.environ.get('USE_PYTORCH_TSDF', '0') == '1'  # Default to CPU
+        use_pytorch_tsdf = os.environ.get('USE_PYTORCH_TSDF', '1') == '1'  # Default to PyTorch
         use_gpu_tsdf = os.environ.get('USE_GPU_TSDF', '0') == '1'
 
         if use_pytorch_tsdf:
@@ -242,24 +242,22 @@ class GaussianExtractor(object):
                 depth = depth.clone()
                 depth[(vp.gt_alpha_mask < 0.5)] = 0
 
-            # Build intrinsic matrix from FoV
+            # Build intrinsic matrix - use same method as Open3D path for consistency
             W, H = vp.image_width, vp.image_height
-            fx = W / (2 * math.tan(vp.FoVx / 2))
-            fy = H / (2 * math.tan(vp.FoVy / 2))
+            ndc2pix = torch.tensor([
+                [W / 2, 0, 0, (W-1) / 2],
+                [0, H / 2, 0, (H-1) / 2],
+                [0, 0, 0, 1]]).float().to(vp.projection_matrix.device).T
+            intrins = (vp.projection_matrix @ ndc2pix)[:3,:3].T
 
             intrinsic = np.array([
-                [fx, 0, W / 2],
-                [0, fy, H / 2],
+                [intrins[0,0].item(), 0, intrins[0,2].item()],
+                [0, intrins[1,1].item(), intrins[1,2].item()],
                 [0, 0, 1]
             ], dtype=np.float32)
 
-            # Build extrinsic matrix
-            R = vp.R.cpu().numpy() if isinstance(vp.R, torch.Tensor) else vp.R
-            T = vp.T.cpu().numpy() if isinstance(vp.T, torch.Tensor) else vp.T
-
-            extrinsic = np.eye(4, dtype=np.float32)
-            extrinsic[:3, :3] = R.T
-            extrinsic[:3, 3] = T
+            # Build extrinsic matrix - use world_view_transform directly for consistency
+            extrinsic = vp.world_view_transform.T.cpu().numpy().astype(np.float32)
 
             # Handle depth format
             if depth.dim() == 3:
