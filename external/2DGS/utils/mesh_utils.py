@@ -164,10 +164,10 @@ class GaussianExtractor(object):
         import os
 
         # TSDF backend selection:
-        # USE_PYTORCH_TSDF=1 : Pure PyTorch implementation (most compatible)
+        # USE_PYTORCH_TSDF=1 : Pure PyTorch implementation (experimental, may have issues)
         # USE_GPU_TSDF=1     : Open3D GPU TSDF (fastest but may have CUDA issues)
-        # Default            : Open3D CPU TSDF
-        use_pytorch_tsdf = os.environ.get('USE_PYTORCH_TSDF', '1') == '1'  # Default to PyTorch
+        # Default            : Open3D CPU TSDF (most reliable)
+        use_pytorch_tsdf = os.environ.get('USE_PYTORCH_TSDF', '0') == '1'  # Default to CPU (PyTorch has issues)
         use_gpu_tsdf = os.environ.get('USE_GPU_TSDF', '0') == '1'
 
         if use_pytorch_tsdf:
