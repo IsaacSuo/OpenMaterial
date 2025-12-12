@@ -153,42 +153,47 @@ class GaussianExtractor(object):
         print(f'sdf_trunc: {sdf_trunc}')
         print(f'depth_truc: {depth_trunc}')
 
-        # Use GPU TSDF if available
-        try:
-            import sys
-            from pathlib import Path
-            # Get absolute path to OpenMaterial root
-            mesh_utils_file = Path(__file__).resolve()  # Force absolute path
-            openmaterial_root = mesh_utils_file.parent.parent.parent.parent
-            methods_path = str(openmaterial_root / 'methods')
+        # Use CPU TSDF (GPU TSDF has compatibility issues with CUDA 13.0)
+        # Set USE_GPU_TSDF=1 environment variable to force GPU TSDF
+        import os
+        use_gpu_tsdf = os.environ.get('USE_GPU_TSDF', '0') == '1'
 
-            if methods_path not in sys.path:
-                sys.path.insert(0, methods_path)
+        if use_gpu_tsdf:
+            try:
+                import sys
+                from pathlib import Path
+                # Get absolute path to OpenMaterial root
+                mesh_utils_file = Path(__file__).resolve()  # Force absolute path
+                openmaterial_root = mesh_utils_file.parent.parent.parent.parent
+                methods_path = str(openmaterial_root / 'methods')
 
-            print(f"[DEBUG] Trying to import GPU TSDF from: {methods_path}")
-            print(f"[DEBUG] sys.path[0]: {sys.path[0]}")
+                if methods_path not in sys.path:
+                    sys.path.insert(0, methods_path)
 
-            # Import using importlib for better error messages
-            import importlib.util
-            gpu_tsdf_path = openmaterial_root / 'methods' / 'utils' / 'gpu_tsdf.py'
-            print(f"[DEBUG] GPU TSDF file exists: {gpu_tsdf_path.exists()}")
+                print(f"[DEBUG] Trying to import GPU TSDF from: {methods_path}")
 
-            if not gpu_tsdf_path.exists():
-                raise FileNotFoundError(f"GPU TSDF module not found at {gpu_tsdf_path}")
+                # Import using importlib for better error messages
+                import importlib.util
+                gpu_tsdf_path = openmaterial_root / 'methods' / 'utils' / 'gpu_tsdf.py'
 
-            spec = importlib.util.spec_from_file_location("gpu_tsdf_module", gpu_tsdf_path)
-            gpu_tsdf_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(gpu_tsdf_module)
+                if not gpu_tsdf_path.exists():
+                    raise FileNotFoundError(f"GPU TSDF module not found at {gpu_tsdf_path}")
 
-            volume = gpu_tsdf_module.create_tsdf_volume(voxel_size=voxel_size, use_gpu=True)
-            print(f"✓ Using GPU-accelerated TSDF (voxel_size={voxel_size})")
-        except Exception as e:
-            print(f"⚠ GPU TSDF not available: {type(e).__name__}: {e}")
-            print(f"⚠ Falling back to CPU TSDF (will be slower and use more RAM)")
-            import traceback
-            traceback.print_exc()
+                spec = importlib.util.spec_from_file_location("gpu_tsdf_module", gpu_tsdf_path)
+                gpu_tsdf_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(gpu_tsdf_module)
+
+                volume = gpu_tsdf_module.create_tsdf_volume(voxel_size=voxel_size, use_gpu=True)
+                print(f"✓ Using GPU-accelerated TSDF (voxel_size={voxel_size})")
+            except Exception as e:
+                print(f"⚠ GPU TSDF failed: {type(e).__name__}: {e}")
+                print(f"⚠ Falling back to CPU TSDF")
+                use_gpu_tsdf = False
+
+        if not use_gpu_tsdf:
+            print(f"✓ Using CPU TSDF (voxel_size={voxel_size})")
             volume = o3d.pipelines.integration.ScalableTSDFVolume(
-                voxel_length= voxel_size,
+                voxel_length=voxel_size,
                 sdf_trunc=sdf_trunc,
                 color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
             )
