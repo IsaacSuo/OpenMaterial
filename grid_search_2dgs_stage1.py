@@ -227,8 +227,8 @@ def run_grid_search(test_scene, output_dir):
     print("="*70)
     print(f"2DGS Mesh Extraction Grid Search - Stage 1 (voxel_size search)")
     print(f"Test scene: {test_scene['object_name']}/{test_scene['scene_name']}")
-    print(f"Fixed: mesh_res={mesh_res}, sdf_trunc={sdf_trunc}, depth_trunc={depth_trunc}")
-    print(f"Search: voxel_size={voxel_size_values}")
+    print(f"Fixed: mesh_res={mesh_res}, depth_trunc={depth_trunc}")
+    print(f"Search: voxel_size={voxel_size_values} (sdf_trunc=3*voxel_size)")
     print(f"Total configurations: {total_configs}")
     print("="*70)
 
