@@ -31,7 +31,7 @@ class GaussianModel:
             trans[:, 3,:3] = center
             trans[:, 3, 3] = 1
             return trans
-        
+
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
 
@@ -40,16 +40,29 @@ class GaussianModel:
         self.inverse_opacity_activation = inverse_sigmoid
         self.rotation_activation = torch.nn.functional.normalize
 
+        # PBR activation functions
+        self.albedo_activation = torch.sigmoid
+        self.roughness_activation = torch.sigmoid
+        self.metallic_activation = torch.sigmoid
 
-    def __init__(self, sh_degree : int):
+
+    def __init__(self, sh_degree: int, use_pbr: bool = False):
         self.active_sh_degree = 0
-        self.max_sh_degree = sh_degree  
+        self.max_sh_degree = sh_degree
+        self.use_pbr = use_pbr  # PBR mode flag
+
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
+
+        # PBR material parameters
+        self._albedo = torch.empty(0)      # [N, 3] base color
+        self._roughness = torch.empty(0)   # [N, 1] roughness 0-1
+        self._metallic = torch.empty(0)    # [N, 1] metallic 0-1
+
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -113,7 +126,23 @@ class GaussianModel:
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
-    
+
+    # PBR property getters
+    @property
+    def get_albedo(self):
+        """Get albedo (base color) constrained to [0, 1]"""
+        return self.albedo_activation(self._albedo)
+
+    @property
+    def get_roughness(self):
+        """Get roughness constrained to [0.1, 0.999] to avoid too smooth surfaces"""
+        return torch.clamp(self.roughness_activation(self._roughness), min=0.1, max=0.999)
+
+    @property
+    def get_metallic(self):
+        """Get metallic constrained to [0, 1]"""
+        return self.metallic_activation(self._metallic)
+
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_xyz, self.get_scaling, scaling_modifier, self._rotation)
 
@@ -130,6 +159,7 @@ class GaussianModel:
         features[:, 3:, 1:] = 0.0
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+        num_pts = fused_point_cloud.shape[0]
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
@@ -145,6 +175,25 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
+        # Initialize PBR parameters
+        if self.use_pbr:
+            # Initialize albedo from point cloud colors (inverse sigmoid)
+            colors = torch.tensor(np.asarray(pcd.colors)).float().cuda()
+            self._albedo = nn.Parameter(
+                torch.logit(colors.clamp(0.01, 0.99)).requires_grad_(True)
+            )
+            # Initialize roughness to 0.6 (moderately rough), inverse sigmoid
+            # sigmoid(0.4) ≈ 0.6
+            self._roughness = nn.Parameter(
+                torch.full((num_pts, 1), 0.4, device="cuda").requires_grad_(True)
+            )
+            # Initialize metallic to low value (most objects are non-metallic)
+            # sigmoid(-2) ≈ 0.12
+            self._metallic = nn.Parameter(
+                torch.full((num_pts, 1), -2.0, device="cuda").requires_grad_(True)
+            )
+            print(f"PBR mode enabled: albedo {self._albedo.shape}, roughness {self._roughness.shape}, metallic {self._metallic.shape}")
+
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -158,6 +207,20 @@ class GaussianModel:
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
+
+        # Add PBR parameters to optimizer
+        if self.use_pbr:
+            # Get learning rates from training_args or use defaults
+            albedo_lr = getattr(training_args, 'albedo_lr', 0.001)
+            roughness_lr = getattr(training_args, 'roughness_lr', 0.0002)
+            metallic_lr = getattr(training_args, 'metallic_lr', 0.0002)
+
+            l.extend([
+                {'params': [self._albedo], 'lr': albedo_lr, "name": "albedo"},
+                {'params': [self._roughness], 'lr': roughness_lr, "name": "roughness"},
+                {'params': [self._metallic], 'lr': metallic_lr, "name": "metallic"},
+            ])
+            print(f"PBR optimizer: albedo_lr={albedo_lr}, roughness_lr={roughness_lr}, metallic_lr={metallic_lr}")
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
@@ -185,6 +248,14 @@ class GaussianModel:
             l.append('scale_{}'.format(i))
         for i in range(self._rotation.shape[1]):
             l.append('rot_{}'.format(i))
+
+        # PBR attributes
+        if self.use_pbr and self._albedo.shape[0] > 0:
+            for i in range(3):  # albedo RGB
+                l.append('albedo_{}'.format(i))
+            l.append('roughness')
+            l.append('metallic')
+
         return l
 
     def save_ply(self, path):
@@ -200,8 +271,18 @@ class GaussianModel:
 
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
+        # Build attributes list
+        attributes = [xyz, normals, f_dc, f_rest, opacities, scale, rotation]
+
+        # Add PBR attributes
+        if self.use_pbr and self._albedo.shape[0] > 0:
+            albedo = self._albedo.detach().cpu().numpy()
+            roughness = self._roughness.detach().cpu().numpy()
+            metallic = self._metallic.detach().cpu().numpy()
+            attributes.extend([albedo, roughness, metallic])
+
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        attributes = np.concatenate(attributes, axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
@@ -252,6 +333,33 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
+        # Load PBR parameters if available and use_pbr is enabled
+        if self.use_pbr:
+            # Check if PBR attributes exist in the ply file
+            property_names = [p.name for p in plydata.elements[0].properties]
+            has_pbr = 'albedo_0' in property_names
+
+            if has_pbr:
+                albedo = np.stack((
+                    np.asarray(plydata.elements[0]["albedo_0"]),
+                    np.asarray(plydata.elements[0]["albedo_1"]),
+                    np.asarray(plydata.elements[0]["albedo_2"])
+                ), axis=1)
+                roughness = np.asarray(plydata.elements[0]["roughness"])[..., np.newaxis]
+                metallic = np.asarray(plydata.elements[0]["metallic"])[..., np.newaxis]
+
+                self._albedo = nn.Parameter(torch.tensor(albedo, dtype=torch.float, device="cuda").requires_grad_(True))
+                self._roughness = nn.Parameter(torch.tensor(roughness, dtype=torch.float, device="cuda").requires_grad_(True))
+                self._metallic = nn.Parameter(torch.tensor(metallic, dtype=torch.float, device="cuda").requires_grad_(True))
+                print(f"Loaded PBR parameters: albedo {self._albedo.shape}, roughness {self._roughness.shape}, metallic {self._metallic.shape}")
+            else:
+                # Initialize PBR parameters with defaults if not in ply file
+                num_pts = xyz.shape[0]
+                self._albedo = nn.Parameter(torch.zeros((num_pts, 3), device="cuda").requires_grad_(True))
+                self._roughness = nn.Parameter(torch.full((num_pts, 1), 0.4, device="cuda").requires_grad_(True))
+                self._metallic = nn.Parameter(torch.full((num_pts, 1), -2.0, device="cuda").requires_grad_(True))
+                print(f"PBR attributes not found in ply, initialized with defaults")
+
         self.active_sh_degree = self.max_sh_degree
 
     def replace_tensor_to_optimizer(self, tensor, name):
@@ -298,6 +406,12 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
+        # Prune PBR parameters
+        if self.use_pbr and "albedo" in optimizable_tensors:
+            self._albedo = optimizable_tensors["albedo"]
+            self._roughness = optimizable_tensors["roughness"]
+            self._metallic = optimizable_tensors["metallic"]
+
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
         self.denom = self.denom[valid_points_mask]
@@ -325,13 +439,20 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation,
+                               new_albedo=None, new_roughness=None, new_metallic=None):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
         "opacity": new_opacities,
         "scaling" : new_scaling,
         "rotation" : new_rotation}
+
+        # Add PBR parameters to densification
+        if self.use_pbr and new_albedo is not None:
+            d["albedo"] = new_albedo
+            d["roughness"] = new_roughness
+            d["metallic"] = new_metallic
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -340,6 +461,12 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+
+        # Update PBR parameters
+        if self.use_pbr and "albedo" in optimizable_tensors:
+            self._albedo = optimizable_tensors["albedo"]
+            self._roughness = optimizable_tensors["roughness"]
+            self._metallic = optimizable_tensors["metallic"]
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -366,7 +493,17 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+        # PBR parameters
+        new_albedo = None
+        new_roughness = None
+        new_metallic = None
+        if self.use_pbr and self._albedo.shape[0] > 0:
+            new_albedo = self._albedo[selected_pts_mask].repeat(N,1)
+            new_roughness = self._roughness[selected_pts_mask].repeat(N,1)
+            new_metallic = self._metallic[selected_pts_mask].repeat(N,1)
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation,
+                                   new_albedo, new_roughness, new_metallic)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -376,7 +513,7 @@ class GaussianModel:
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
-        
+
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
@@ -384,7 +521,17 @@ class GaussianModel:
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+        # PBR parameters
+        new_albedo = None
+        new_roughness = None
+        new_metallic = None
+        if self.use_pbr and self._albedo.shape[0] > 0:
+            new_albedo = self._albedo[selected_pts_mask]
+            new_roughness = self._roughness[selected_pts_mask]
+            new_metallic = self._metallic[selected_pts_mask]
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation,
+                                   new_albedo, new_roughness, new_metallic)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
