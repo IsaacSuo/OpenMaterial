@@ -16,11 +16,72 @@ from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from utils.point_utils import depth_to_normal
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
+
+def render_gbuffer(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor,
+                   rasterizer, means3D, means2D, opacity, scales, rotations, cov3D_precomp):
     """
-    Render the scene. 
-    
+    Render G-Buffer for PBR: albedo, roughness, metallic maps.
+    Returns a dict with rendered material property maps.
+    """
+    gbuffer = {}
+
+    # Get PBR parameters from Gaussian model
+    albedo = pc.get_albedo          # [N, 3]
+    roughness = pc.get_roughness    # [N, 1]
+    metallic = pc.get_metallic      # [N, 1]
+
+    # Render albedo map
+    rendered_albedo, _, _ = rasterizer(
+        means3D=means3D,
+        means2D=means2D,
+        shs=None,
+        colors_precomp=albedo,
+        opacities=opacity,
+        scales=scales,
+        rotations=rotations,
+        cov3D_precomp=cov3D_precomp
+    )
+    gbuffer['albedo'] = rendered_albedo
+
+    # Render roughness map (expand to 3 channels for rasterizer)
+    roughness_3ch = roughness.expand(-1, 3)
+    rendered_roughness, _, _ = rasterizer(
+        means3D=means3D,
+        means2D=means2D,
+        shs=None,
+        colors_precomp=roughness_3ch,
+        opacities=opacity,
+        scales=scales,
+        rotations=rotations,
+        cov3D_precomp=cov3D_precomp
+    )
+    gbuffer['roughness'] = rendered_roughness[0:1]  # Take first channel only
+
+    # Render metallic map (expand to 3 channels for rasterizer)
+    metallic_3ch = metallic.expand(-1, 3)
+    rendered_metallic, _, _ = rasterizer(
+        means3D=means3D,
+        means2D=means2D,
+        shs=None,
+        colors_precomp=metallic_3ch,
+        opacities=opacity,
+        scales=scales,
+        rotations=rotations,
+        cov3D_precomp=cov3D_precomp
+    )
+    gbuffer['metallic'] = rendered_metallic[0:1]  # Take first channel only
+
+    return gbuffer
+
+
+def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, render_pbr = False):
+    """
+    Render the scene.
+
     Background tensor (bg_color) must be on GPU!
+
+    Args:
+        render_pbr: If True, also render G-Buffer for PBR (albedo, roughness, metallic maps)
     """
  
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
@@ -154,5 +215,17 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             'surf_depth': surf_depth,
             'surf_normal': surf_normal,
     })
+
+    # Render G-Buffer for PBR if requested
+    if render_pbr and pc.use_pbr:
+        gbuffer = render_gbuffer(
+            viewpoint_camera, pc, pipe, bg_color,
+            rasterizer, means3D, means2D, opacity, scales, rotations, cov3D_precomp
+        )
+        rets.update({
+            'gbuffer_albedo': gbuffer['albedo'],
+            'gbuffer_roughness': gbuffer['roughness'],
+            'gbuffer_metallic': gbuffer['metallic'],
+        })
 
     return rets
