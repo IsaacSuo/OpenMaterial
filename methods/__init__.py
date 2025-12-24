@@ -6,12 +6,14 @@ This module provides a unified interface for different 3D reconstruction methods
 
 from .wrappers.neus2_wrapper import NeuS2Method
 from .wrappers.twodgs_wrapper import TwoDGSMethod
+from .wrappers.twodgs_pbr_wrapper import TwoDGSPBRMethod
 from .wrappers.pgsr_wrapper import PGSRMethod
 from .wrappers.instant_nsr_wrapper import InstantNSRMethod
 
 __all__ = [
     'NeuS2Method',
     'TwoDGSMethod',
+    'TwoDGSPBRMethod',
     'PGSRMethod',
     'InstantNSRMethod',
 ]
@@ -20,6 +22,7 @@ __all__ = [
 METHODS = {
     'neus2': NeuS2Method,
     '2dgs': TwoDGSMethod,
+    '2dgs-pbr': TwoDGSPBRMethod,
     'pgsr': PGSRMethod,
     'instant-nsr-pl': InstantNSRMethod,
 }

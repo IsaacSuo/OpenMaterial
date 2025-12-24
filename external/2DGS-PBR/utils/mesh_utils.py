@@ -1,0 +1,522 @@
+#
+# Copyright (C) 2024, ShanghaiTech
+# SVIP research group, https://github.com/svip-lab
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  huangbb@shanghaitech.edu.cn
+#
+
+import torch
+import numpy as np
+import os
+import math
+from tqdm import tqdm
+from utils.render_utils import save_img_f32, save_img_u8
+from functools import partial
+import open3d as o3d
+import trimesh
+
+def post_process_mesh(mesh, cluster_to_keep=1000):
+    """
+    Post-process a mesh to filter out floaters and disconnected parts
+    """
+    import copy
+    print("post processing the mesh to have {} clusters cluster_to_keep".format(cluster_to_keep))
+    mesh_0 = copy.deepcopy(mesh)
+    with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Debug) as cm:
+            triangle_clusters, cluster_n_triangles, cluster_area = (mesh_0.cluster_connected_triangles())
+
+    triangle_clusters = np.asarray(triangle_clusters)
+    cluster_n_triangles = np.asarray(cluster_n_triangles)
+    cluster_area = np.asarray(cluster_area)
+
+    # Handle case where there are fewer clusters than cluster_to_keep
+    num_clusters = len(cluster_n_triangles)
+    if num_clusters == 0:
+        print("Warning: No clusters found in mesh")
+        return mesh_0
+
+    actual_keep = min(cluster_to_keep, num_clusters)
+    n_cluster = np.sort(cluster_n_triangles.copy())[-actual_keep]
+    n_cluster = max(n_cluster, 50) # filter meshes smaller than 50
+    triangles_to_remove = cluster_n_triangles[triangle_clusters] < n_cluster
+    mesh_0.remove_triangles_by_mask(triangles_to_remove)
+    mesh_0.remove_unreferenced_vertices()
+    mesh_0.remove_degenerate_triangles()
+    print("num vertices raw {}".format(len(mesh.vertices)))
+    print("num vertices post {}".format(len(mesh_0.vertices)))
+    return mesh_0
+
+def to_cam_open3d(viewpoint_stack):
+    camera_traj = []
+    for i, viewpoint_cam in enumerate(viewpoint_stack):
+        W = viewpoint_cam.image_width
+        H = viewpoint_cam.image_height
+        ndc2pix = torch.tensor([
+            [W / 2, 0, 0, (W-1) / 2],
+            [0, H / 2, 0, (H-1) / 2],
+            [0, 0, 0, 1]]).float().cuda().T
+        intrins =  (viewpoint_cam.projection_matrix @ ndc2pix)[:3,:3].T
+        intrinsic=o3d.camera.PinholeCameraIntrinsic(
+            width=viewpoint_cam.image_width,
+            height=viewpoint_cam.image_height,
+            cx = intrins[0,2].item(),
+            cy = intrins[1,2].item(), 
+            fx = intrins[0,0].item(), 
+            fy = intrins[1,1].item()
+        )
+
+        extrinsic=np.asarray((viewpoint_cam.world_view_transform.T).cpu().numpy())
+        camera = o3d.camera.PinholeCameraParameters()
+        camera.extrinsic = extrinsic
+        camera.intrinsic = intrinsic
+        camera_traj.append(camera)
+
+    return camera_traj
+
+
+class GaussianExtractor(object):
+    def __init__(self, gaussians, render, pipe, bg_color=None):
+        """
+        a class that extracts attributes a scene presented by 2DGS
+
+        Usage example:
+        >>> gaussExtrator = GaussianExtractor(gaussians, render, pipe)
+        >>> gaussExtrator.reconstruction(view_points)
+        >>> mesh = gaussExtractor.export_mesh_bounded(...)
+        """
+        if bg_color is None:
+            bg_color = [0, 0, 0]
+        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+        self.gaussians = gaussians
+        self.render = partial(render, pipe=pipe, bg_color=background)
+        self.clean()
+
+    @torch.no_grad()
+    def clean(self):
+        self.depthmaps = []
+        # self.alphamaps = []
+        self.rgbmaps = []
+        # self.normals = []
+        # self.depth_normals = []
+        self.viewpoint_stack = []
+
+    @torch.no_grad()
+    def reconstruction(self, viewpoint_stack):
+        """
+        reconstruct radiance field given cameras
+        """
+        self.clean()
+        self.viewpoint_stack = viewpoint_stack
+        for i, viewpoint_cam in tqdm(enumerate(self.viewpoint_stack), desc="reconstruct radiance fields"):
+            render_pkg = self.render(viewpoint_cam, self.gaussians)
+            rgb = render_pkg['render']
+            alpha = render_pkg['rend_alpha']
+            normal = torch.nn.functional.normalize(render_pkg['rend_normal'], dim=0)
+            depth = render_pkg['surf_depth']
+            depth_normal = render_pkg['surf_normal']
+            self.rgbmaps.append(rgb.cpu())
+            self.depthmaps.append(depth.cpu())
+            # self.alphamaps.append(alpha.cpu())
+            # self.normals.append(normal.cpu())
+            # self.depth_normals.append(depth_normal.cpu())
+        
+        # self.rgbmaps = torch.stack(self.rgbmaps, dim=0)
+        # self.depthmaps = torch.stack(self.depthmaps, dim=0)
+        # self.alphamaps = torch.stack(self.alphamaps, dim=0)
+        # self.depth_normals = torch.stack(self.depth_normals, dim=0)
+        self.estimate_bounding_sphere()
+
+    def estimate_bounding_sphere(self):
+        """
+        Estimate the bounding sphere given camera pose
+        """
+        from utils.render_utils import transform_poses_pca, focus_point_fn
+        torch.cuda.empty_cache()
+        c2ws = np.array([np.linalg.inv(np.asarray((cam.world_view_transform.T).cpu().numpy())) for cam in self.viewpoint_stack])
+        poses = c2ws[:,:3,:] @ np.diag([1, -1, -1, 1])
+        center = (focus_point_fn(poses))
+        self.radius = np.linalg.norm(c2ws[:,:3,3] - center, axis=-1).min()
+        self.center = torch.from_numpy(center).float().cuda()
+        print(f"The estimated bounding radius is {self.radius:.2f}")
+        print(f"Use at least {2.0 * self.radius:.2f} for depth_trunc")
+
+    @torch.no_grad()
+    def extract_mesh_bounded(self, voxel_size=0.004, sdf_trunc=0.02, depth_trunc=3, mask_backgrond=True):
+        """
+        Perform TSDF fusion given a fixed depth range, used in the paper.
+
+        voxel_size: the voxel size of the volume
+        sdf_trunc: truncation value
+        depth_trunc: maximum depth range, should depended on the scene's scales
+        mask_backgrond: whether to mask backgroud, only works when the dataset have masks
+
+        return o3d.mesh
+        """
+        print("Running tsdf volume integration ...")
+        print(f'voxel_size: {voxel_size}')
+        print(f'sdf_trunc: {sdf_trunc}')
+        print(f'depth_trunc: {depth_trunc}')
+
+        import os
+
+        # TSDF backend selection:
+        # USE_PYTORCH_TSDF=1 : Pure PyTorch implementation (experimental, may have issues)
+        # USE_GPU_TSDF=1     : Open3D GPU TSDF (fastest but may have CUDA issues)
+        # Default            : Open3D CPU TSDF (most reliable)
+        use_pytorch_tsdf = os.environ.get('USE_PYTORCH_TSDF', '0') == '1'  # Default to CPU (PyTorch has issues)
+        use_gpu_tsdf = os.environ.get('USE_GPU_TSDF', '0') == '1'
+
+        if use_pytorch_tsdf:
+            return self._extract_mesh_pytorch_tsdf(voxel_size, sdf_trunc, depth_trunc, mask_backgrond)
+        elif use_gpu_tsdf:
+            return self._extract_mesh_gpu_tsdf(voxel_size, sdf_trunc, depth_trunc, mask_backgrond)
+        else:
+            return self._extract_mesh_open3d_cpu(voxel_size, sdf_trunc, depth_trunc, mask_backgrond)
+
+    @torch.no_grad()
+    def _extract_mesh_pytorch_tsdf(self, voxel_size, sdf_trunc, depth_trunc, mask_backgrond):
+        """Pure PyTorch TSDF implementation - most compatible"""
+        print(f"✓ Using PyTorch TSDF (voxel_size={voxel_size})")
+
+        from utils.pytorch_tsdf import PyTorchTSDF
+        import math
+
+        # Compute scene bounds from depth maps and cameras
+        all_points = []
+        for i, vp in enumerate(self.viewpoint_stack):
+            depth = self.depthmaps[i]
+            valid_mask = (depth > 0) & (depth < depth_trunc)
+            if valid_mask.sum() > 0:
+                # Sample some depth points to estimate bounds
+                valid_depths = depth[valid_mask]
+                # Use center point at median depth
+                median_depth = valid_depths.median().item()
+
+                # Get camera center
+                R = vp.R
+                T = vp.T
+                if isinstance(R, np.ndarray):
+                    R = torch.from_numpy(R).float()
+                    T = torch.from_numpy(T).float()
+                cam_center = -R.T @ T
+                all_points.append(cam_center.cpu().numpy())
+
+        if len(all_points) == 0:
+            print("Warning: No valid depth points found!")
+            return trimesh.Trimesh()
+
+        all_points = np.array(all_points)
+
+        # Compute bounds with margin
+        margin = self.radius if hasattr(self, 'radius') else 1.0
+        min_bound = all_points.min(axis=0) - margin
+        max_bound = all_points.max(axis=0) + margin
+
+        # Compute volume dimensions
+        dims = np.ceil((max_bound - min_bound) / voxel_size).astype(int)
+
+        # Limit maximum dimensions to avoid OOM (512^3 is about 4GB)
+        max_dim = 400
+        if dims.max() > max_dim:
+            scale = dims.max() / max_dim
+            voxel_size_adj = voxel_size * scale
+            dims = np.ceil((max_bound - min_bound) / voxel_size_adj).astype(int)
+            print(f"Warning: Volume too large, adjusting voxel_size from {voxel_size:.4f} to {voxel_size_adj:.4f}")
+            voxel_size = voxel_size_adj
+
+        print(f"TSDF Volume: dims={dims.tolist()}, voxel_size={voxel_size:.4f}")
+        print(f"  Bounds: {min_bound} to {max_bound}")
+
+        # Create TSDF volume
+        tsdf = PyTorchTSDF(
+            voxel_size=voxel_size,
+            origin=min_bound.tolist(),
+            dims=dims.tolist(),
+            sdf_trunc=sdf_trunc,
+            device='cuda' if torch.cuda.is_available() else 'cpu'
+        )
+
+        # Integrate all frames
+        for i, vp in tqdm(enumerate(self.viewpoint_stack), desc="TSDF integration", total=len(self.viewpoint_stack)):
+            rgb = self.rgbmaps[i]
+            depth = self.depthmaps[i]
+
+            # Apply mask if available
+            if mask_backgrond and (vp.gt_alpha_mask is not None):
+                depth = depth.clone()
+                depth[(vp.gt_alpha_mask < 0.5)] = 0
+
+            # Build intrinsic matrix - use same method as Open3D path for consistency
+            W, H = vp.image_width, vp.image_height
+            ndc2pix = torch.tensor([
+                [W / 2, 0, 0, (W-1) / 2],
+                [0, H / 2, 0, (H-1) / 2],
+                [0, 0, 0, 1]]).float().to(vp.projection_matrix.device).T
+            intrins = (vp.projection_matrix @ ndc2pix)[:3,:3].T
+
+            intrinsic = np.array([
+                [intrins[0,0].item(), 0, intrins[0,2].item()],
+                [0, intrins[1,1].item(), intrins[1,2].item()],
+                [0, 0, 1]
+            ], dtype=np.float32)
+
+            # Build extrinsic matrix - use world_view_transform directly for consistency
+            extrinsic = vp.world_view_transform.T.cpu().numpy().astype(np.float32)
+
+            # Handle depth format
+            if depth.dim() == 3:
+                depth = depth.squeeze(0)
+
+            # Handle RGB format [C, H, W] -> [H, W, C]
+            if rgb.dim() == 3 and rgb.shape[0] == 3:
+                rgb_np = rgb.permute(1, 2, 0).cpu().numpy()
+            else:
+                rgb_np = rgb.cpu().numpy()
+
+            if rgb_np.max() <= 1.0:
+                rgb_np = (rgb_np * 255).astype(np.uint8)
+
+            tsdf.integrate(
+                depth=depth.cpu(),
+                color=rgb_np,
+                intrinsic=intrinsic,
+                extrinsic=extrinsic,
+                depth_trunc=depth_trunc
+            )
+
+        # Extract mesh
+        mesh_trimesh = tsdf.extract_mesh(min_weight=2.0)
+
+        # Convert trimesh to open3d mesh for compatibility
+        mesh_o3d = o3d.geometry.TriangleMesh()
+        mesh_o3d.vertices = o3d.utility.Vector3dVector(np.array(mesh_trimesh.vertices).copy())
+        mesh_o3d.triangles = o3d.utility.Vector3iVector(np.array(mesh_trimesh.faces).copy())
+        if mesh_trimesh.vertex_normals is not None and len(mesh_trimesh.vertex_normals) > 0:
+            mesh_o3d.vertex_normals = o3d.utility.Vector3dVector(np.array(mesh_trimesh.vertex_normals).copy())
+        if mesh_trimesh.visual.vertex_colors is not None and len(mesh_trimesh.visual.vertex_colors) > 0:
+            colors = np.array(mesh_trimesh.visual.vertex_colors).copy()
+            mesh_o3d.vertex_colors = o3d.utility.Vector3dVector(colors[:, :3] / 255.0)
+
+        return mesh_o3d
+
+    @torch.no_grad()
+    def _extract_mesh_gpu_tsdf(self, voxel_size, sdf_trunc, depth_trunc, mask_backgrond):
+        """Open3D GPU TSDF - fastest but may have CUDA compatibility issues"""
+        try:
+            import sys
+            from pathlib import Path
+            mesh_utils_file = Path(__file__).resolve()
+            openmaterial_root = mesh_utils_file.parent.parent.parent.parent
+            methods_path = str(openmaterial_root / 'methods')
+
+            if methods_path not in sys.path:
+                sys.path.insert(0, methods_path)
+
+            import importlib.util
+            gpu_tsdf_path = openmaterial_root / 'methods' / 'utils' / 'gpu_tsdf.py'
+
+            if not gpu_tsdf_path.exists():
+                raise FileNotFoundError(f"GPU TSDF module not found at {gpu_tsdf_path}")
+
+            spec = importlib.util.spec_from_file_location("gpu_tsdf_module", gpu_tsdf_path)
+            gpu_tsdf_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(gpu_tsdf_module)
+
+            volume = gpu_tsdf_module.create_tsdf_volume(voxel_size=voxel_size, use_gpu=True)
+            print(f"✓ Using GPU-accelerated TSDF (voxel_size={voxel_size})")
+        except Exception as e:
+            print(f"⚠ GPU TSDF failed: {type(e).__name__}: {e}")
+            print(f"⚠ Falling back to Open3D CPU TSDF")
+            return self._extract_mesh_open3d_cpu(voxel_size, sdf_trunc, depth_trunc, mask_backgrond)
+
+        return self._run_tsdf_integration(volume, sdf_trunc, depth_trunc, mask_backgrond, use_gpu=True)
+
+    @torch.no_grad()
+    def _extract_mesh_open3d_cpu(self, voxel_size, sdf_trunc, depth_trunc, mask_backgrond):
+        """Open3D CPU TSDF - reliable fallback"""
+        print(f"✓ Using Open3D CPU TSDF (voxel_size={voxel_size})")
+        volume = o3d.pipelines.integration.ScalableTSDFVolume(
+            voxel_length=voxel_size,
+            sdf_trunc=sdf_trunc,
+            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+        )
+        return self._run_tsdf_integration(volume, sdf_trunc, depth_trunc, mask_backgrond, use_gpu=False)
+
+    @torch.no_grad()
+    def _run_tsdf_integration(self, volume, sdf_trunc, depth_trunc, mask_backgrond, use_gpu=False):
+        """Run TSDF integration with Open3D volume"""
+
+        for i, cam_o3d in tqdm(enumerate(to_cam_open3d(self.viewpoint_stack)), desc="TSDF integration progress"):
+            rgb = self.rgbmaps[i]
+            depth = self.depthmaps[i]
+            
+            # if we have mask provided, use it
+            if mask_backgrond and (self.viewpoint_stack[i].gt_alpha_mask is not None):
+                depth[(self.viewpoint_stack[i].gt_alpha_mask < 0.5)] = 0
+
+            # make open3d rgbd
+            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                o3d.geometry.Image(np.asarray(np.clip(rgb.permute(1,2,0).cpu().numpy(), 0.0, 1.0) * 255, order="C", dtype=np.uint8)),
+                o3d.geometry.Image(np.asarray(depth.permute(1,2,0).cpu().numpy(), order="C")),
+                depth_trunc = depth_trunc, convert_rgb_to_intensity=False,
+                depth_scale = 1.0
+            )
+
+            # Check if using GPU TSDF and move data to GPU
+            if hasattr(volume, 'device'):  # GPUTSDFVolume has device attribute
+                # Convert to tensor format and move to GPU
+                import open3d.core as o3c
+
+                # Convert RGBD to tensor format on GPU
+                color_np = np.asarray(rgbd.color)
+                depth_np = np.asarray(rgbd.depth)
+
+                color_tensor = o3d.t.geometry.Image(
+                    o3c.Tensor(color_np, dtype=o3c.uint8, device=volume.device)
+                )
+                depth_tensor = o3d.t.geometry.Image(
+                    o3c.Tensor(depth_np, dtype=o3c.float32, device=volume.device)
+                )
+                rgbd_gpu = o3d.t.geometry.RGBDImage(color_tensor, depth_tensor)
+
+                # Convert intrinsic and extrinsic to GPU tensors
+                intrinsic_gpu = o3c.Tensor(
+                    cam_o3d.intrinsic.intrinsic_matrix,
+                    dtype=o3c.float64,
+                    device=volume.device
+                )
+                extrinsic_gpu = o3c.Tensor(
+                    cam_o3d.extrinsic,
+                    dtype=o3c.float64,
+                    device=volume.device
+                )
+
+                print(f"[DEBUG] Frame {i}: Passing GPU tensors to integrate (device={volume.device})")
+
+                # Call integrate with tensor format (not legacy format)
+                # Note: This requires gpu_tsdf.py to handle tensor RGBD format
+                volume.integrate(rgbd_gpu, intrinsic_gpu, extrinsic_gpu)
+            else:
+                # CPU TSDF: use legacy format
+                volume.integrate(rgbd, intrinsic=cam_o3d.intrinsic, extrinsic=cam_o3d.extrinsic)
+
+        mesh = volume.extract_triangle_mesh()
+        return mesh
+
+    @torch.no_grad()
+    def extract_mesh_unbounded(self, resolution=1024):
+        """
+        Experimental features, extracting meshes from unbounded scenes, not fully test across datasets. 
+        return o3d.mesh
+        """
+        def contract(x):
+            mag = torch.linalg.norm(x, ord=2, dim=-1)[..., None]
+            return torch.where(mag < 1, x, (2 - (1 / mag)) * (x / mag))
+        
+        def uncontract(y):
+            mag = torch.linalg.norm(y, ord=2, dim=-1)[..., None]
+            return torch.where(mag < 1, y, (1 / (2-mag) * (y/mag)))
+
+        def compute_sdf_perframe(i, points, depthmap, rgbmap, viewpoint_cam):
+            """
+                compute per frame sdf
+            """
+            new_points = torch.cat([points, torch.ones_like(points[...,:1])], dim=-1) @ viewpoint_cam.full_proj_transform
+            z = new_points[..., -1:]
+            pix_coords = (new_points[..., :2] / new_points[..., -1:])
+            mask_proj = ((pix_coords > -1. ) & (pix_coords < 1.) & (z > 0)).all(dim=-1)
+            sampled_depth = torch.nn.functional.grid_sample(depthmap.cuda()[None], pix_coords[None, None], mode='bilinear', padding_mode='border', align_corners=True).reshape(-1, 1)
+            sampled_rgb = torch.nn.functional.grid_sample(rgbmap.cuda()[None], pix_coords[None, None], mode='bilinear', padding_mode='border', align_corners=True).reshape(3,-1).T
+            sdf = (sampled_depth-z)
+            return sdf, sampled_rgb, mask_proj
+
+        def compute_unbounded_tsdf(samples, inv_contraction, voxel_size, return_rgb=False):
+            """
+                Fusion all frames, perform adaptive sdf_funcation on the contract spaces.
+            """
+            if inv_contraction is not None:
+                mask = torch.linalg.norm(samples, dim=-1) > 1
+                # adaptive sdf_truncation
+                sdf_trunc = 5 * voxel_size * torch.ones_like(samples[:, 0])
+                sdf_trunc[mask] *= 1/(2-torch.linalg.norm(samples, dim=-1)[mask].clamp(max=1.9))
+                samples = inv_contraction(samples)
+            else:
+                sdf_trunc = 5 * voxel_size
+
+            tsdfs = torch.ones_like(samples[:,0]) * (-1)
+            rgbs = torch.zeros((samples.shape[0], 3)).cuda()
+
+            weights = torch.ones_like(samples[:,0])
+            for i, viewpoint_cam in tqdm(enumerate(self.viewpoint_stack), desc="TSDF integration progress"):
+                sdf, rgb, mask_proj = compute_sdf_perframe(i, samples,
+                    depthmap = self.depthmaps[i],
+                    rgbmap = self.rgbmaps[i],
+                    viewpoint_cam=self.viewpoint_stack[i],
+                )
+
+                # volume integration
+                sdf = sdf.flatten()
+                mask_proj = mask_proj & (sdf > -sdf_trunc)
+                sdf = torch.clamp(sdf / sdf_trunc, min=-1.0, max=1.0)[mask_proj]
+                w = weights[mask_proj]
+                wp = w + 1
+                tsdfs[mask_proj] = (tsdfs[mask_proj] * w + sdf) / wp
+                rgbs[mask_proj] = (rgbs[mask_proj] * w[:,None] + rgb[mask_proj]) / wp[:,None]
+                # update weight
+                weights[mask_proj] = wp
+            
+            if return_rgb:
+                return tsdfs, rgbs
+
+            return tsdfs
+
+        normalize = lambda x: (x - self.center) / self.radius
+        unnormalize = lambda x: (x * self.radius) + self.center
+        inv_contraction = lambda x: unnormalize(uncontract(x))
+
+        N = resolution
+        voxel_size = (self.radius * 2 / N)
+        print(f"Computing sdf gird resolution {N} x {N} x {N}")
+        print(f"Define the voxel_size as {voxel_size}")
+        sdf_function = lambda x: compute_unbounded_tsdf(x, inv_contraction, voxel_size)
+        from utils.mcube_utils import marching_cubes_with_contraction
+        R = contract(normalize(self.gaussians.get_xyz)).norm(dim=-1).cpu().numpy()
+        R = np.quantile(R, q=0.95)
+        R = min(R+0.01, 1.9)
+
+        mesh = marching_cubes_with_contraction(
+            sdf=sdf_function,
+            bounding_box_min=(-R, -R, -R),
+            bounding_box_max=(R, R, R),
+            level=0,
+            resolution=N,
+            inv_contraction=inv_contraction,
+        )
+        
+        # coloring the mesh
+        torch.cuda.empty_cache()
+        mesh = mesh.as_open3d
+        print("texturing mesh ... ")
+        _, rgbs = compute_unbounded_tsdf(torch.tensor(np.asarray(mesh.vertices)).float().cuda(), inv_contraction=None, voxel_size=voxel_size, return_rgb=True)
+        mesh.vertex_colors = o3d.utility.Vector3dVector(rgbs.cpu().numpy())
+        return mesh
+
+    @torch.no_grad()
+    def export_image(self, path):
+        render_path = os.path.join(path, "renders")
+        gts_path = os.path.join(path, "gt")
+        vis_path = os.path.join(path, "vis")
+        os.makedirs(render_path, exist_ok=True)
+        os.makedirs(vis_path, exist_ok=True)
+        os.makedirs(gts_path, exist_ok=True)
+        for idx, viewpoint_cam in tqdm(enumerate(self.viewpoint_stack), desc="export images"):
+            gt = viewpoint_cam.original_image[0:3, :, :]
+            save_img_u8(gt.permute(1,2,0).cpu().numpy(), os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+            save_img_u8(self.rgbmaps[idx].permute(1,2,0).cpu().numpy(), os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+            save_img_f32(self.depthmaps[idx][0].cpu().numpy(), os.path.join(vis_path, 'depth_{0:05d}'.format(idx) + ".tiff"))
+            # save_img_u8(self.normals[idx].permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(vis_path, 'normal_{0:05d}'.format(idx) + ".png"))
+            # save_img_u8(self.depth_normals[idx].permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(vis_path, 'depth_normal_{0:05d}'.format(idx) + ".png"))
