@@ -191,15 +191,20 @@ if __name__ == "__main__":
     args = get_combined_args(parser)
     print("Rendering (PBR mode) " + args.model_path)
 
-    safe_state(args.quiet)
+    # Handle custom args that might not be in config file
+    env_map_path = getattr(args, 'env_map', None)
+    compute_metrics_flag = getattr(args, 'compute_metrics', False)
+    quiet_flag = getattr(args, 'quiet', False)
+
+    safe_state(quiet_flag)
 
     dataset = model.extract(args)
     iteration = args.iteration
     pipe = pipeline.extract(args)
 
     # Load environment light
-    env_light = EnvironmentLight(args.env_map, resolution=256).cuda()
-    print(f"Environment light loaded: {args.env_map if args.env_map else 'default'}")
+    env_light = EnvironmentLight(env_map_path, resolution=256).cuda()
+    print(f"Environment light loaded: {env_map_path if env_map_path else 'default'}")
 
     # Determine iteration
     if iteration == -1:
@@ -211,13 +216,16 @@ if __name__ == "__main__":
                 iteration = max(iterations)
                 print(f"Using iteration: {iteration}")
 
+    skip_train = getattr(args, 'skip_train', False)
+    skip_test = getattr(args, 'skip_test', False)
+
     # Render train set
-    if not args.skip_train:
+    if not skip_train:
         train_dir = os.path.join(args.model_path, 'train', f"ours_{iteration}")
         scene = render_set(dataset, iteration, pipe, env_light,
                           "train", train_dir, "train")
 
-        if args.compute_metrics:
+        if compute_metrics_flag:
             print("\nComputing train metrics...")
             metrics = compute_metrics(
                 os.path.join(train_dir, "renders"),
@@ -233,12 +241,12 @@ if __name__ == "__main__":
             print(f"  Train PBR: PSNR={pbr_metrics['PSNR']:.2f}, SSIM={pbr_metrics['SSIM']:.4f}")
 
     # Render test set
-    if not args.skip_test:
+    if not skip_test:
         test_dir = os.path.join(args.model_path, 'test', f"ours_{iteration}")
         scene = render_set(dataset, iteration, pipe, env_light,
                           "test", test_dir, "test")
 
-        if args.compute_metrics:
+        if compute_metrics_flag:
             print("\nComputing test metrics...")
             metrics = compute_metrics(
                 os.path.join(test_dir, "renders"),
