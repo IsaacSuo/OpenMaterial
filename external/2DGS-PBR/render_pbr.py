@@ -153,8 +153,8 @@ def compute_metrics(renders_dir, gt_dir):
         render_tensor = torch.from_numpy(np.array(render_img)).float().permute(2, 0, 1)[:3] / 255.0
         gt_tensor = torch.from_numpy(np.array(gt_img)).float().permute(2, 0, 1)[:3] / 255.0
 
-        renders.append(render_tensor.unsqueeze(0).cuda())
-        gts.append(gt_tensor.unsqueeze(0).cuda())
+        renders.append(render_tensor.unsqueeze(0).contiguous().cuda())
+        gts.append(gt_tensor.unsqueeze(0).contiguous().cuda())
 
     ssims = []
     psnrs = []
