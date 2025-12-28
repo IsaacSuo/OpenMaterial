@@ -202,11 +202,7 @@ if __name__ == "__main__":
     iteration = args.iteration
     pipe = pipeline.extract(args)
 
-    # Load environment light
-    env_light = EnvironmentLight(env_map_path, resolution=256).cuda()
-    print(f"Environment light loaded: {env_map_path if env_map_path else 'default'}")
-
-    # Determine iteration
+    # Determine iteration first
     if iteration == -1:
         # Find latest iteration
         point_cloud_path = os.path.join(args.model_path, "point_cloud")
@@ -215,6 +211,30 @@ if __name__ == "__main__":
             if iterations:
                 iteration = max(iterations)
                 print(f"Using iteration: {iteration}")
+
+    # Load environment light (try to load trained one first)
+    env_light = EnvironmentLight(env_map_path, resolution=256).cuda()
+    env_light_loaded = False
+
+    # Try to load trained environment light
+    env_light_path = os.path.join(args.model_path, f"env_light_{iteration}.pth")
+    if os.path.exists(env_light_path):
+        env_light.load_state_dict(torch.load(env_light_path))
+        print(f"Loaded trained environment light from: {env_light_path}")
+        env_light_loaded = True
+    else:
+        # Try to find any saved env_light
+        if os.path.exists(args.model_path):
+            for f in sorted(os.listdir(args.model_path), reverse=True):
+                if f.startswith("env_light_") and f.endswith(".pth"):
+                    env_light_path = os.path.join(args.model_path, f)
+                    env_light.load_state_dict(torch.load(env_light_path))
+                    print(f"Loaded trained environment light from: {env_light_path}")
+                    env_light_loaded = True
+                    break
+
+    if not env_light_loaded:
+        print(f"Using default environment light (no trained env_light found)")
 
     skip_train = getattr(args, 'skip_train', False)
     skip_test = getattr(args, 'skip_test', False)

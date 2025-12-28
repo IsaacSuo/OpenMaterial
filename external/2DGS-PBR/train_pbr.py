@@ -61,8 +61,13 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    # Load environment light
+    # Load environment light (learnable)
     env_light = EnvironmentLight(env_map_path, resolution=256).cuda()
+
+    # Environment light optimizer
+    env_light_lr = getattr(opt, 'env_light_lr', 0.01)
+    env_light_optimizer = torch.optim.Adam(env_light.parameters(), lr=env_light_lr)
+    print(f"Environment light: learnable, resolution=256, lr={env_light_lr}")
 
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
@@ -202,6 +207,10 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
             if iteration in saving_iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+                # Save environment light
+                env_light_path = os.path.join(scene.model_path, f"env_light_{iteration}.pth")
+                torch.save(env_light.state_dict(), env_light_path)
+                print(f"[ITER {iteration}] Saved environment light to {env_light_path}")
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -225,6 +234,11 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
+
+                # Environment light optimizer (only after PBR training starts)
+                if iteration > 5000:
+                    env_light_optimizer.step()
+                    env_light_optimizer.zero_grad(set_to_none=True)
 
             if iteration in checkpoint_iterations:
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -423,9 +437,10 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default=None)
 
     # PBR-specific arguments
-    parser.add_argument("--env_map", type=str, default=None, help="Path to HDR environment map")
+    parser.add_argument("--env_map", type=str, default=None, help="Path to HDR environment map (initial)")
     parser.add_argument("--lambda_pbr", type=float, default=0.1, help="PBR reconstruction loss weight")
     parser.add_argument("--lambda_pbr_reg", type=float, default=0.01, help="PBR regularization weight")
+    parser.add_argument("--env_light_lr", type=float, default=0.01, help="Environment light learning rate")
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -441,6 +456,7 @@ if __name__ == "__main__":
     opt = op.extract(args)
     opt.lambda_pbr = args.lambda_pbr
     opt.lambda_pbr_reg = args.lambda_pbr_reg
+    opt.env_light_lr = args.env_light_lr
 
     training_pbr(
         lp.extract(args), opt, pp.extract(args),
