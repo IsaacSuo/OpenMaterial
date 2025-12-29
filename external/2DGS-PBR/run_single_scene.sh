@@ -25,7 +25,8 @@ python train_pbr.py \
     -m "$OUTPUT" \
     --iterations $ITERATIONS \
     --test_iterations 7000 $ITERATIONS \
-    --save_iterations 7000 $ITERATIONS
+    --save_iterations 7000 $ITERATIONS \
+    --eval
 
 # 渲染
 echo ""
