@@ -11,6 +11,10 @@ Extends the standard 2DGS training with:
 
 import os
 import torch
+import cv2
+import numpy as np
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from random import randint
 from utils.loss_utils import l1_loss, ssim, compute_pbr_losses, pbr_reconstruction_loss
 from utils.pbr_utils import EnvironmentLight, screen_space_pbr_shading
@@ -31,20 +35,93 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 
+def load_pseudo_gt(viewpoint_cam, depth_path_root, normal_path_root):
+    """
+    Load GT Depth and Normal maps based on the current viewpoint image name.
+    """
+    filename = viewpoint_cam.image_name
+    
+    gt_depth = None
+    gt_normal = None
+    
+    # 1. Load Depth
+    d_path = os.path.join(depth_path_root, f"{filename}.png")
+    if os.path.exists(d_path):
+        # Read as 16-bit unchanged (OpenCV returns uint16)
+        depth_img = cv2.imread(d_path, cv2.IMREAD_UNCHANGED)
+        if depth_img is not None:
+            # Convert to float tensor
+            depth_tensor = torch.from_numpy(depth_img.astype(np.float32)).cuda()
+            
+            # If using 16-bit PNG from our script, scale is 1000.0 (mm to m)
+            # But since we use scale-invariant loss, the absolute scale doesn't matter much.
+            # We can keep it as is or normalize.
+            
+            if depth_tensor.shape[:2] != (viewpoint_cam.image_height, viewpoint_cam.image_width):
+                 depth_tensor = TF.resize(depth_tensor.unsqueeze(0), 
+                                        (viewpoint_cam.image_height, viewpoint_cam.image_width))
+                 depth_tensor = depth_tensor.squeeze(0)
+            
+            gt_depth = depth_tensor.unsqueeze(0) # [1, H, W]
+
+    # 2. Load Normal
+    n_path = os.path.join(normal_path_root, f"{filename}.png")
+    if os.path.exists(n_path):
+        normal_img = cv2.imread(n_path)
+        if normal_img is not None:
+            # OpenCV is BGR, convert to RGB
+            normal_img = cv2.cvtColor(normal_img, cv2.COLOR_BGR2RGB)
+            normal_tensor = torch.from_numpy(normal_img.astype(np.float32) / 255.0).cuda()
+            
+            # Map [0, 1] back to [-1, 1]
+            normal_tensor = normal_tensor * 2.0 - 1.0
+            
+            # [H, W, 3] -> [3, H, W]
+            normal_tensor = normal_tensor.permute(2, 0, 1)
+            
+            if normal_tensor.shape[1:] != (viewpoint_cam.image_height, viewpoint_cam.image_width):
+                normal_tensor = TF.resize(normal_tensor, 
+                                        (viewpoint_cam.image_height, viewpoint_cam.image_width))
+            
+            gt_normal = normal_tensor
+
+    return gt_depth, gt_normal
+
+
+def scale_invariant_loss(pred, gt):
+    """
+    Solve for s, t such that || s * pred + t - gt || is minimized,
+    then return the L1 loss of the aligned prediction.
+    """
+    mask = (gt > 0)
+    if mask.sum() == 0:
+        return torch.tensor(0.0, device="cuda")
+    
+    p = pred[mask]
+    g = gt[mask]
+    
+    # Linear regression: p * s + t = g
+    ones = torch.ones_like(p)
+    A = torch.stack([p, ones], dim=1) # [N, 2]
+    
+    try:
+        X, _ = torch.linalg.lstsq(A, g).solution
+        s, t = X[0], X[1]
+        
+        # Prevent negative scale if physically implausible (optional but recommended)
+        if s < 0: s = torch.tensor(0.0, device="cuda")
+        
+        pred_aligned = pred * s + t
+        return torch.nn.functional.l1_loss(pred_aligned[mask], g)
+    except:
+        # Fallback if SVD fails
+        return torch.tensor(0.0, device="cuda")
+
+
 def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                  checkpoint_iterations, checkpoint, env_map_path=None):
     """
     PBR-enhanced training loop.
-
-    Args:
-        dataset: Model parameters
-        opt: Optimization parameters
-        pipe: Pipeline parameters
-        testing_iterations: Iterations to run evaluation
-        saving_iterations: Iterations to save model
-        checkpoint_iterations: Iterations to save checkpoints
-        checkpoint: Path to checkpoint to resume from
-        env_map_path: Path to HDR environment map (optional)
     """
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -70,13 +147,28 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
     print(f"Environment light: learnable, resolution=256, lr={env_light_lr}")
 
     # Optional: Register gradient scaling hook for solid-angle weighted optimization
-    # This prevents pole regions from dominating gradient updates
     use_env_gradient_scaling = getattr(opt, 'env_gradient_scaling', True)
     if use_env_gradient_scaling:
         env_light.register_gradient_scaling_hook()
 
     # Environment light regularization weight
     lambda_env_tv = getattr(opt, 'lambda_env_tv', 0.001)
+
+    # Geometric supervision weights
+    use_pseudo_gt = getattr(opt, 'use_pseudo_gt', False)
+    lambda_mono_depth = getattr(opt, 'lambda_mono_depth', 0.1)
+    lambda_mono_normal = getattr(opt, 'lambda_mono_normal', 0.05)
+    
+    # Pre-construct GT paths
+    if use_pseudo_gt:
+        depth_root = os.path.join(dataset.source_path, getattr(opt, 'depth_subdir', 'depth'))
+        normal_root = os.path.join(dataset.source_path, getattr(opt, 'normal_subdir', 'normal'))
+        print(f"Geometric Supervision Enabled.")
+        print(f"Depth GT path: {depth_root}")
+        print(f"Normal GT path: {normal_root}")
+    else:
+        depth_root = None
+        normal_root = None
 
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
@@ -87,10 +179,12 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
     ema_normal_for_log = 0.0
     ema_pbr_for_log = 0.0
     ema_env_tv_for_log = 0.0
+    ema_mono_depth_for_log = 0.0
+    ema_mono_normal_for_log = 0.0
 
     # PBR loss weights
-    lambda_pbr = getattr(opt, 'lambda_pbr', 0.1)  # PBR shading reconstruction weight
-    lambda_pbr_reg = getattr(opt, 'lambda_pbr_reg', 0.01)  # PBR regularization weight
+    lambda_pbr = getattr(opt, 'lambda_pbr', 0.1)
+    lambda_pbr_reg = getattr(opt, 'lambda_pbr_reg', 0.01)
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training PBR")
     first_iter += 1
@@ -119,14 +213,16 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
 
         gt_image = viewpoint_cam.original_image.cuda()
 
-        # Standard reconstruction loss (SH-based rendering)
+        # Standard reconstruction loss
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
 
-        # PBR shading loss (after initial training)
+        # PBR shading loss
         pbr_loss = torch.tensor(0.0, device="cuda")
         pbr_reg_loss = torch.tensor(0.0, device="cuda")
         env_tv_loss = torch.tensor(0.0, device="cuda")
+        loss_mono_depth = torch.tensor(0.0, device="cuda")
+        loss_mono_normal = torch.tensor(0.0, device="cuda")
 
         if iteration > 5000 and gaussians.use_pbr:
             # Get G-Buffer
@@ -163,10 +259,38 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                     )
                     pbr_reg_loss = lambda_pbr_reg * pbr_losses['total_pbr_reg']
 
-                # Environment light TV regularization with solid-angle weighting
-                # This prevents high-frequency noise in the environment map
-                # while correctly handling the equirectangular projection distortion
+                # Environment light TV regularization
                 env_tv_loss = lambda_env_tv * env_light.tv_loss_weighted()
+
+        # === Geometric Supervision (Pseudo-GT / Real-GT) ===
+        if use_pseudo_gt:
+            # Load GT
+            gt_depth, gt_normal = load_pseudo_gt(viewpoint_cam, depth_root, normal_root)
+            
+            # 1. Depth Supervision
+            if gt_depth is not None:
+                pred_depth = render_pkg["surf_depth"]
+                # Use scale-invariant loss
+                loss_mono_depth = lambda_mono_depth * scale_invariant_loss(pred_depth, gt_depth)
+
+            # 2. Normal Supervision
+            if gt_normal is not None:
+                # Use rendered normal (rend_normal) or geometric normal (surf_normal)
+                # rend_normal is better as it comes from Gaussian rotation
+                pred_normal = render_pkg["rend_normal"]
+                
+                # Normalize both
+                pred_norm = F.normalize(pred_normal, dim=0)
+                gt_norm = F.normalize(gt_normal, dim=0)
+                
+                # Cosine Similarity Loss: 1 - cos(theta)
+                cosine_sim = (pred_norm * gt_norm).sum(dim=0)
+                # Only supervise valid pixels (where normal is not zero or masked)
+                # Assuming GT normal 0,0,0 is invalid
+                valid_mask = (gt_normal.abs().sum(dim=0) > 0.1)
+                
+                if valid_mask.sum() > 0:
+                    loss_mono_normal = lambda_mono_normal * (1.0 - cosine_sim[valid_mask]).mean()
 
         # Geometry regularization
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
@@ -180,7 +304,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
         dist_loss = lambda_dist * (rend_dist).mean()
 
         # Total loss
-        total_loss = loss + dist_loss + normal_loss + pbr_loss + pbr_reg_loss + env_tv_loss
+        total_loss = loss + dist_loss + normal_loss + pbr_loss + pbr_reg_loss + env_tv_loss + loss_mono_depth + loss_mono_normal
 
         total_loss.backward()
 
@@ -193,15 +317,17 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
             ema_normal_for_log = 0.4 * normal_loss.item() + 0.6 * ema_normal_for_log
             ema_pbr_for_log = 0.4 * (pbr_loss.item() + pbr_reg_loss.item()) + 0.6 * ema_pbr_for_log
             ema_env_tv_for_log = 0.4 * env_tv_loss.item() + 0.6 * ema_env_tv_for_log
+            ema_mono_depth_for_log = 0.4 * loss_mono_depth.item() + 0.6 * ema_mono_depth_for_log
+            ema_mono_normal_for_log = 0.4 * loss_mono_normal.item() + 0.6 * ema_mono_normal_for_log
 
             if iteration % 10 == 0:
                 loss_dict = {
                     "Loss": f"{ema_loss_for_log:.{5}f}",
-                    "distort": f"{ema_dist_for_log:.{5}f}",
-                    "normal": f"{ema_normal_for_log:.{5}f}",
-                    "pbr": f"{ema_pbr_for_log:.{5}f}",
-                    "env_tv": f"{ema_env_tv_for_log:.{5}f}",
-                    "Points": f"{len(gaussians.get_xyz)}"
+                    "pbr": f"{ema_pbr_for_log:.{4}f}",
+                    "env": f"{ema_env_tv_for_log:.{4}f}",
+                    "m_d": f"{ema_mono_depth_for_log:.{4}f}",
+                    "m_n": f"{ema_mono_normal_for_log:.{4}f}",
+                    "pts": f"{len(gaussians.get_xyz)}"
                 }
                 progress_bar.set_postfix(loss_dict)
                 progress_bar.update(10)
@@ -215,6 +341,8 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/pbr_loss', ema_pbr_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/env_tv_loss', ema_env_tv_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/mono_depth_loss', ema_mono_depth_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/mono_normal_loss', ema_mono_normal_for_log, iteration)
 
             training_report_pbr(
                 tb_writer, iteration, Ll1, loss, l1_loss,
@@ -222,6 +350,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                 testing_iterations, scene, render, (pipe, background),
                 env_light
             )
+
 
             if iteration in saving_iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
