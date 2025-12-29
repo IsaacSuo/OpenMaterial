@@ -8,6 +8,9 @@ import json
 from tqdm import tqdm
 from pathlib import Path
 
+# Force EGL usage for headless rendering
+os.environ["EGL_PLATFORM"] = "surfaceless"
+
 def load_blender_cameras(source_path):
     """
     Load camera parameters from transforms_train.json (Blender/NeRF Synthetic format).
@@ -73,7 +76,7 @@ def load_blender_cameras(source_path):
 
 def find_gt_mesh(source_path, user_mesh_path=None):
     """
-    Locate the GT mesh.
+    Locate the GT mesh using the specific OpenMaterial directory structure.
     Priority:
     1. Explicitly provided path via -g/--gt_path
     2. OpenMaterial specific structure (datasets/groundtruth_ablation/...)
@@ -132,10 +135,12 @@ def render_gt(source_path, mesh_path=None, scale_depth=1000.0):
         print("Warning: Mesh has no triangles! Rendering will fail.")
         return
 
-    mesh.compute_vertex_normals()
+    # Check/Fix normals
+    if not mesh.has_vertex_normals():
+        print("Computing vertex normals...")
+        mesh.compute_vertex_normals()
 
     # 2. Output dirs
-    # We save in the source_path subdirs
     depth_dir = os.path.join(source_path, "depth_gt")
     normal_dir = os.path.join(source_path, "normal_gt")
     os.makedirs(depth_dir, exist_ok=True)
@@ -144,83 +149,75 @@ def render_gt(source_path, mesh_path=None, scale_depth=1000.0):
     # 3. Load Cameras
     cameras = load_blender_cameras(source_path)
 
-    # 4. Setup Visualizer
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(width=1, height=1, visible=False)
-    vis.add_geometry(mesh)
-    
-    opt = vis.get_render_option()
-    opt.background_color = np.asarray([0, 0, 0])
-    opt.light_on = False
-
-    # Prepare Normal Mesh
+    # 4. Prepare Geometry
+    # We create a single mesh with Vertex Colors = Normals
+    # This allows us to render the normal map by just rendering the mesh with an Unlit shader
     mesh_normal = o3d.geometry.TriangleMesh(mesh)
-    # Open3D Normals are usually [-1, 1]. Map to [0, 1] for color.
-    # Note: This creates Object Space Normals colored in RGB.
-    # If you need View Space Normals, shader is needed. 
-    # But usually World Space (Object Space) normals are used for supervision in 2DGS/NeRF.
-    # We assume World Space Normals here.
     normals = np.asarray(mesh_normal.vertex_normals)
+    # Map [-1, 1] -> [0, 1]
     colors = (normals + 1.0) * 0.5
     mesh_normal.vertex_colors = o3d.utility.Vector3dVector(colors)
 
-    print(f"Rendering {len(cameras)} views...")
+    print(f"Rendering {len(cameras)} views using OffscreenRenderer...")
+    
+    # 5. Initialize Renderer loop
+    renderer = None
+    current_w, current_h = 0, 0
     
     for cam in tqdm(cameras):
         W, H = cam["W"], cam["H"]
+        
+        # Initialize or Re-initialize renderer if dimensions change
+        if renderer is None or W != current_w or H != current_h:
+            # Need to create a new renderer if size changes
+            renderer = o3d.visualization.rendering.OffscreenRenderer(W, H)
+            current_w, current_h = W, H
+            
+            # Setup scene geometry (only needs to be done once per renderer instance)
+            # Use 'defaultUnlit' to render vertex colors (which are normals) directly without shading
+            mat = o3d.visualization.rendering.MaterialRecord()
+            mat.shader = "defaultUnlit" 
+            
+            renderer.scene.clear_geometry()
+            renderer.scene.add_geometry("obj", mesh_normal, mat)
+            
+            # Set background to Black
+            renderer.scene.set_background(np.array([0.0, 0.0, 0.0, 1.0]))
+
+        # Setup Camera
+        # Intrinsic
         intrinsic = o3d.camera.PinholeCameraIntrinsic(W, H, cam["fx"], cam["fy"], cam["cx"], cam["cy"])
         
-        # Extrinsic: World-to-Camera
-        # JSON gives C2W. Open3D needs W2C (Extrinsic).
+        # Extrinsic (World-to-Camera)
         c2w = cam["c2w"]
         w2c = np.linalg.inv(c2w)
         
-        # Coordinate System Check:
-        # JSON (Blender): +X Right, +Y Up, +Z Back (Camera looks -Z)
-        # Open3D: +X Right, +Y Up, +Z Back (Camera looks -Z)
-        # They match! No flipping needed.
-        # However, Open3D's convert_from_pinhole_camera_parameters expects the extrinsic to be standard W2C.
+        # Setup camera in renderer
+        # Note: OffscreenRenderer.setup_camera takes (intrinsic, extrinsic_matrix)
+        renderer.setup_camera(intrinsic, w2c)
         
-        extrinsic = w2c
-
-        # 1. Render Normal
-        vis.clear_geometries()
-        vis.add_geometry(mesh_normal)
-        ctr = vis.get_view_control()
-        # Important: convert_from_pinhole... sets the camera parameters.
-        ctr.convert_from_pinhole_camera_parameters(intrinsic, extrinsic)
-        vis.poll_events()
-        vis.update_renderer()
+        # 1. Render Normal Map (RGB)
+        # Since shader is Unlit and vertex colors are normals, the RGB output is the normal map
+        img_o3d = renderer.render_to_image()
+        img_np = np.asarray(img_o3d)
         
-        normal_rgb = vis.capture_screen_float_buffer(do_render=True)
-        normal_rgb = np.asarray(normal_rgb)
+        # Convert RGB to BGR for OpenCV
+        normal_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(os.path.join(normal_dir, f"{cam['name']}.png"), normal_bgr)
         
-        # Resize if capture didn't match W/H (Open3D headless window size limitations)
-        if normal_rgb.shape[0] != H or normal_rgb.shape[1] != W:
-            normal_rgb = cv2.resize(normal_rgb, (W, H), interpolation=cv2.INTER_NEAREST)
-
-        normal_img = (normal_rgb * 255).astype(np.uint8)
-        normal_img = cv2.cvtColor(normal_img, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(os.path.join(normal_dir, f"{cam['name']}.png"), normal_img)
-
-        # 2. Render Depth
-        vis.clear_geometries()
-        vis.add_geometry(mesh)
-        ctr = vis.get_view_control()
-        ctr.convert_from_pinhole_camera_parameters(intrinsic, extrinsic)
-        vis.poll_events()
-        vis.update_renderer()
+        # 2. Render Depth Map
+        # render_to_depth_image returns float depth in view space
+        depth_o3d = renderer.render_to_depth_image(z_in_view_space=True)
+        depth_np = np.asarray(depth_o3d)
         
-        depth = vis.capture_depth_float_buffer(do_render=True)
-        depth = np.asarray(depth)
+        # Check for inf/nan
+        depth_np[np.isinf(depth_np)] = 0
+        depth_np[np.isnan(depth_np)] = 0
         
-        if depth.shape[0] != H or depth.shape[1] != W:
-            depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_NEAREST)
-            
-        depth_mm = (depth * scale_depth).astype(np.uint16)
+        # Scale and save as 16-bit PNG
+        depth_mm = (depth_np * scale_depth).astype(np.uint16)
         cv2.imwrite(os.path.join(depth_dir, f"{cam['name']}.png"), depth_mm)
 
-    vis.destroy_window()
     print("GT Generation Complete.")
 
 if __name__ == "__main__":
