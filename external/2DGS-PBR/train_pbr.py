@@ -594,6 +594,18 @@ if __name__ == "__main__":
     parser.add_argument("--no_env_gradient_scaling", action="store_true", default=False,
                         help="Disable solid-angle gradient scaling for environment map")
 
+    # Geometric Supervision arguments
+    parser.add_argument("--use_pseudo_gt", action="store_true", default=False,
+                        help="Enable geometric supervision using pseudo-GT depth/normal")
+    parser.add_argument("--depth_subdir", type=str, default="depth",
+                        help="Subdirectory name for depth GT images")
+    parser.add_argument("--normal_subdir", type=str, default="normal",
+                        help="Subdirectory name for normal GT images")
+    parser.add_argument("--lambda_mono_depth", type=float, default=0.1,
+                        help="Weight for mono-depth loss")
+    parser.add_argument("--lambda_mono_normal", type=float, default=0.05,
+                        help="Weight for mono-normal loss")
+
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -611,6 +623,13 @@ if __name__ == "__main__":
     opt.env_light_lr = args.env_light_lr
     opt.lambda_env_tv = args.lambda_env_tv
     opt.env_gradient_scaling = not args.no_env_gradient_scaling
+    
+    # Add geometric supervision params to opt
+    opt.use_pseudo_gt = args.use_pseudo_gt
+    opt.depth_subdir = args.depth_subdir
+    opt.normal_subdir = args.normal_subdir
+    opt.lambda_mono_depth = args.lambda_mono_depth
+    opt.lambda_mono_normal = args.lambda_mono_normal
 
     training_pbr(
         lp.extract(args), opt, pp.extract(args),
