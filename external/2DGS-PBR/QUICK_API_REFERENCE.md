@@ -1,0 +1,406 @@
+# 2DGS-PBR Quick API Reference
+
+## Core Classes
+
+### GaussianModel
+```python
+from scene.gaussian_model import GaussianModel
+
+# Create with PBR support
+gm = GaussianModel(sh_degree=3, use_pbr=True)
+
+# Initialize from point cloud
+gm.create_from_pcd(pcd, spatial_lr_scale=1.0)
+gm.training_setup(training_args)
+
+# Properties (with activations applied)
+albedo = gm.get_albedo              # [N, 3] -> [0, 1]
+roughness = gm.get_roughness        # [N, 1] -> [0.1, 0.999]
+metallic = gm.get_metallic          # [N, 1] -> [0, 1]
+
+# Save/Load
+gm.save_ply('path/to/model.ply')
+gm.load_ply('path/to/model.ply')
+
+# Optimization
+gm.optimizer.step()
+gm.densify_and_prune(max_grad, min_opacity, extent, screen_size)
+```
+
+### Scene
+```python
+from scene import Scene
+
+scene = Scene(args, gaussians, load_iteration=-1)
+
+train_cams = scene.getTrainCameras(scale=1.0)
+test_cams = scene.getTestCameras(scale=1.0)
+
+scene.save(iteration=30000)
+```
+
+### EnvironmentLight
+```python
+from utils.pbr_utils import EnvironmentLight
+
+# Load from HDR with mipmap support
+env_light = EnvironmentLight('path/to/env.hdr', resolution=256, num_mip_levels=5).cuda()
+
+# Point sampling (legacy, no roughness)
+colors = env_light.sample(directions)  # [H, W, 3]
+
+# Roughness-aware sampling (Split-Sum approximation)
+# Smooth surfaces → sharp reflections, rough surfaces → blurred reflections
+colors = env_light.sample_prefiltered(directions, roughness)  # [H, W, 3]
+
+# Optimize as learnable parameter
+optimizer = torch.optim.Adam(env_light.parameters(), lr=0.01)
+
+# Solid-angle weighted optimization (corrects equirectangular distortion)
+env_light.register_gradient_scaling_hook()  # Scale gradients by sin(θ)
+
+# Weighted TV regularization (uniform penalty per steradian)
+tv_loss = env_light.tv_loss_weighted()
+
+# Weighted smoothness loss (Laplacian)
+smooth_loss = env_light.smoothness_loss_weighted()
+
+# Debug: check effective resolution stats
+stats = env_light.get_effective_resolution_stats()
+# {'min_weight', 'max_weight', 'equator_weight', 'pole_weight', 'effective_pixels'}
+```
+
+### Camera
+```python
+# Automatically created by Scene
+cam = scene.getTrainCameras()[0]
+
+# Properties
+cam.original_image          # [3, H, W] or [4, H, W]
+cam.image_height, cam.image_width
+cam.world_view_transform    # [4, 4]
+cam.full_proj_transform     # [4, 4]
+cam.camera_center           # [3] world position
+cam.FoVx, cam.FoVy
+```
+
+## Key Functions
+
+### Rendering
+```python
+from gaussian_renderer import render
+
+# Standard render + G-Buffer
+render_pkg = render(
+    viewpoint_camera,
+    gaussian_model,
+    pipeline,
+    background_color,
+    render_pbr=True
+)
+
+# Access outputs
+rgb = render_pkg['render']                    # [3, H, W]
+albedo = render_pkg['gbuffer_albedo']        # [3, H, W]
+roughness = render_pkg['gbuffer_roughness']  # [1, H, W]
+metallic = render_pkg['gbuffer_metallic']    # [1, H, W]
+normal = render_pkg['rend_normal']           # [3, H, W]
+depth = render_pkg['surf_depth']             # [1, H, W]
+alpha = render_pkg['rend_alpha']             # [1, H, W]
+```
+
+### PBR Shading
+```python
+from utils.pbr_utils import screen_space_pbr_shading
+
+# Single environment light
+shaded = screen_space_pbr_shading(
+    gbuffer_albedo,
+    gbuffer_roughness,
+    gbuffer_metallic,
+    gbuffer_normal,
+    gbuffer_depth,
+    camera_center,
+    camera_transform,
+    env_light=env_light
+)
+```
+
+### Loss Functions
+```python
+from utils.loss_utils import (
+    l1_loss, ssim, 
+    pbr_reconstruction_loss,
+    compute_pbr_losses,
+    material_smoothness_loss
+)
+
+# Reconstruction
+l1 = l1_loss(pred, gt)
+ssim_val = ssim(pred.unsqueeze(0), gt.unsqueeze(0))
+recon = l1 * 0.8 + (1 - ssim_val) * 0.2
+
+# PBR shading loss
+pbr_loss = pbr_reconstruction_loss(shaded, gt_image)
+
+# Material regularization
+pbr_regs = compute_pbr_losses(
+    gbuffer_albedo,
+    gbuffer_roughness,
+    gbuffer_metallic,
+    alpha_map=render_pkg['rend_alpha'],
+    lambda_albedo_smooth=0.01,
+    lambda_metallic_prior=0.001,
+)
+total_pbr_reg = pbr_regs['total_pbr_reg']
+```
+
+## Configuration
+
+### Model Parameters
+```python
+from arguments import ModelParams
+
+args = ModelParams(parser)
+args.source_path = "/path/to/dataset"
+args.model_path = "./output/model"
+args.sh_degree = 3
+args.white_background = False
+args.render_items = ['RGB', 'Alpha', 'Normal', 'Depth']
+```
+
+### Optimization Parameters
+```python
+from arguments import OptimizationParams
+
+opt = OptimizationParams(parser)
+opt.iterations = 30_000
+opt.position_lr_init = 0.00016
+opt.albedo_lr = 0.001
+opt.roughness_lr = 0.0002
+opt.metallic_lr = 0.0002
+opt.lambda_pbr = 0.1
+opt.lambda_pbr_reg = 0.01
+opt.lambda_normal = 0.05
+opt.lambda_dist = 0.0
+opt.lambda_dssim = 0.2
+```
+
+### Pipeline Parameters
+```python
+from arguments import PipelineParams
+
+pipe = PipelineParams(parser)
+pipe.convert_SHs_python = False
+pipe.compute_cov3D_python = False
+pipe.depth_ratio = 0.0
+```
+
+## Training Loop Pattern
+
+```python
+import torch
+from scene import Scene, GaussianModel
+from gaussian_renderer import render
+from utils.pbr_utils import EnvironmentLight, screen_space_pbr_shading
+from utils.loss_utils import (
+    l1_loss, ssim, pbr_reconstruction_loss, compute_pbr_losses
+)
+
+# Setup
+gaussians = GaussianModel(3, use_pbr=True)
+scene = Scene(args, gaussians)
+gaussians.training_setup(opt)
+
+env_light = EnvironmentLight(env_map_path).cuda()
+env_opt = torch.optim.Adam(env_light.parameters(), lr=0.01)
+
+bg_color = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
+
+# Training
+for iteration in range(opt.iterations):
+    # Get random camera
+    cameras = scene.getTrainCameras()
+    cam = cameras[torch.randint(len(cameras), (1,)).item()]
+    
+    # Render with G-Buffer
+    render_pkg = render(cam, gaussians, pipe, bg_color, render_pbr=True)
+    
+    # Basic reconstruction loss
+    rgb = render_pkg['render']
+    loss = l1_loss(rgb, cam.original_image.cuda())
+    
+    # PBR losses (after iteration 5000)
+    if iteration > 5000:
+        albedo = render_pkg['gbuffer_albedo']
+        roughness = render_pkg['gbuffer_roughness']
+        metallic = render_pkg['gbuffer_metallic']
+        normal = render_pkg['rend_normal']
+        depth = render_pkg['surf_depth']
+        
+        # Shade with environment
+        shaded = screen_space_pbr_shading(
+            albedo, roughness, metallic, normal, depth,
+            cam.camera_center, cam.world_view_transform,
+            env_light=env_light
+        )
+        
+        # PBR loss
+        pbr_loss = pbr_reconstruction_loss(shaded, cam.original_image.cuda())
+        loss = loss + 0.1 * pbr_loss
+        
+        # Regularization (after 10000)
+        if iteration > 10000:
+            regs = compute_pbr_losses(
+                albedo, roughness, metallic,
+                alpha_map=render_pkg['rend_alpha']
+            )
+            loss = loss + 0.01 * regs['total_pbr_reg']
+    
+    # Backward
+    loss.backward()
+    
+    # Optimize
+    gaussians.optimizer.step()
+    gaussians.optimizer.zero_grad(set_to_none=True)
+    
+    if iteration > 5000:
+        env_opt.step()
+        env_opt.zero_grad(set_to_none=True)
+    
+    # Densify
+    if iteration < opt.densify_until_iter:
+        gaussians.add_densification_stats(
+            render_pkg["viewspace_points"],
+            render_pkg["visibility_filter"]
+        )
+        if iteration % opt.densification_interval == 0:
+            gaussians.densify_and_prune(
+                opt.densify_grad_threshold,
+                opt.opacity_cull,
+                scene.cameras_extent,
+                20
+            )
+```
+
+## Rendering Loop Pattern
+
+```python
+# Load model
+gaussians = GaussianModel(3, use_pbr=True)
+scene = Scene(args, gaussians, load_iteration=30000)
+
+# Load environment light
+env_light = EnvironmentLight().cuda()
+env_light.load_state_dict(torch.load('env_light_30000.pth'))
+
+# Render views
+for cam in scene.getTestCameras():
+    render_pkg = render(cam, gaussians, pipe, bg_color, render_pbr=True)
+    
+    # Extract maps
+    albedo = render_pkg['gbuffer_albedo']
+    roughness = render_pkg['gbuffer_roughness']
+    metallic = render_pkg['gbuffer_metallic']
+    normal = render_pkg['rend_normal']
+    depth = render_pkg['surf_depth']
+    
+    # Shade
+    shaded = screen_space_pbr_shading(
+        albedo, roughness, metallic, normal, depth,
+        cam.camera_center, cam.world_view_transform,
+        env_light=env_light
+    )
+    
+    # Save
+    save_image(shaded, f'output/{cam.image_name}.png')
+    save_image(albedo, f'albedo/{cam.image_name}.png')
+```
+
+## Command Line Usage
+
+### Training
+```bash
+python train_pbr.py \
+    -s /path/to/dataset \
+    -m output/model \
+    --env_map /path/to/env.hdr
+```
+
+### Rendering
+```bash
+python render_pbr.py \
+    -m output/model \
+    -s /path/to/dataset \
+    --iteration 30000 \
+    --env_map /path/to/env.hdr \
+    --compute_metrics
+```
+
+## Data I/O
+
+### Loading Point Cloud
+```python
+from utils.graphics_utils import BasicPointCloud
+import numpy as np
+
+points = np.random.rand(1000, 3)
+colors = np.random.rand(1000, 3)
+normals = np.random.rand(1000, 3)
+
+pcd = BasicPointCloud(points, colors, normals)
+gaussians.create_from_pcd(pcd, spatial_lr_scale=1.0)
+```
+
+### Saving/Loading Models
+```python
+# Save
+gaussians.save_ply('checkpoint.ply')
+torch.save(env_light.state_dict(), 'env_light.pth')
+
+# Load
+gaussians.load_ply('checkpoint.ply')
+env_light.load_state_dict(torch.load('env_light.pth'))
+```
+
+## Common Hyperparameters
+
+| Parameter | Default | Range | Purpose |
+|-----------|---------|-------|---------|
+| `iterations` | 30000 | 10k-50k | Training length |
+| `position_lr_init` | 0.00016 | 1e-4-1e-3 | Position learning rate |
+| `albedo_lr` | 0.001 | 1e-4-1e-2 | Albedo learning rate |
+| `roughness_lr` | 0.0002 | 1e-5-1e-3 | Roughness learning rate |
+| `metallic_lr` | 0.0002 | 1e-5-1e-3 | Metallic learning rate |
+| `env_light_lr` | 0.01 | 1e-3-1e-1 | Environment light LR |
+| `lambda_pbr` | 0.1 | 0.01-1.0 | PBR loss weight |
+| `lambda_pbr_reg` | 0.01 | 0.001-0.1 | Regularization weight |
+| `lambda_albedo_smooth` | 0.01 | 0.001-0.1 | Albedo smoothness |
+| `lambda_metallic_prior` | 0.001 | 0.0001-0.01 | Metallic binary prior |
+| `lambda_roughness_prior` | 0.001 | 0.0001-0.01 | Roughness prior |
+| `lambda_env_tv` | 0.001 | 0.0001-0.01 | Env map TV (solid-angle weighted) |
+| `no_env_gradient_scaling` | False | - | Disable env gradient scaling |
+| `num_mip_levels` | 5 | 3-8 | Env map mip levels for roughness blur |
+
+## Debug/Visualization
+
+```python
+# Check material ranges
+print("Albedo range:", gm.get_albedo.min(), gm.get_albedo.max())
+print("Roughness range:", gm.get_roughness.min(), gm.get_roughness.max())
+print("Metallic range:", gm.get_metallic.min(), gm.get_metallic.max())
+
+# Check gradient flow
+albedo_grad = gm._albedo.grad
+print("Albedo grad stats:", albedo_grad.abs().mean(), albedo_grad.abs().max())
+
+# Visualize G-Buffer
+import torchvision
+torchvision.utils.save_image(render_pkg['gbuffer_albedo'], 'debug_albedo.png')
+torchvision.utils.save_image(render_pkg['gbuffer_roughness'], 'debug_rough.png')
+
+# Save normal for inspection
+normal_vis = (render_pkg['rend_normal'] + 1) / 2
+torchvision.utils.save_image(normal_vis, 'debug_normal.png')
+```
+

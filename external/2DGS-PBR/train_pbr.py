@@ -69,6 +69,15 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
     env_light_optimizer = torch.optim.Adam(env_light.parameters(), lr=env_light_lr)
     print(f"Environment light: learnable, resolution=256, lr={env_light_lr}")
 
+    # Optional: Register gradient scaling hook for solid-angle weighted optimization
+    # This prevents pole regions from dominating gradient updates
+    use_env_gradient_scaling = getattr(opt, 'env_gradient_scaling', True)
+    if use_env_gradient_scaling:
+        env_light.register_gradient_scaling_hook()
+
+    # Environment light regularization weight
+    lambda_env_tv = getattr(opt, 'lambda_env_tv', 0.001)
+
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
 
@@ -77,6 +86,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
     ema_pbr_for_log = 0.0
+    ema_env_tv_for_log = 0.0
 
     # PBR loss weights
     lambda_pbr = getattr(opt, 'lambda_pbr', 0.1)  # PBR shading reconstruction weight
@@ -116,6 +126,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
         # PBR shading loss (after initial training)
         pbr_loss = torch.tensor(0.0, device="cuda")
         pbr_reg_loss = torch.tensor(0.0, device="cuda")
+        env_tv_loss = torch.tensor(0.0, device="cuda")
 
         if iteration > 5000 and gaussians.use_pbr:
             # Get G-Buffer
@@ -152,6 +163,11 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                     )
                     pbr_reg_loss = lambda_pbr_reg * pbr_losses['total_pbr_reg']
 
+                # Environment light TV regularization with solid-angle weighting
+                # This prevents high-frequency noise in the environment map
+                # while correctly handling the equirectangular projection distortion
+                env_tv_loss = lambda_env_tv * env_light.tv_loss_weighted()
+
         # Geometry regularization
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
         lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
@@ -164,7 +180,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
         dist_loss = lambda_dist * (rend_dist).mean()
 
         # Total loss
-        total_loss = loss + dist_loss + normal_loss + pbr_loss + pbr_reg_loss
+        total_loss = loss + dist_loss + normal_loss + pbr_loss + pbr_reg_loss + env_tv_loss
 
         total_loss.backward()
 
@@ -176,6 +192,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
             ema_dist_for_log = 0.4 * dist_loss.item() + 0.6 * ema_dist_for_log
             ema_normal_for_log = 0.4 * normal_loss.item() + 0.6 * ema_normal_for_log
             ema_pbr_for_log = 0.4 * (pbr_loss.item() + pbr_reg_loss.item()) + 0.6 * ema_pbr_for_log
+            ema_env_tv_for_log = 0.4 * env_tv_loss.item() + 0.6 * ema_env_tv_for_log
 
             if iteration % 10 == 0:
                 loss_dict = {
@@ -183,6 +200,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                     "distort": f"{ema_dist_for_log:.{5}f}",
                     "normal": f"{ema_normal_for_log:.{5}f}",
                     "pbr": f"{ema_pbr_for_log:.{5}f}",
+                    "env_tv": f"{ema_env_tv_for_log:.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}"
                 }
                 progress_bar.set_postfix(loss_dict)
@@ -196,6 +214,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                 tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/pbr_loss', ema_pbr_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/env_tv_loss', ema_env_tv_for_log, iteration)
 
             training_report_pbr(
                 tb_writer, iteration, Ll1, loss, l1_loss,
@@ -441,6 +460,10 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_pbr", type=float, default=0.1, help="PBR reconstruction loss weight")
     parser.add_argument("--lambda_pbr_reg", type=float, default=0.01, help="PBR regularization weight")
     parser.add_argument("--env_light_lr", type=float, default=0.01, help="Environment light learning rate")
+    parser.add_argument("--lambda_env_tv", type=float, default=0.001,
+                        help="Environment light TV regularization weight (solid-angle weighted)")
+    parser.add_argument("--no_env_gradient_scaling", action="store_true", default=False,
+                        help="Disable solid-angle gradient scaling for environment map")
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -457,6 +480,8 @@ if __name__ == "__main__":
     opt.lambda_pbr = args.lambda_pbr
     opt.lambda_pbr_reg = args.lambda_pbr_reg
     opt.env_light_lr = args.env_light_lr
+    opt.lambda_env_tv = args.lambda_env_tv
+    opt.env_gradient_scaling = not args.no_env_gradient_scaling
 
     training_pbr(
         lp.extract(args), opt, pp.extract(args),
