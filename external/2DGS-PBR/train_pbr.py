@@ -19,6 +19,7 @@ from random import randint
 from utils.loss_utils import l1_loss, ssim, compute_pbr_losses, pbr_reconstruction_loss
 from utils.pbr_utils import EnvironmentLight, screen_space_pbr_shading
 from utils.loss_scheduler import LossScheduler, TrainingStages, LossWeights
+from utils.profiler import SimpleProfiler
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -142,10 +143,14 @@ def scale_invariant_loss(pred, gt):
 
 
 def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
-                 checkpoint_iterations, checkpoint, env_map_path=None):
+                 checkpoint_iterations, checkpoint, env_map_path=None,
+                 profiler=None):
     """
     PBR-enhanced training loop.
     """
+    if profiler is None:
+        profiler = SimpleProfiler(enabled=False)
+
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
 
@@ -203,6 +208,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
     first_iter += 1
 
     for iteration in range(first_iter, opt.iterations + 1):
+        profiler.start_iteration()
         iter_start.record()
 
         gaussians.update_learning_rate(iteration)
@@ -217,7 +223,8 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
 
         # Render with G-Buffer for PBR
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background, render_pbr=True)
+        with profiler.profile("render"):
+            render_pkg = render(viewpoint_cam, gaussians, pipe, background, render_pbr=True)
 
         image = render_pkg["render"]
         viewspace_point_tensor = render_pkg["viewspace_points"]
@@ -255,21 +262,25 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
             gt_normal = viewpoint_cam.pseudo_gt_normal
 
             if gt_depth is not None and weights['mono_depth'] > 0:
-                gt_depth = gt_depth.cuda()
+                with profiler.profile("mono_depth_transfer"):
+                    gt_depth = gt_depth.cuda()
                 pred_depth = render_pkg["surf_depth"]
-                loss_mono_depth = weights['mono_depth'] * scale_invariant_loss(pred_depth, gt_depth)
+                with profiler.profile("mono_depth_lstsq"):
+                    loss_mono_depth = weights['mono_depth'] * scale_invariant_loss(pred_depth, gt_depth)
 
             if gt_normal is not None and weights['mono_normal'] > 0:
-                gt_normal = gt_normal.cuda()
+                with profiler.profile("mono_normal_transfer"):
+                    gt_normal = gt_normal.cuda()
                 pred_normal = render_pkg["rend_normal"]
 
-                pred_norm = F.normalize(pred_normal, dim=0)
-                gt_norm = F.normalize(gt_normal, dim=0)
-                cosine_sim = (pred_norm * gt_norm).sum(dim=0)
-                valid_mask = (gt_normal.abs().sum(dim=0) > 0.1)
+                with profiler.profile("mono_normal_loss"):
+                    pred_norm = F.normalize(pred_normal, dim=0)
+                    gt_norm = F.normalize(gt_normal, dim=0)
+                    cosine_sim = (pred_norm * gt_norm).sum(dim=0)
+                    valid_mask = (gt_normal.abs().sum(dim=0) > 0.1)
 
-                if valid_mask.sum() > 0:
-                    loss_mono_normal = weights['mono_normal'] * (1.0 - cosine_sim[valid_mask]).mean()
+                    if valid_mask.sum() > 0:
+                        loss_mono_normal = weights['mono_normal'] * (1.0 - cosine_sim[valid_mask]).mean()
 
         # === PBR Shading (Stage 3+) ===
         if loss_scheduler.is_pbr_active(iteration) and gaussians.use_pbr:
@@ -282,16 +293,17 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
 
             if gbuffer_albedo is not None:
                 # PBR shading
-                shaded_image = screen_space_pbr_shading(
-                    gbuffer_albedo,
-                    gbuffer_roughness,
-                    gbuffer_metallic,
-                    gbuffer_normal,
-                    gbuffer_depth,
-                    viewpoint_cam.camera_center,
-                    viewpoint_cam.world_view_transform,
-                    env_light=env_light,
-                )
+                with profiler.profile("pbr_shading"):
+                    shaded_image = screen_space_pbr_shading(
+                        gbuffer_albedo,
+                        gbuffer_roughness,
+                        gbuffer_metallic,
+                        gbuffer_normal,
+                        gbuffer_depth,
+                        viewpoint_cam.camera_center,
+                        viewpoint_cam.world_view_transform,
+                        env_light=env_light,
+                    )
 
                 # PBR reconstruction loss
                 pbr_loss = weights['pbr'] * pbr_reconstruction_loss(shaded_image, gt_image)
@@ -301,18 +313,20 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
 
                 # === PBR Regularization (Stage 4) ===
                 if loss_scheduler.is_pbr_reg_active(iteration):
-                    pbr_losses = compute_pbr_losses(
-                        gbuffer_albedo,
-                        gbuffer_roughness,
-                        gbuffer_metallic,
-                        alpha_map,
-                    )
-                    pbr_reg_loss = weights['pbr_reg'] * pbr_losses['total_pbr_reg']
+                    with profiler.profile("pbr_reg"):
+                        pbr_losses = compute_pbr_losses(
+                            gbuffer_albedo,
+                            gbuffer_roughness,
+                            gbuffer_metallic,
+                            alpha_map,
+                        )
+                        pbr_reg_loss = weights['pbr_reg'] * pbr_losses['total_pbr_reg']
 
         # Total loss
         total_loss = loss + dist_loss + normal_loss + pbr_loss + pbr_reg_loss + env_tv_loss + loss_mono_depth + loss_mono_normal
 
-        total_loss.backward()
+        with profiler.profile("backward"):
+            total_loss.backward()
 
         iter_end.record()
 
@@ -386,13 +400,18 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
 
             # Optimizer step
             if iteration < opt.iterations:
-                gaussians.optimizer.step()
-                gaussians.optimizer.zero_grad(set_to_none=True)
+                with profiler.profile("optimizer_step"):
+                    gaussians.optimizer.step()
+                    gaussians.optimizer.zero_grad(set_to_none=True)
 
-                # Environment light optimizer (Stage 3+: when PBR is active)
-                if loss_scheduler.should_optimize_env_light(iteration):
-                    env_light_optimizer.step()
-                    env_light_optimizer.zero_grad(set_to_none=True)
+                    # Environment light optimizer (Stage 3+: when PBR is active)
+                    if loss_scheduler.should_optimize_env_light(iteration):
+                        env_light_optimizer.step()
+                        env_light_optimizer.zero_grad(set_to_none=True)
+
+            profiler.end_iteration()
+            if iteration % 500 == 0:
+                profiler.report(iteration)
 
             if iteration in checkpoint_iterations:
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -628,6 +647,10 @@ if __name__ == "__main__":
     parser.add_argument("--fade_mono_end", type=int, default=20000,
                         help="Iteration when mono supervision is fully faded")
 
+    # Profiling
+    parser.add_argument("--profile", action="store_true", default=False,
+                        help="Enable performance profiling (prints timing every 500 iters)")
+
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -661,11 +684,15 @@ if __name__ == "__main__":
     opt.fade_mono = args.fade_mono and not args.no_fade_mono
     opt.fade_mono_end = args.fade_mono_end
 
+    # Create profiler
+    profiler = SimpleProfiler(enabled=args.profile)
+
     training_pbr(
         lp.extract(args), opt, pp.extract(args),
         args.test_iterations, args.save_iterations,
         args.checkpoint_iterations, args.start_checkpoint,
-        env_map_path=args.env_map
+        env_map_path=args.env_map,
+        profiler=profiler
     )
 
     print("\nPBR Training complete.")
