@@ -18,6 +18,7 @@ import torchvision.transforms.functional as TF
 from random import randint
 from utils.loss_utils import l1_loss, ssim, compute_pbr_losses, pbr_reconstruction_loss
 from utils.pbr_utils import EnvironmentLight, screen_space_pbr_shading
+from utils.loss_scheduler import LossScheduler, TrainingStages, LossWeights
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -171,13 +172,12 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
     if use_env_gradient_scaling:
         env_light.register_gradient_scaling_hook()
 
-    # Environment light regularization weight
-    lambda_env_tv = getattr(opt, 'lambda_env_tv', 0.001)
+    # Create loss scheduler
+    loss_scheduler = LossScheduler.from_args(opt)
+    loss_scheduler.print_config()
 
-    # Geometric supervision weights
+    # Geometric supervision
     use_pseudo_gt = getattr(opt, 'use_pseudo_gt', False)
-    lambda_mono_depth = getattr(opt, 'lambda_mono_depth', 0.1)
-    lambda_mono_normal = getattr(opt, 'lambda_mono_normal', 0.05)
 
     # Preload pseudo-GT data if enabled (eliminates per-iteration I/O)
     if use_pseudo_gt:
@@ -196,10 +196,6 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
     ema_env_tv_for_log = 0.0
     ema_mono_depth_for_log = 0.0
     ema_mono_normal_for_log = 0.0
-
-    # PBR loss weights
-    lambda_pbr = getattr(opt, 'lambda_pbr', 0.1)
-    lambda_pbr_reg = getattr(opt, 'lambda_pbr_reg', 0.01)
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training PBR")
     first_iter += 1
@@ -232,15 +228,49 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
 
-        # PBR shading loss
+        # Get scheduled loss weights for current iteration
+        weights = loss_scheduler.get_weights(iteration)
+
+        # Initialize loss terms
         pbr_loss = torch.tensor(0.0, device="cuda")
         pbr_reg_loss = torch.tensor(0.0, device="cuda")
         env_tv_loss = torch.tensor(0.0, device="cuda")
         loss_mono_depth = torch.tensor(0.0, device="cuda")
         loss_mono_normal = torch.tensor(0.0, device="cuda")
 
-        if iteration > 5000 and gaussians.use_pbr:
-            # Get G-Buffer
+        # === Geometry Regularization (Stage 2+) ===
+        rend_dist = render_pkg["rend_dist"]
+        rend_normal = render_pkg['rend_normal']
+        surf_normal = render_pkg['surf_normal']
+        normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
+
+        dist_loss = weights['dist'] * rend_dist.mean()
+        normal_loss = weights['normal'] * normal_error.mean()
+
+        # === Mono Supervision (Stage 2+, fade in Stage 4) ===
+        if use_pseudo_gt and (weights['mono_depth'] > 0 or weights['mono_normal'] > 0):
+            gt_depth = viewpoint_cam.pseudo_gt_depth
+            gt_normal = viewpoint_cam.pseudo_gt_normal
+
+            if gt_depth is not None and weights['mono_depth'] > 0:
+                gt_depth = gt_depth.cuda()
+                pred_depth = render_pkg["surf_depth"]
+                loss_mono_depth = weights['mono_depth'] * scale_invariant_loss(pred_depth, gt_depth)
+
+            if gt_normal is not None and weights['mono_normal'] > 0:
+                gt_normal = gt_normal.cuda()
+                pred_normal = render_pkg["rend_normal"]
+
+                pred_norm = F.normalize(pred_normal, dim=0)
+                gt_norm = F.normalize(gt_normal, dim=0)
+                cosine_sim = (pred_norm * gt_norm).sum(dim=0)
+                valid_mask = (gt_normal.abs().sum(dim=0) > 0.1)
+
+                if valid_mask.sum() > 0:
+                    loss_mono_normal = weights['mono_normal'] * (1.0 - cosine_sim[valid_mask]).mean()
+
+        # === PBR Shading (Stage 3+) ===
+        if loss_scheduler.is_pbr_active(iteration) and gaussians.use_pbr:
             gbuffer_albedo = render_pkg.get('gbuffer_albedo')
             gbuffer_roughness = render_pkg.get('gbuffer_roughness')
             gbuffer_metallic = render_pkg.get('gbuffer_metallic')
@@ -249,7 +279,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
             alpha_map = render_pkg.get('rend_alpha')
 
             if gbuffer_albedo is not None:
-                # Apply PBR shading
+                # PBR shading
                 shaded_image = screen_space_pbr_shading(
                     gbuffer_albedo,
                     gbuffer_roughness,
@@ -262,66 +292,20 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                 )
 
                 # PBR reconstruction loss
-                pbr_loss = lambda_pbr * pbr_reconstruction_loss(shaded_image, gt_image)
+                pbr_loss = weights['pbr'] * pbr_reconstruction_loss(shaded_image, gt_image)
 
-                # Material regularization losses
-                if iteration > 10000:
+                # Environment light TV regularization
+                env_tv_loss = weights['env_tv'] * env_light.tv_loss_weighted()
+
+                # === PBR Regularization (Stage 4) ===
+                if loss_scheduler.is_pbr_reg_active(iteration):
                     pbr_losses = compute_pbr_losses(
                         gbuffer_albedo,
                         gbuffer_roughness,
                         gbuffer_metallic,
                         alpha_map,
                     )
-                    pbr_reg_loss = lambda_pbr_reg * pbr_losses['total_pbr_reg']
-
-                # Environment light TV regularization
-                env_tv_loss = lambda_env_tv * env_light.tv_loss_weighted()
-
-        # === Geometric Supervision (Pseudo-GT / Real-GT) ===
-        if use_pseudo_gt:
-            # Access cached GT (stored on CPU, move to CUDA)
-            gt_depth = viewpoint_cam.pseudo_gt_depth
-            gt_normal = viewpoint_cam.pseudo_gt_normal
-            if gt_depth is not None:
-                gt_depth = gt_depth.cuda()
-            if gt_normal is not None:
-                gt_normal = gt_normal.cuda()
-
-            # 1. Depth Supervision
-            if gt_depth is not None:
-                pred_depth = render_pkg["surf_depth"]
-                # Use scale-invariant loss
-                loss_mono_depth = lambda_mono_depth * scale_invariant_loss(pred_depth, gt_depth)
-
-            # 2. Normal Supervision
-            if gt_normal is not None:
-                # Use rendered normal (rend_normal) or geometric normal (surf_normal)
-                # rend_normal is better as it comes from Gaussian rotation
-                pred_normal = render_pkg["rend_normal"]
-                
-                # Normalize both
-                pred_norm = F.normalize(pred_normal, dim=0)
-                gt_norm = F.normalize(gt_normal, dim=0)
-                
-                # Cosine Similarity Loss: 1 - cos(theta)
-                cosine_sim = (pred_norm * gt_norm).sum(dim=0)
-                # Only supervise valid pixels (where normal is not zero or masked)
-                # Assuming GT normal 0,0,0 is invalid
-                valid_mask = (gt_normal.abs().sum(dim=0) > 0.1)
-                
-                if valid_mask.sum() > 0:
-                    loss_mono_normal = lambda_mono_normal * (1.0 - cosine_sim[valid_mask]).mean()
-
-        # Geometry regularization
-        lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
-        lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
-
-        rend_dist = render_pkg["rend_dist"]
-        rend_normal = render_pkg['rend_normal']
-        surf_normal = render_pkg['surf_normal']
-        normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
-        normal_loss = lambda_normal * (normal_error).mean()
-        dist_loss = lambda_dist * (rend_dist).mean()
+                    pbr_reg_loss = weights['pbr_reg'] * pbr_losses['total_pbr_reg']
 
         # Total loss
         total_loss = loss + dist_loss + normal_loss + pbr_loss + pbr_reg_loss + env_tv_loss + loss_mono_depth + loss_mono_normal
@@ -403,8 +387,8 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
 
-                # Environment light optimizer (only after PBR training starts)
-                if iteration > 5000:
+                # Environment light optimizer (Stage 3+: when PBR is active)
+                if loss_scheduler.should_optimize_env_light(iteration):
                     env_light_optimizer.step()
                     env_light_optimizer.zero_grad(set_to_none=True)
 
@@ -626,6 +610,22 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_mono_normal", type=float, default=0.05,
                         help="Weight for mono-normal loss")
 
+    # Training Stage arguments
+    parser.add_argument("--stage1_end", type=int, default=3000,
+                        help="End of Stage 1 (geometry foundation, recon only)")
+    parser.add_argument("--stage2_end", type=int, default=7000,
+                        help="End of Stage 2 (+ dist, mono supervision)")
+    parser.add_argument("--stage3_end", type=int, default=15000,
+                        help="End of Stage 3 (+ normal, pbr, env_tv)")
+    parser.add_argument("--warmup_iters", type=int, default=1000,
+                        help="Warmup iterations for smooth loss activation")
+    parser.add_argument("--fade_mono", action="store_true", default=True,
+                        help="Fade out mono supervision in Stage 4")
+    parser.add_argument("--no_fade_mono", action="store_true", default=False,
+                        help="Disable fading of mono supervision")
+    parser.add_argument("--fade_mono_end", type=int, default=20000,
+                        help="Iteration when mono supervision is fully faded")
+
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -650,6 +650,14 @@ if __name__ == "__main__":
     opt.normal_subdir = args.normal_subdir
     opt.lambda_mono_depth = args.lambda_mono_depth
     opt.lambda_mono_normal = args.lambda_mono_normal
+
+    # Add training stage params to opt
+    opt.stage1_end = args.stage1_end
+    opt.stage2_end = args.stage2_end
+    opt.stage3_end = args.stage3_end
+    opt.warmup_iters = args.warmup_iters
+    opt.fade_mono = args.fade_mono and not args.no_fade_mono
+    opt.fade_mono_end = args.fade_mono_end
 
     training_pbr(
         lp.extract(args), opt, pp.extract(args),
