@@ -309,6 +309,14 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                     cosine_sim = (pred_norm * gt_norm).sum(dim=0)
                     valid_mask = (torch.norm(gt_normal, dim=0) > 0.1)
 
+                    # Debug: print normal statistics every 500 iterations
+                    if iteration % 500 == 0 and valid_mask.sum() > 0:
+                        print(f"\n[Normal Debug @ iter {iteration}]")
+                        print(f"  valid_mask: {valid_mask.sum()}/{valid_mask.numel()}")
+                        print(f"  GT normal mean: {gt_norm[:, valid_mask].mean(dim=1).tolist()}")
+                        print(f"  Pred normal mean: {pred_norm[:, valid_mask].mean(dim=1).tolist()}")
+                        print(f"  cosine_sim: min={cosine_sim[valid_mask].min():.3f}, max={cosine_sim[valid_mask].max():.3f}, mean={cosine_sim[valid_mask].mean():.3f}")
+
                     if valid_mask.sum() > 0:
                         loss_mono_normal = weights['mono_normal'] * (1.0 - cosine_sim[valid_mask]).mean()
 
