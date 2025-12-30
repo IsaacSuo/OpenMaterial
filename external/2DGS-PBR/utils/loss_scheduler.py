@@ -43,8 +43,8 @@ class LossWeights:
     lambda_dist: float = 0.0  # From opt
     lambda_normal: float = 0.05  # From opt
 
-    # Mono supervision
-    lambda_mono_depth: float = 0.1
+    # Mono supervision (relative error after normalization, so 1.0 is reasonable)
+    lambda_mono_depth: float = 1.0
     lambda_mono_normal: float = 0.05
 
     # PBR

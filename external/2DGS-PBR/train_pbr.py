@@ -644,8 +644,8 @@ if __name__ == "__main__":
                         help="Subdirectory name for depth GT images")
     parser.add_argument("--normal_subdir", type=str, default="normal",
                         help="Subdirectory name for normal GT images")
-    parser.add_argument("--lambda_mono_depth", type=float, default=0.1,
-                        help="Weight for mono-depth loss")
+    parser.add_argument("--lambda_mono_depth", type=float, default=1.0,
+                        help="Weight for mono-depth loss (relative error, so 1.0 is reasonable)")
     parser.add_argument("--lambda_mono_normal", type=float, default=0.05,
                         help="Weight for mono-normal loss")
 
