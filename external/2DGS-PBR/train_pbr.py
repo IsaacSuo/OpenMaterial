@@ -90,7 +90,7 @@ def load_pseudo_gt(viewpoint_cam, depth_path_root, normal_path_root):
     return gt_depth, gt_normal
 
 
-def scale_invariant_loss(pred, gt):
+def scale_invariant_loss(pred, gt, debug=False):
     """
     Solve for s, t such that || s * pred + t - gt || is minimized,
     then return the L1 loss of the aligned prediction.
@@ -99,7 +99,11 @@ def scale_invariant_loss(pred, gt):
     then applies the solution to full resolution.
     """
     mask = (gt > 0)
+    if debug:
+        print(f"[DEBUG] gt range: {gt.min():.2f} ~ {gt.max():.2f}, mask.sum(): {mask.sum()}")
     if mask.sum() == 0:
+        if debug:
+            print("[DEBUG] mask.sum() == 0, returning 0")
         return torch.tensor(0.0, device="cuda")
 
     # Optimization: Solve system on downsampled data for speed
@@ -127,15 +131,22 @@ def scale_invariant_loss(pred, gt):
     try:
         result = torch.linalg.lstsq(A, g_fit)
         solution = result.solution  # [2] tensor: [s, t]
+        if debug:
+            print(f"[DEBUG] lstsq solution shape: {solution.shape}, values: {solution}")
         s, t = solution[0], solution[1]
 
         # Prevent negative scale if physically implausible
         if s < 0:
+            if debug:
+                print(f"[DEBUG] s < 0 ({s:.4f}), setting to 0")
             s = torch.tensor(0.0, device="cuda")
 
         # Apply to full resolution
         pred_aligned = pred * s + t
-        return torch.nn.functional.l1_loss(pred_aligned[mask], gt[mask])
+        loss = torch.nn.functional.l1_loss(pred_aligned[mask], gt[mask])
+        if debug:
+            print(f"[DEBUG] s={s:.4f}, t={t:.4f}, loss={loss:.6f}")
+        return loss
     except Exception as e:
         # Fallback if lstsq fails (e.g., singular matrix)
         print(f"[Warning] scale_invariant_loss failed: {e}")
@@ -231,13 +242,11 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
         visibility_filter = render_pkg["visibility_filter"]
         radii = render_pkg["radii"]
 
-        with profiler.profile("gt_image_transfer"):
-            gt_image = viewpoint_cam.original_image.cuda()
+        gt_image = viewpoint_cam.original_image.cuda()
 
         # Standard reconstruction loss
-        with profiler.profile("recon_loss"):
-            Ll1 = l1_loss(image, gt_image)
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        Ll1 = l1_loss(image, gt_image)
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
 
         # Get scheduled loss weights for current iteration
         weights = loss_scheduler.get_weights(iteration)
@@ -267,8 +276,11 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                 with profiler.profile("mono_depth_transfer"):
                     gt_depth = gt_depth.cuda()
                 pred_depth = render_pkg["surf_depth"]
+                # Debug first few iterations after mono starts
+                debug_depth = (iteration >= loss_scheduler.stages.stage1_end and
+                               iteration < loss_scheduler.stages.stage1_end + 5)
                 with profiler.profile("mono_depth_lstsq"):
-                    loss_mono_depth = weights['mono_depth'] * scale_invariant_loss(pred_depth, gt_depth)
+                    loss_mono_depth = weights['mono_depth'] * scale_invariant_loss(pred_depth, gt_depth, debug=debug_depth)
 
             if gt_normal is not None and weights['mono_normal'] > 0:
                 with profiler.profile("mono_normal_transfer"):
@@ -358,22 +370,20 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                 progress_bar.close()
 
             # Log and save
-            with profiler.profile("tensorboard_log"):
-                if tb_writer is not None:
-                    tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
-                    tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
-                    tb_writer.add_scalar('train_loss_patches/pbr_loss', ema_pbr_for_log, iteration)
-                    tb_writer.add_scalar('train_loss_patches/env_tv_loss', ema_env_tv_for_log, iteration)
-                    tb_writer.add_scalar('train_loss_patches/mono_depth_loss', ema_mono_depth_for_log, iteration)
-                    tb_writer.add_scalar('train_loss_patches/mono_normal_loss', ema_mono_normal_for_log, iteration)
+            if tb_writer is not None:
+                tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/pbr_loss', ema_pbr_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/env_tv_loss', ema_env_tv_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/mono_depth_loss', ema_mono_depth_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/mono_normal_loss', ema_mono_normal_for_log, iteration)
 
-            with profiler.profile("training_report"):
-                training_report_pbr(
-                    tb_writer, iteration, Ll1, loss, l1_loss,
-                    iter_start.elapsed_time(iter_end),
-                    testing_iterations, scene, render, (pipe, background),
-                    env_light
-                )
+            training_report_pbr(
+                tb_writer, iteration, Ll1, loss, l1_loss,
+                iter_start.elapsed_time(iter_end),
+                testing_iterations, scene, render, (pipe, background),
+                env_light
+            )
 
 
             if iteration in saving_iterations:
