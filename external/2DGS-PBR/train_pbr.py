@@ -92,27 +92,47 @@ def scale_invariant_loss(pred, gt):
     """
     Solve for s, t such that || s * pred + t - gt || is minimized,
     then return the L1 loss of the aligned prediction.
+
+    Optimized: Solves linear regression on downsampled data for speed,
+    then applies the solution to full resolution.
     """
     mask = (gt > 0)
     if mask.sum() == 0:
         return torch.tensor(0.0, device="cuda")
-    
-    p = pred[mask]
-    g = gt[mask]
-    
+
+    # Optimization: Solve system on downsampled data for speed
+    # lstsq is O(N^2), so 1/4 downsample reduces computation ~16x
+    if pred.numel() > 64 * 64:
+        scale_factor = 0.25
+        p_small = F.interpolate(pred.unsqueeze(0), scale_factor=scale_factor, mode='nearest').squeeze(0)
+        g_small = F.interpolate(gt.unsqueeze(0), scale_factor=scale_factor, mode='nearest').squeeze(0)
+        mask_small = (g_small > 0)
+
+        if mask_small.sum() > 10:  # Ensure enough points for regression
+            p_fit = p_small[mask_small]
+            g_fit = g_small[mask_small]
+        else:
+            p_fit = pred[mask]
+            g_fit = gt[mask]
+    else:
+        p_fit = pred[mask]
+        g_fit = gt[mask]
+
     # Linear regression: p * s + t = g
-    ones = torch.ones_like(p)
-    A = torch.stack([p, ones], dim=1) # [N, 2]
-    
+    ones = torch.ones_like(p_fit)
+    A = torch.stack([p_fit, ones], dim=1)
+
     try:
-        X, _ = torch.linalg.lstsq(A, g).solution
+        X, _ = torch.linalg.lstsq(A, g_fit).solution
         s, t = X[0], X[1]
-        
-        # Prevent negative scale if physically implausible (optional but recommended)
-        if s < 0: s = torch.tensor(0.0, device="cuda")
-        
+
+        # Prevent negative scale if physically implausible
+        if s < 0:
+            s = torch.tensor(0.0, device="cuda")
+
+        # Apply to full resolution
         pred_aligned = pred * s + t
-        return torch.nn.functional.l1_loss(pred_aligned[mask], g)
+        return torch.nn.functional.l1_loss(pred_aligned[mask], gt[mask])
     except:
         # Fallback if SVD fails
         return torch.tensor(0.0, device="cuda")
