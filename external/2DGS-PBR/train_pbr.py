@@ -143,9 +143,13 @@ def scale_invariant_loss(pred, gt, debug=False):
 
         # Apply to full resolution
         pred_aligned = pred * s + t
-        loss = torch.nn.functional.l1_loss(pred_aligned[mask], gt[mask])
+
+        # Compute relative L1 error (normalized by GT mean) to keep loss scale-invariant
+        gt_mean = gt[mask].mean()
+        loss = torch.nn.functional.l1_loss(pred_aligned[mask], gt[mask]) / (gt_mean + 1e-8)
+
         if debug:
-            print(f"[DEBUG] s={s:.4f}, t={t:.4f}, loss={loss:.6f}")
+            print(f"[DEBUG] s={s:.4f}, t={t:.4f}, gt_mean={gt_mean:.2f}, loss={loss:.6f}")
         return loss
     except Exception as e:
         # Fallback if lstsq fails (e.g., singular matrix)
