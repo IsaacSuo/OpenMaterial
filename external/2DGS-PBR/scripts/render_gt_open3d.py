@@ -124,7 +124,7 @@ def find_gt_mesh(source_path, user_mesh_path=None):
 
     raise FileNotFoundError("Could not find GT mesh. Please provide it using -g/--gt_path.")
 
-def render_gt(source_path, mesh_path=None, scale_depth=1000.0):
+def render_gt(source_path, mesh_path=None, scale_depth=1000.0, debug=False):
     
     # 1. Find Mesh
     real_mesh_path = find_gt_mesh(source_path, mesh_path)
@@ -140,6 +140,13 @@ def render_gt(source_path, mesh_path=None, scale_depth=1000.0):
         print("Computing vertex normals...")
         mesh.compute_vertex_normals()
 
+    # Debug: print mesh stats
+    vertices = np.asarray(mesh.vertices)
+    print(f"Mesh stats: {len(mesh.vertices)} vertices, {len(mesh.triangles)} triangles")
+    print(f"Mesh bounds: X[{vertices[:,0].min():.3f}, {vertices[:,0].max():.3f}], "
+          f"Y[{vertices[:,1].min():.3f}, {vertices[:,1].max():.3f}], "
+          f"Z[{vertices[:,2].min():.3f}, {vertices[:,2].max():.3f}]")
+
     # 2. Output dirs
     depth_dir = os.path.join(source_path, "depth_gt")
     normal_dir = os.path.join(source_path, "normal_gt")
@@ -154,17 +161,27 @@ def render_gt(source_path, mesh_path=None, scale_depth=1000.0):
     # This allows us to render the normal map by just rendering the mesh with an Unlit shader
     mesh_normal = o3d.geometry.TriangleMesh(mesh)
     normals = np.asarray(mesh_normal.vertex_normals)
+
+    # Note: The normals are in world space. When rendered, they will be transformed
+    # by the view matrix. Since we want camera-space normals (for consistency with
+    # 2DGS which outputs camera-space normals), we store world-space normals here
+    # and they get transformed during rendering.
+
     # Map [-1, 1] -> [0, 1]
     colors = (normals + 1.0) * 0.5
     mesh_normal.vertex_colors = o3d.utility.Vector3dVector(colors)
 
-    print(f"Rendering {len(cameras)} views using OffscreenRenderer...")
-    
+    if debug:
+        cameras = cameras[:1]  # Only render first view in debug mode
+        print(f"[DEBUG] Rendering 1 view (debug mode)")
+    else:
+        print(f"Rendering {len(cameras)} views using OffscreenRenderer...")
+
     # 5. Initialize Renderer loop
     renderer = None
     current_w, current_h = 0, 0
-    
-    for cam in tqdm(cameras):
+
+    for cam in tqdm(cameras, disable=debug):
         W, H = cam["W"], cam["H"]
         
         # Initialize or Re-initialize renderer if dimensions change
@@ -187,11 +204,31 @@ def render_gt(source_path, mesh_path=None, scale_depth=1000.0):
         # Setup Camera
         # Intrinsic
         intrinsic = o3d.camera.PinholeCameraIntrinsic(W, H, cam["fx"], cam["fy"], cam["cx"], cam["cy"])
-        
+
         # Extrinsic (World-to-Camera)
         c2w = cam["c2w"]
-        w2c = np.linalg.inv(c2w)
-        
+
+        # Coordinate system conversion: OpenGL/Blender -> Open3D
+        # OpenGL: Y up, -Z forward (camera looks down -Z)
+        # Open3D: Y down, +Z forward (camera looks down +Z)
+        # We need to flip Y and Z axes
+        flip_yz = np.array([
+            [1,  0,  0, 0],
+            [0, -1,  0, 0],
+            [0,  0, -1, 0],
+            [0,  0,  0, 1]
+        ])
+
+        # Apply flip to camera-to-world, then invert to get world-to-camera
+        c2w_o3d = c2w @ flip_yz
+        w2c = np.linalg.inv(c2w_o3d)
+
+        if debug:
+            cam_pos = c2w[:3, 3]
+            print(f"[DEBUG] Camera '{cam['name']}': pos={cam_pos}, W={W}, H={H}")
+            print(f"[DEBUG] c2w:\n{c2w}")
+            print(f"[DEBUG] w2c (after flip):\n{w2c}")
+
         # Setup camera in renderer
         # Note: OffscreenRenderer.setup_camera takes (intrinsic, extrinsic_matrix)
         renderer.setup_camera(intrinsic, w2c)
@@ -200,7 +237,10 @@ def render_gt(source_path, mesh_path=None, scale_depth=1000.0):
         # Since shader is Unlit and vertex colors are normals, the RGB output is the normal map
         img_o3d = renderer.render_to_image()
         img_np = np.asarray(img_o3d)
-        
+
+        if debug:
+            print(f"[DEBUG] Normal image: shape={img_np.shape}, range=[{img_np.min()}, {img_np.max()}], nonzero={np.count_nonzero(img_np)}")
+
         # Convert RGB to BGR for OpenCV
         normal_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(normal_dir, f"{cam['name']}.png"), normal_bgr)
@@ -209,14 +249,24 @@ def render_gt(source_path, mesh_path=None, scale_depth=1000.0):
         # render_to_depth_image returns float depth in view space
         depth_o3d = renderer.render_to_depth_image(z_in_view_space=True)
         depth_np = np.asarray(depth_o3d)
-        
+
+        if debug:
+            print(f"[DEBUG] Raw depth: min={depth_np.min():.4f}, max={depth_np.max():.4f}, "
+                  f"inf_count={(np.isinf(depth_np)).sum()}, non_inf_max={depth_np[~np.isinf(depth_np)].max() if (~np.isinf(depth_np)).any() else 'N/A'}")
+
         # Check for inf/nan
         depth_np[np.isinf(depth_np)] = 0
         depth_np[np.isnan(depth_np)] = 0
-        
+
+        if debug:
+            print(f"[DEBUG] After cleanup: min={depth_np.min():.4f}, max={depth_np.max():.4f}, nonzero={np.count_nonzero(depth_np)}")
+
         # Scale and save as 16-bit PNG
         depth_mm = (depth_np * scale_depth).astype(np.uint16)
         cv2.imwrite(os.path.join(depth_dir, f"{cam['name']}.png"), depth_mm)
+
+        if debug:
+            print(f"[DEBUG] Saved depth: {depth_mm.min()} ~ {depth_mm.max()}")
 
     print("GT Generation Complete.")
 
@@ -225,6 +275,7 @@ if __name__ == "__main__":
     parser.add_argument("-s", "--source_path", required=True)
     parser.add_argument("-g", "--gt_path", default=None, help="Explicit path to GT mesh (.ply/.obj)")
     parser.add_argument("--scale", type=float, default=1000.0)
+    parser.add_argument("--debug", action="store_true", help="Debug mode: render only first view with verbose output")
     args = parser.parse_args()
-    
-    render_gt(args.source_path, args.gt_path, args.scale)
+
+    render_gt(args.source_path, args.gt_path, args.scale, debug=args.debug)
