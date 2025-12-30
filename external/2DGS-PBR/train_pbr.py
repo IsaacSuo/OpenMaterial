@@ -295,7 +295,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                     pred_norm = F.normalize(pred_normal, dim=0)
                     gt_norm = F.normalize(gt_normal, dim=0)
                     cosine_sim = (pred_norm * gt_norm).sum(dim=0)
-                    valid_mask = (gt_normal.abs().sum(dim=0) > 0.1)
+                    valid_mask = (torch.norm(gt_normal, dim=0) > 0.1)
 
                     if valid_mask.sum() > 0:
                         loss_mono_normal = weights['mono_normal'] * (1.0 - cosine_sim[valid_mask]).mean()

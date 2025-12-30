@@ -208,26 +208,15 @@ def render_gt(source_path, mesh_path=None, scale_depth=1000.0, debug=False):
         # Extrinsic (World-to-Camera)
         c2w = cam["c2w"]
 
-        # Coordinate system conversion: OpenGL/Blender -> Open3D
-        # OpenGL: Y up, -Z forward (camera looks down -Z)
-        # Open3D: Y down, +Z forward (camera looks down +Z)
-        # We need to flip Y and Z axes
-        flip_yz = np.array([
-            [1,  0,  0, 0],
-            [0, -1,  0, 0],
-            [0,  0, -1, 0],
-            [0,  0,  0, 1]
-        ])
-
-        # Apply flip to camera-to-world, then invert to get world-to-camera
-        c2w_o3d = c2w @ flip_yz
-        w2c = np.linalg.inv(c2w_o3d)
+        # Use OpenGL coordinate system directly (Y up, Z back)
+        # This matches dataset_readers.py which no longer flips coordinates
+        w2c = np.linalg.inv(c2w)
 
         if debug:
             cam_pos = c2w[:3, 3]
             print(f"[DEBUG] Camera '{cam['name']}': pos={cam_pos}, W={W}, H={H}")
             print(f"[DEBUG] c2w:\n{c2w}")
-            print(f"[DEBUG] w2c (after flip):\n{w2c}")
+            print(f"[DEBUG] w2c:\n{w2c}")
 
         # Setup camera in renderer
         # Note: OffscreenRenderer.setup_camera takes (intrinsic, extrinsic_matrix)

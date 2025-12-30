@@ -180,8 +180,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     # get normal map
     # transform normal from view space to world space
+    # world_view_transform is stored transposed, so [:3,:3] is already R_w2c^T (i.e., R_v2w)
     render_normal = allmap[2:5]
-    render_normal = (render_normal.permute(1,2,0) @ (viewpoint_camera.world_view_transform[:3,:3].T)).permute(2,0,1)
+    render_normal = (render_normal.permute(1,2,0) @ (viewpoint_camera.world_view_transform[:3,:3])).permute(2,0,1)
     
     # get median depth map
     render_depth_median = allmap[5:6]
