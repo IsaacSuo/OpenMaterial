@@ -158,17 +158,12 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
     use_pseudo_gt = getattr(opt, 'use_pseudo_gt', False)
     lambda_mono_depth = getattr(opt, 'lambda_mono_depth', 0.1)
     lambda_mono_normal = getattr(opt, 'lambda_mono_normal', 0.05)
-    
-    # Pre-construct GT paths
+
+    # Preload pseudo-GT data if enabled (eliminates per-iteration I/O)
     if use_pseudo_gt:
-        depth_root = os.path.join(dataset.source_path, getattr(opt, 'depth_subdir', 'depth'))
-        normal_root = os.path.join(dataset.source_path, getattr(opt, 'normal_subdir', 'normal'))
-        print(f"Geometric Supervision Enabled.")
-        print(f"Depth GT path: {depth_root}")
-        print(f"Normal GT path: {normal_root}")
-    else:
-        depth_root = None
-        normal_root = None
+        depth_subdir = getattr(opt, 'depth_subdir', 'depth')
+        normal_subdir = getattr(opt, 'normal_subdir', 'normal')
+        scene.load_pseudo_gt_cache(depth_subdir, normal_subdir)
 
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
@@ -264,9 +259,14 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
 
         # === Geometric Supervision (Pseudo-GT / Real-GT) ===
         if use_pseudo_gt:
-            # Load GT
-            gt_depth, gt_normal = load_pseudo_gt(viewpoint_cam, depth_root, normal_root)
-            
+            # Access cached GT (stored on CPU, move to CUDA)
+            gt_depth = viewpoint_cam.pseudo_gt_depth
+            gt_normal = viewpoint_cam.pseudo_gt_normal
+            if gt_depth is not None:
+                gt_depth = gt_depth.cuda()
+            if gt_normal is not None:
+                gt_normal = gt_normal.cuda()
+
             # 1. Depth Supervision
             if gt_depth is not None:
                 pred_depth = render_pkg["surf_depth"]

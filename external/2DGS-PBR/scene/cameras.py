@@ -46,7 +46,12 @@ class Camera(nn.Module):
         else:
             # self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device) # do we need this?
             self.gt_alpha_mask = None
-        
+
+        # Pseudo-GT for geometric supervision (loaded by Scene if enabled)
+        # Stored on CPU, moved to CUDA when needed during training
+        self.pseudo_gt_depth = None   # [1, H, W] depth map
+        self.pseudo_gt_normal = None  # [3, H, W] normal map
+
         self.zfar = 100.0
         self.znear = 0.01
 
