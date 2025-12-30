@@ -135,6 +135,12 @@ def scale_invariant_loss(pred, gt, debug=False):
             print(f"[DEBUG] lstsq solution shape: {solution.shape}, values: {solution}")
         s, t = solution[0], solution[1]
 
+        # Check for nan/inf from lstsq (numerical instability)
+        if torch.isnan(s) or torch.isnan(t) or torch.isinf(s) or torch.isinf(t):
+            if debug:
+                print(f"[DEBUG] lstsq returned nan/inf: s={s}, t={t}")
+            return torch.tensor(0.0, device="cuda")
+
         # Prevent negative scale if physically implausible
         if s < 0:
             if debug:
@@ -147,6 +153,12 @@ def scale_invariant_loss(pred, gt, debug=False):
         # Compute relative L1 error (normalized by GT mean) to keep loss scale-invariant
         gt_mean = gt[mask].mean()
         loss = torch.nn.functional.l1_loss(pred_aligned[mask], gt[mask]) / (gt_mean + 1e-8)
+
+        # Final nan check
+        if torch.isnan(loss):
+            if debug:
+                print(f"[DEBUG] loss is nan, s={s}, t={t}, gt_mean={gt_mean}")
+            return torch.tensor(0.0, device="cuda")
 
         if debug:
             print(f"[DEBUG] s={s:.4f}, t={t:.4f}, gt_mean={gt_mean:.2f}, loss={loss:.6f}")

@@ -162,10 +162,10 @@ def render_gt(source_path, mesh_path=None, scale_depth=1000.0, debug=False):
     mesh_normal = o3d.geometry.TriangleMesh(mesh)
     normals = np.asarray(mesh_normal.vertex_normals)
 
-    # Note: The normals are in world space. When rendered, they will be transformed
-    # by the view matrix. Since we want camera-space normals (for consistency with
-    # 2DGS which outputs camera-space normals), we store world-space normals here
-    # and they get transformed during rendering.
+    # Apply flip_yz to normals to match the camera coordinate transform
+    # Camera uses flip_yz (OpenGL -> Open3D), so normals must also be transformed
+    flip_yz_3x3 = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float32)
+    normals = normals @ flip_yz_3x3.T
 
     # Map [-1, 1] -> [0, 1]
     colors = (normals + 1.0) * 0.5
