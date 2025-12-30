@@ -59,12 +59,11 @@ class LossScheduler:
 
     Training Stages:
         Stage 1 (0 - stage1_end): Geometry Foundation
-            - L_recon only
+            - L_recon
+            - L_mono_depth, L_mono_normal (if enabled, from iter 0!)
 
         Stage 2 (stage1_end - stage2_end): Geometric Refinement
             - + L_dist (with warmup)
-            - + L_mono_depth (if enabled, with warmup)
-            - + L_mono_normal (if enabled, with warmup)
 
         Stage 3 (stage2_end - stage3_end): PBR Bootstrap
             - + L_normal (with warmup)
@@ -144,10 +143,8 @@ class LossScheduler:
         else:
             weights['dist'] = 0.0
 
-        # Stage 2+: mono supervision (if enabled)
-        if self.use_mono and iteration >= self.stages.stage1_end:
-            warmup = self._warmup_factor(iteration, self.stages.stage1_end)
-
+        # Mono supervision: from iteration 0 (no warmup, geometry needs early guidance)
+        if self.use_mono:
             # Apply fade in stage 4 if configured
             fade = 1.0
             if self.stages.fade_mono and iteration >= self.stages.stage3_end:
@@ -157,8 +154,8 @@ class LossScheduler:
                     self.stages.fade_mono_end
                 )
 
-            weights['mono_depth'] = self.base.lambda_mono_depth * warmup * fade
-            weights['mono_normal'] = self.base.lambda_mono_normal * warmup * fade
+            weights['mono_depth'] = self.base.lambda_mono_depth * fade
+            weights['mono_normal'] = self.base.lambda_mono_normal * fade
         else:
             weights['mono_depth'] = 0.0
             weights['mono_normal'] = 0.0
@@ -203,9 +200,10 @@ class LossScheduler:
     def get_stage_info(self, iteration: int) -> str:
         """Get human-readable stage description."""
         stage = self.get_stage(iteration)
+        mono_str = " + mono" if self.use_mono else ""
         descriptions = {
-            1: "Stage 1: Geometry Foundation (recon only)",
-            2: "Stage 2: Geometric Refinement (+ dist, mono)",
+            1: f"Stage 1: Geometry Foundation (recon{mono_str})",
+            2: f"Stage 2: Geometric Refinement (+ dist{mono_str})",
             3: "Stage 3: PBR Bootstrap (+ normal, pbr, env_tv)",
             4: "Stage 4: Full PBR (+ pbr_reg)"
         }
@@ -217,9 +215,9 @@ class LossScheduler:
         print("Loss Scheduler Configuration")
         print("=" * 60)
         print(f"Stage 1 (Geometry Foundation):    0 - {self.stages.stage1_end}")
-        print(f"  Active: L_recon")
+        print(f"  Active: L_recon" + (", L_mono_depth, L_mono_normal (from iter 0!)" if self.use_mono else ""))
         print(f"Stage 2 (Geometric Refinement):   {self.stages.stage1_end} - {self.stages.stage2_end}")
-        print(f"  Active: + L_dist" + (", L_mono_depth, L_mono_normal" if self.use_mono else ""))
+        print(f"  Active: + L_dist")
         print(f"Stage 3 (PBR Bootstrap):          {self.stages.stage2_end} - {self.stages.stage3_end}")
         print(f"  Active: + L_normal, L_pbr, L_env_tv")
         print(f"Stage 4 (Full PBR):               {self.stages.stage3_end} - end")
