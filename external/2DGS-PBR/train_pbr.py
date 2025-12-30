@@ -124,8 +124,9 @@ def scale_invariant_loss(pred, gt):
     A = torch.stack([p_fit, ones], dim=1)
 
     try:
-        X, _ = torch.linalg.lstsq(A, g_fit).solution
-        s, t = X[0], X[1]
+        result = torch.linalg.lstsq(A, g_fit)
+        solution = result.solution  # [2] tensor: [s, t]
+        s, t = solution[0], solution[1]
 
         # Prevent negative scale if physically implausible
         if s < 0:
@@ -134,8 +135,9 @@ def scale_invariant_loss(pred, gt):
         # Apply to full resolution
         pred_aligned = pred * s + t
         return torch.nn.functional.l1_loss(pred_aligned[mask], gt[mask])
-    except:
-        # Fallback if SVD fails
+    except Exception as e:
+        # Fallback if lstsq fails (e.g., singular matrix)
+        print(f"[Warning] scale_invariant_loss failed: {e}")
         return torch.tensor(0.0, device="cuda")
 
 
