@@ -231,11 +231,13 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
         visibility_filter = render_pkg["visibility_filter"]
         radii = render_pkg["radii"]
 
-        gt_image = viewpoint_cam.original_image.cuda()
+        with profiler.profile("gt_image_transfer"):
+            gt_image = viewpoint_cam.original_image.cuda()
 
         # Standard reconstruction loss
-        Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        with profiler.profile("recon_loss"):
+            Ll1 = l1_loss(image, gt_image)
+            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
 
         # Get scheduled loss weights for current iteration
         weights = loss_scheduler.get_weights(iteration)
@@ -356,20 +358,22 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                 progress_bar.close()
 
             # Log and save
-            if tb_writer is not None:
-                tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
-                tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
-                tb_writer.add_scalar('train_loss_patches/pbr_loss', ema_pbr_for_log, iteration)
-                tb_writer.add_scalar('train_loss_patches/env_tv_loss', ema_env_tv_for_log, iteration)
-                tb_writer.add_scalar('train_loss_patches/mono_depth_loss', ema_mono_depth_for_log, iteration)
-                tb_writer.add_scalar('train_loss_patches/mono_normal_loss', ema_mono_normal_for_log, iteration)
+            with profiler.profile("tensorboard_log"):
+                if tb_writer is not None:
+                    tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
+                    tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
+                    tb_writer.add_scalar('train_loss_patches/pbr_loss', ema_pbr_for_log, iteration)
+                    tb_writer.add_scalar('train_loss_patches/env_tv_loss', ema_env_tv_for_log, iteration)
+                    tb_writer.add_scalar('train_loss_patches/mono_depth_loss', ema_mono_depth_for_log, iteration)
+                    tb_writer.add_scalar('train_loss_patches/mono_normal_loss', ema_mono_normal_for_log, iteration)
 
-            training_report_pbr(
-                tb_writer, iteration, Ll1, loss, l1_loss,
-                iter_start.elapsed_time(iter_end),
-                testing_iterations, scene, render, (pipe, background),
-                env_light
-            )
+            with profiler.profile("training_report"):
+                training_report_pbr(
+                    tb_writer, iteration, Ll1, loss, l1_loss,
+                    iter_start.elapsed_time(iter_end),
+                    testing_iterations, scene, render, (pipe, background),
+                    env_light
+                )
 
 
             if iteration in saving_iterations:
