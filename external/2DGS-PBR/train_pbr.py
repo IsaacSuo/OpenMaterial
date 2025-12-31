@@ -230,6 +230,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
     ema_env_tv_for_log = 0.0
     ema_mono_depth_for_log = 0.0
     ema_mono_normal_for_log = 0.0
+    ema_alpha_for_log = 0.0
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training PBR")
     first_iter += 1
@@ -278,6 +279,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
         env_tv_loss = torch.tensor(0.0, device="cuda")
         loss_mono_depth = torch.tensor(0.0, device="cuda")
         loss_mono_normal = torch.tensor(0.0, device="cuda")
+        loss_alpha = torch.tensor(0.0, device="cuda")
 
         # === Geometry Regularization (Stage 2+) ===
         rend_dist = render_pkg["rend_dist"]
@@ -287,6 +289,12 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
 
         dist_loss = weights['dist'] * rend_dist.mean()
         normal_loss = weights['normal'] * normal_error.mean()
+
+        # === Alpha Supervision ===
+        # Supervise rend_alpha to match gt_mask
+        if gt_mask is not None and opt.lambda_alpha > 0:
+            rend_alpha = render_pkg["rend_alpha"]
+            loss_alpha = opt.lambda_alpha * l1_loss(rend_alpha, gt_mask)
 
         # === Mono Supervision (Stage 2+, fade in Stage 4) ===
         if use_pseudo_gt and (weights['mono_depth'] > 0 or weights['mono_normal'] > 0):
@@ -366,7 +374,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                         pbr_reg_loss = weights['pbr_reg'] * pbr_losses['total_pbr_reg']
 
         # Total loss
-        total_loss = loss + dist_loss + normal_loss + pbr_loss + pbr_reg_loss + env_tv_loss + loss_mono_depth + loss_mono_normal
+        total_loss = loss + dist_loss + normal_loss + pbr_loss + pbr_reg_loss + env_tv_loss + loss_mono_depth + loss_mono_normal + loss_alpha
 
         with profiler.profile("backward"):
             total_loss.backward()
@@ -382,6 +390,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
             ema_env_tv_for_log = 0.4 * env_tv_loss.item() + 0.6 * ema_env_tv_for_log
             ema_mono_depth_for_log = 0.4 * loss_mono_depth.item() + 0.6 * ema_mono_depth_for_log
             ema_mono_normal_for_log = 0.4 * loss_mono_normal.item() + 0.6 * ema_mono_normal_for_log
+            ema_alpha_for_log = 0.4 * loss_alpha.item() + 0.6 * ema_alpha_for_log
 
             if iteration % 10 == 0:
                 loss_dict = {
@@ -390,6 +399,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                     "env": f"{ema_env_tv_for_log:.{4}f}",
                     "m_d": f"{ema_mono_depth_for_log:.{4}f}",
                     "m_n": f"{ema_mono_normal_for_log:.{4}f}",
+                    "alpha": f"{ema_alpha_for_log:.{4}f}",
                     "pts": f"{len(gaussians.get_xyz)}"
                 }
                 progress_bar.set_postfix(loss_dict)
@@ -406,6 +416,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                 tb_writer.add_scalar('train_loss_patches/env_tv_loss', ema_env_tv_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/mono_depth_loss', ema_mono_depth_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/mono_normal_loss', ema_mono_normal_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/alpha_loss', ema_alpha_for_log, iteration)
 
             training_report_pbr(
                 tb_writer, iteration, Ll1, loss, l1_loss,
@@ -678,6 +689,8 @@ if __name__ == "__main__":
                         help="Weight for mono-depth loss (relative error, so 1.0 is reasonable)")
     parser.add_argument("--lambda_mono_normal", type=float, default=0.05,
                         help="Weight for mono-normal loss")
+    parser.add_argument("--lambda_alpha", type=float, default=0.1,
+                        help="Weight for alpha supervision loss (rend_alpha vs gt_mask)")
 
     # Training Stage arguments
     parser.add_argument("--stage1_end", type=int, default=3000,
