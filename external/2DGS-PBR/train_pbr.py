@@ -260,9 +260,14 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
 
         gt_image = viewpoint_cam.original_image.cuda()
 
-        # Standard reconstruction loss
-        Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        # Get mask if available
+        gt_mask = viewpoint_cam.gt_alpha_mask
+        if gt_mask is not None:
+            gt_mask = gt_mask.cuda()
+
+        # Standard reconstruction loss (with mask if available)
+        Ll1 = l1_loss(image, gt_image, gt_mask)
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image, mask=gt_mask))
 
         # Get scheduled loss weights for current iteration
         weights = loss_scheduler.get_weights(iteration)
@@ -616,8 +621,13 @@ def training_report_pbr(tb_writer, iteration, Ll1, loss, l1_loss, elapsed,
                                 gt_image[None], global_step=iteration
                             )
 
-                    l1_test += l1_loss(image, gt_image).mean().double()
-                    psnr_test += psnr(image, gt_image).mean().double()
+                    # Get mask if available for evaluation
+                    gt_mask = viewpoint.gt_alpha_mask
+                    if gt_mask is not None:
+                        gt_mask = gt_mask.cuda()
+
+                    l1_test += l1_loss(image, gt_image, gt_mask).mean().double()
+                    psnr_test += psnr(image, gt_image, gt_mask).mean().double()
 
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])
