@@ -274,6 +274,10 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
         gt_mask = viewpoint_cam.gt_alpha_mask
         if gt_mask is not None:
             gt_mask = gt_mask.cuda()
+            # Composite rendered image over white background using mask
+            # This ensures background has no gradient contribution
+            image = image * gt_mask + (1 - gt_mask)  # white background
+            gt_image = gt_image * gt_mask + (1 - gt_mask)  # also composite GT
 
         # Standard reconstruction loss (with mask if available)
         Ll1 = l1_loss(image, gt_image, gt_mask)
