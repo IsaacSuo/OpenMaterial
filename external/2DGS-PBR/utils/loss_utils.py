@@ -80,7 +80,7 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True, mask=None
 
 # ==================== PBR Loss Functions ====================
 
-def pbr_reconstruction_loss(shaded_image, gt_image, lambda_l1=0.8, lambda_ssim=0.2):
+def pbr_reconstruction_loss(shaded_image, gt_image, lambda_l1=0.8, lambda_ssim=0.2, mask=None):
     """
     PBR reconstruction loss combining L1 and SSIM.
 
@@ -89,12 +89,13 @@ def pbr_reconstruction_loss(shaded_image, gt_image, lambda_l1=0.8, lambda_ssim=0
         gt_image: [3, H, W] ground truth image
         lambda_l1: weight for L1 loss
         lambda_ssim: weight for SSIM loss
+        mask: optional mask to exclude background pixels
 
     Returns:
         Combined reconstruction loss
     """
-    l1 = l1_loss(shaded_image, gt_image)
-    ssim_val = ssim(shaded_image.unsqueeze(0), gt_image.unsqueeze(0))
+    l1 = l1_loss(shaded_image, gt_image, mask)
+    ssim_val = ssim(shaded_image.unsqueeze(0), gt_image.unsqueeze(0), mask=mask.unsqueeze(0) if mask is not None else None)
     return lambda_l1 * l1 + lambda_ssim * (1.0 - ssim_val)
 
 

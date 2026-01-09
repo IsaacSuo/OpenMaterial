@@ -90,15 +90,21 @@ def load_pseudo_gt(viewpoint_cam, depth_path_root, normal_path_root):
     return gt_depth, gt_normal
 
 
-def scale_invariant_loss(pred, gt, debug=False):
+def scale_invariant_loss(pred, gt, alpha_mask=None, debug=False):
     """
     Solve for s, t such that || s * pred + t - gt || is minimized,
     then return the L1 loss of the aligned prediction.
 
     Optimized: Solves linear regression on downsampled data for speed,
     then applies the solution to full resolution.
+
+    Args:
+        alpha_mask: Optional mask to exclude background pixels (e.g., gt_alpha_mask)
     """
     mask = (gt > 0)
+    # Combine with alpha mask if provided
+    if alpha_mask is not None:
+        mask = mask & (alpha_mask.squeeze() > 0.5)
     if debug:
         print(f"[DEBUG] gt range: {gt.min():.2f} ~ {gt.max():.2f}, mask.sum(): {mask.sum()}")
     if mask.sum() == 0:
@@ -113,6 +119,9 @@ def scale_invariant_loss(pred, gt, debug=False):
         p_small = F.interpolate(pred.unsqueeze(0), scale_factor=scale_factor, mode='nearest').squeeze(0)
         g_small = F.interpolate(gt.unsqueeze(0), scale_factor=scale_factor, mode='nearest').squeeze(0)
         mask_small = (g_small > 0)
+        if alpha_mask is not None:
+            alpha_small = F.interpolate(alpha_mask.unsqueeze(0), scale_factor=scale_factor, mode='nearest').squeeze(0)
+            mask_small = mask_small & (alpha_small.squeeze() > 0.5)
 
         if mask_small.sum() > 10:  # Ensure enough points for regression
             p_fit = p_small[mask_small]
@@ -309,7 +318,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                 debug_depth = (iteration >= loss_scheduler.stages.stage1_end and
                                iteration < loss_scheduler.stages.stage1_end + 5)
                 with profiler.profile("mono_depth_lstsq"):
-                    loss_mono_depth = weights['mono_depth'] * scale_invariant_loss(pred_depth, gt_depth, debug=debug_depth)
+                    loss_mono_depth = weights['mono_depth'] * scale_invariant_loss(pred_depth, gt_depth, alpha_mask=gt_mask, debug=debug_depth)
 
             if gt_normal is not None and weights['mono_normal'] > 0:
                 with profiler.profile("mono_normal_transfer"):
@@ -321,6 +330,9 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                     gt_norm = F.normalize(gt_normal, dim=0)
                     cosine_sim = (pred_norm * gt_norm).sum(dim=0)
                     valid_mask = (torch.norm(gt_normal, dim=0) > 0.1)
+                    # Combine with alpha mask if provided
+                    if gt_mask is not None:
+                        valid_mask = valid_mask & (gt_mask.squeeze() > 0.5)
 
                     # Debug: print normal statistics every 500 iterations
                     if iteration % 500 == 0 and valid_mask.sum() > 0:
@@ -357,7 +369,7 @@ def training_pbr(dataset, opt, pipe, testing_iterations, saving_iterations,
                     )
 
                 # PBR reconstruction loss
-                pbr_loss = weights['pbr'] * pbr_reconstruction_loss(shaded_image, gt_image)
+                pbr_loss = weights['pbr'] * pbr_reconstruction_loss(shaded_image, gt_image, mask=gt_mask)
 
                 # Environment light TV regularization
                 env_tv_loss = weights['env_tv'] * env_light.tv_loss_weighted()
