@@ -102,6 +102,12 @@ def training_pbr_static(dataset, opt, pipe, args):
     ema_loss_for_log = 0.0
     ema_pbr_for_log = 0.0
     
+    # Early Stopping State
+    best_window_loss = float('inf')
+    patience_counter = 0
+    recent_losses = []
+    check_interval = args.early_stopping_interval  # Check every N steps
+
     progress_bar = tqdm(range(1, opt.iterations + 1), desc="Training Static PBR")
     
     first_iter = 1
@@ -178,7 +184,39 @@ def training_pbr_static(dataset, opt, pipe, args):
                     "Pts": f"{len(gaussians.get_xyz)}"
                 })
                 progress_bar.update(10)
-                
+
+            # Early Stopping Check (Relative Percentage Strategy)
+            if args.enable_early_stopping:
+                recent_losses.append(total_loss.item())
+                if iteration % check_interval == 0:
+                    avg_window_loss = sum(recent_losses) / len(recent_losses)
+                    recent_losses = [] # Reset buffer
+
+                    if best_window_loss == float('inf'):
+                         best_window_loss = avg_window_loss
+                    else:
+                        # Calculate relative improvement: (Old - New) / Old
+                        # Example: 0.01 means 1% improvement
+                        rel_improvement = (best_window_loss - avg_window_loss) / best_window_loss
+                        
+                        if rel_improvement > args.early_stopping_min_delta:
+                            # Significant improvement found
+                            best_window_loss = avg_window_loss
+                            patience_counter = 0 # Reset patience
+                        else:
+                            # Improvement too small or negative
+                            patience_counter += 1
+                            if patience_counter >= args.early_stopping_patience:
+                                print(f"\n[Early Stopping] No relative improvement > {args.early_stopping_min_delta:.2%} for {patience_counter * check_interval} steps.")
+                                print(f"Best Window Loss: {best_window_loss:.5f}, Current: {avg_window_loss:.5f}")
+                                print("Stopping training and saving final model...")
+                                
+                                scene.save(iteration)
+                                torch.save(env_light.state_dict(), os.path.join(scene.model_path, f"env_light_{iteration}.pth"))
+                                progress_bar.close()
+                                print("Training complete (Early Stopped).")
+                                return # Exit function directly
+
             if tb_writer:
                 tb_writer.add_scalar('train_loss_patches/total_loss', total_loss.item(), iteration)
                 tb_writer.add_scalar('train_loss_patches/pbr_loss', pbr_loss.item(), iteration)
@@ -218,6 +256,12 @@ if __name__ == "__main__":
     parser.add_argument("--env_light_lr", type=float, default=0.01)
     parser.add_argument("--lambda_env_tv", type=float, default=0.001)
     parser.add_argument("--no_env_gradient_scaling", action="store_true")
+
+    # Early Stopping Params
+    parser.add_argument("--enable_early_stopping", action="store_true", help="Enable automatic early stopping")
+    parser.add_argument("--early_stopping_patience", type=int, default=3, help="Number of checks with no improvement before stopping")
+    parser.add_argument("--early_stopping_min_delta", type=float, default=1e-4, help="Minimum relative improvement to be considered significant")
+    parser.add_argument("--early_stopping_interval", type=int, default=500, help="Interval (iterations) to check for improvement")
     
     # Save/Test
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
