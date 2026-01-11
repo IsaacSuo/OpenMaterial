@@ -138,9 +138,33 @@ def training_pbr_static(dataset, opt, pipe, args):
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         
-        # ... (PBR loss computation) ...
-        # (This part is unchanged in context, but I need to find the total_loss line)
+        # PBR Shading Loss (Immediate activation)
+        pbr_loss = torch.tensor(0.0, device="cuda")
+        env_tv_loss = torch.tensor(0.0, device="cuda")
+        pbr_reg_loss = torch.tensor(0.0, device="cuda")
         
+        gbuffer_albedo = render_pkg.get('gbuffer_albedo')
+        gbuffer_roughness = render_pkg.get('gbuffer_roughness')
+        gbuffer_metallic = render_pkg.get('gbuffer_metallic')
+        gbuffer_normal = render_pkg.get('rend_normal')
+        gbuffer_depth = render_pkg.get('surf_depth')
+        alpha_map = render_pkg.get('rend_alpha')
+
+        if gbuffer_albedo is not None:
+            shaded_image = screen_space_pbr_shading(
+                gbuffer_albedo, gbuffer_roughness, gbuffer_metallic,
+                gbuffer_normal, gbuffer_depth,
+                viewpoint_cam.camera_center, viewpoint_cam.world_view_transform,
+                env_light=env_light
+            )
+            
+            pbr_loss = opt.lambda_pbr * pbr_reconstruction_loss(shaded_image, gt_image)
+            env_tv_loss = opt.lambda_env_tv * env_light.tv_loss_weighted()
+            
+            # PBR Regularization
+            pbr_losses = compute_pbr_losses(gbuffer_albedo, gbuffer_roughness, gbuffer_metallic, alpha_map)
+            pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses['total_pbr_reg']
+
         total_loss = opt.lambda_rgb * loss + pbr_loss + env_tv_loss + pbr_reg_loss
         
         # Backward
