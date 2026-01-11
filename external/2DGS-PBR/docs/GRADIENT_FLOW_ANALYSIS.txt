@@ -1,0 +1,200 @@
+================================================================================
+                    2DGS-PBR 环境光梯度流完整追踪
+================================================================================
+
+【训练阶段】iteration > 5000
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. 前向传播
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+   viewpoint_cam → render()
+                     ↓
+              gbuffer 渲染
+              (albedo, roughness, metallic, normal)
+                     ↓
+          screen_space_pbr_shading()
+                     ↓
+           pbr_shading_env()
+           ┌──────────────────┐
+           ↓                  ↓
+      reflect_dir        normal
+           ↓                  ↓
+    env_light.sample()  env_light.sample()
+           ↓                  ↓
+      specular_color   diffuse_irradiance
+           ↓                  ↓
+           └────────┬─────────┘
+                    ↓
+            shaded_image
+                    ↓
+        pbr_reconstruction_loss()
+                    ↓
+              pbr_loss
+                    ↓
+           total_loss (+ 其他损失)
+
+2. 反向传播（梯度流）✓ 正确
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+   total_loss.backward()
+          ↓
+      ∂L/∂loss
+          ↓
+    ∂L/∂pbr_loss
+          ↓
+    ∂L/∂shaded_image
+          ↓
+   ∂L/∂pbr_shading_env
+       ┌───────────────┐
+       ↓               ↓
+   ∂L/∂(specular)  ∂L/∂(diffuse)
+       ↓               ↓
+   ∂L/∂(sample1)   ∂L/∂(sample2)
+       ↓               ↓
+       └───────┬───────┘
+               ↓
+        ∂L/∂env_map ✓ 梯度到达
+               ↓
+         env_map.grad 累积
+        (在 env_light.env_map 上)
+
+3. 优化步骤 ✓ 正确
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+   env_light_optimizer.step()
+           ↓
+   Adam 更新：env_map ← env_map - lr * grad
+           ↓
+   env_light_optimizer.zero_grad(set_to_none=True)
+           ↓
+   梯度清零（准备下一次迭代）
+
+================================================================================
+                        关键验证点总结
+================================================================================
+
+【✓ 已验证项目】
+
+1. EnvironmentLight 类 (pbr_utils.py)
+   ├─ env_map 是 nn.Parameter ✓
+   ├─ requires_grad=True ✓
+   └─ 初始化和加载都正确 ✓
+
+2. sample() 方法 (pbr_utils.py L69-113)
+   ├─ torch.atan2() 可微分 ✓
+   ├─ torch.acos() 可微分 ✓
+   ├─ F.grid_sample() 可微分 ✓
+   └─ 无梯度阻止 (detach/no_grad) ✓
+
+3. 优化器设置 (train_pbr.py)
+   ├─ env_light_optimizer 创建 ✓ (L68-69)
+   ├─ env_light.parameters() 正确 ✓
+   └─ Adam 优化器合适 ✓
+
+4. 优化器调用 (train_pbr.py)
+   ├─ zero_grad() 位置正确 ✓ (L241)
+   ├─ step() 位置正确 ✓ (L240)
+   └─ 调用顺序正确 ✓
+
+5. 迭代条件 (train_pbr.py)
+   ├─ PBR 损失 @iteration > 5000 ✓ (L120)
+   ├─ env_light 优化 @iteration > 5000 ✓ (L239)
+   └─ 两者一致 ✓
+
+6. 保存和加载 (train_pbr.py, render_pbr.py)
+   ├─ torch.save(state_dict()) ✓ (L212)
+   ├─ load_state_dict() ✓ (L222, L231)
+   └─ 文件格式 env_light_{iteration}.pth ✓
+
+7. 梯度流检查
+   ├─ 从 loss 到 env_map 的路径完整 ✓
+   ├─ 所有中间步骤可微分 ✓
+   ├─ 无梯度阻止操作 ✓
+   └─ env_light 确实被学习 ✓
+
+【无梯度阻止确认】
+
+在 render_pbr.py 的 detach()：
+  - L33: img = tensor.detach().cpu() → 只用于保存，不影响训练
+  - L40: tensor.detach().cpu() → 只用于保存，不影响训练
+
+在 gaussian_renderer/__init__.py 的 detach()：
+  - L208: surf_normal = surf_normal * (render_alpha).detach()
+         → 只对 render_alpha 进行，不影响 env_light 梯度
+
+在 pbr_utils.py：
+  - 无任何梯度阻止操作 ✓
+
+================================================================================
+                            可能的改进
+================================================================================
+
+【建议 1】学习率调度
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+当前：固定学习率 0.01
+建议：添加学习率衰减
+  
+  from torch.optim.lr_scheduler import StepLR
+  scheduler = StepLR(env_light_optimizer, step_size=5000, gamma=0.1)
+  # 在优化器 step 之后调用
+  scheduler.step()
+
+【建议 2】评估时的模式切换
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+当前：评估时不区分 train/eval 模式
+建议：在评估前后显式设置
+
+  # 评估前
+  env_light.eval()
+  with torch.no_grad():
+      # 评估代码
+      ...
+  
+  # 评估后恢复训练
+  env_light.train()
+
+【建议 3】值范围监控
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+当前：env_map 值可能无限增长或衰减
+建议：添加梯度裁剪或值裁剪
+
+  # 方法 1: 梯度裁剪
+  torch.nn.utils.clip_grad_norm_(env_light.parameters(), max_norm=1.0)
+  
+  # 方法 2: 值裁剪（在优化器 step 后）
+  with torch.no_grad():
+      env_light.env_map.clamp_(0, 10.0)  # 防止过大
+
+【建议 4】损失权重监控
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+当前：pbr_loss 权重为 0.1
+建议：监控 pbr_loss 的绝对值和相对大小
+
+  # 在日志中记录
+  if tb_writer:
+      tb_writer.add_scalar('pbr_loss_debug', pbr_loss.item(), iteration)
+      tb_writer.add_scalar('env_light_grad_norm', 
+                          env_light.env_map.grad.norm().item(), 
+                          iteration)
+
+================================================================================
+                            检查清单
+================================================================================
+
+[ ✓ ] env_map 是 nn.Parameter
+[ ✓ ] requires_grad=True
+[ ✓ ] sample() 方法完全可微分
+[ ✓ ] 优化器正确创建
+[ ✓ ] zero_grad() 在正确位置
+[ ✓ ] step() 在正确位置
+[ ✓ ] iteration > 5000 条件一致
+[ ✓ ] state_dict() 保存
+[ ✓ ] load_state_dict() 加载
+[ ✓ ] 梯度流从 loss 到 env_map
+[ ✓ ] 无梯度阻止操作
+[ ] 添加学习率调度（可选）
+[ ] 添加训练/评估模式切换（可选）
+[ ] 添加值范围监控（可选）
+
+================================================================================

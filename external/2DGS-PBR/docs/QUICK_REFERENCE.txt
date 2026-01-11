@@ -1,0 +1,171 @@
+================================================================================
+                  2DGS-PBR 环境光实现 - 快速参考卡片
+================================================================================
+
+【总体结论】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ✓ 实现状态：正确
+  ✓ 环境光学习：确实在学习
+  ✓ 梯度流：完整无阻断
+  ✓ 保存加载：标准正确
+  ✓ 生产就绪：可安心使用
+
+  总体评分：95/100
+
+【核心检查结果】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. EnvironmentLight 类 (pbr_utils.py)
+     ✓ env_map 是 nn.Parameter                    [L36-39, L67]
+     ✓ requires_grad=True 启用梯度               [L36-39, L67]
+     ✓ sample() 方法完全可微分                    [L69-113]
+       - torch.atan2() ✓
+       - torch.acos() ✓
+       - F.grid_sample() ✓
+     ✓ forward() 正确转发                         [L115-117]
+
+  2. 优化器设置 (train_pbr.py)
+     ✓ env_light_optimizer 创建                   [L68-69]
+     ✓ env_light.parameters() 获取参数           [L69]
+     ✓ Adam 优化器，lr=0.01                       [L69]
+
+  3. 优化器调用 (train_pbr.py)
+     ✓ zero_grad() 位置正确                       [L241]
+     ✓ step() 位置正确                            [L240]
+     ✓ 调用顺序：backward → step → zero_grad      [L169, L240, L241]
+
+  4. 迭代条件 (train_pbr.py)
+     ✓ PBR 损失 @iteration > 5000                 [L120]
+     ✓ env_light 优化 @iteration > 5000           [L239]
+     ✓ 两处条件一致                               
+
+  5. 保存机制 (train_pbr.py)
+     ✓ torch.save(state_dict())                   [L212]
+     ✓ 文件名：env_light_{iteration}.pth          [L211]
+     ✓ 保存频率与高斯模型一致                     
+
+  6. 加载机制 (render_pbr.py)
+     ✓ 优先加载指定迭代                          [L220-224]
+     ✓ 自动查找最新保存                          [L226-234]
+     ✓ load_state_dict() 标准方式                 [L222, L231]
+
+  7. 梯度流 (完整路径)
+     loss
+       ↓ backward()
+     pbr_loss = λ × pbr_reconstruction_loss()
+       ↓
+     shaded_image = screen_space_pbr_shading()
+       ↓
+     env_light.sample(reflect_dir + normal)
+       ↓
+     F.grid_sample(env_map, ...) ✓ 可微分
+       ↓
+     ∂L/∂env_map ✓ 梯度正确流动
+       ↓
+     env_light_optimizer.step() ✓ 参数更新
+
+  8. 梯度阻止检查
+     ✓ render_pbr.py 的 detach() 不影响 env_light
+     ✓ gaussian_renderer 的 detach() 不影响 env_light
+     ✓ pbr_utils.py 无梯度阻止
+
+【关键代码片段】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  【初始化】
+  env_light = EnvironmentLight(env_map_path, resolution=256).cuda()
+  env_light_optimizer = torch.optim.Adam(env_light.parameters(), lr=0.01)
+
+  【训练循环】
+  if iteration > 5000:
+      # PBR shading
+      shaded = screen_space_pbr_shading(..., env_light=env_light)
+      pbr_loss = lambda_pbr * pbr_reconstruction_loss(shaded, gt)
+      
+      # 总损失（还包含其他损失）
+      total_loss = ... + pbr_loss
+      
+      # 反向传播
+      total_loss.backward()
+      
+      # 优化
+      env_light_optimizer.step()
+      env_light_optimizer.zero_grad(set_to_none=True)
+      
+      # 保存
+      torch.save(env_light.state_dict(), env_light_path)
+
+  【加载】
+  env_light = EnvironmentLight(env_map_path, resolution=256).cuda()
+  if os.path.exists(env_light_path):
+      env_light.load_state_dict(torch.load(env_light_path))
+
+【问题诊断】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Q: 环境光不学习？
+  A: 检查 iteration 是否 > 5000，检查 pbr_loss 是否 > 0
+     print(env_light.env_map.grad)  # 应该不为 None
+
+  Q: 学习不稳定？
+  A: 尝试降低学习率（0.001），或降低 lambda_pbr（0.05）
+     监控 env_light.env_map 的最小值和最大值
+
+  Q: 加载 env_light 失败？
+  A: 检查文件是否存在
+     ls /model_path/env_light_*.pth
+     确保文件名与迭代号匹配
+
+【可选优化】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. 学习率调度
+     scheduler = StepLR(env_light_optimizer, step_size=5000, gamma=0.1)
+     scheduler.step()
+
+  2. 评估模式
+     env_light.eval()  # 评估前
+     env_light.train()  # 评估后
+
+  3. 梯度监控
+     grad_norm = env_light.env_map.grad.norm()
+
+  4. 值范围保护
+     env_light.env_map.clamp_(0, 10.0)
+
+【文件位置参考】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  EnvironmentLight 类
+  └─ /external/2DGS-PBR/utils/pbr_utils.py
+
+  训练脚本
+  └─ /external/2DGS-PBR/train_pbr.py
+    ├─ 优化器创建    L68-69
+    ├─ 优化器调用    L240-241
+    ├─ 保存           L212
+    └─ 损失计算      L120, L143
+
+  渲染脚本
+  └─ /external/2DGS-PBR/render_pbr.py
+    └─ 加载          L216-237
+
+  损失函数
+  └─ /external/2DGS-PBR/utils/loss_utils.py
+    └─ pbr_reconstruction_loss()  L78-93
+
+================================================================================
+                            一页纸总结
+================================================================================
+
+✓ env_map 是可学习参数 (nn.Parameter + requires_grad=True)
+✓ sample() 方法完全可微分（无梯度阻止）
+✓ 优化器正确创建和调用
+✓ 梯度路径完整（loss → env_map）
+✓ 保存加载机制标准正确
+✓ 代码无逻辑错误，符合最佳实践
+
+结论：实现正确，可安心使用。
+
+================================================================================

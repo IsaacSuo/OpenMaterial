@@ -150,6 +150,175 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
+    def _rotation_matrix_to_quaternion(self, R):
+        """
+        Convert batch of rotation matrices to quaternions (w, x, y, z).
+        R: [N, 3, 3]
+        """
+        tr = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
+        q = torch.zeros((R.shape[0], 4), device=R.device)
+
+        # Case 1: tr > 0
+        mask1 = tr > 0
+        S1 = torch.sqrt(tr[mask1] + 1.0) * 2
+        q[mask1, 0] = 0.25 * S1
+        q[mask1, 1] = (R[mask1, 2, 1] - R[mask1, 1, 2]) / S1
+        q[mask1, 2] = (R[mask1, 0, 2] - R[mask1, 2, 0]) / S1
+        q[mask1, 3] = (R[mask1, 1, 0] - R[mask1, 0, 1]) / S1
+
+        # Case 2: tr <= 0
+        mask_not1 = ~mask1
+        # Find max diagonal element
+        d = torch.diagonal(R[mask_not1], dim1=-2, dim2=-1)
+        max_diag_idx = torch.argmax(d, dim=1)
+        
+        # Subcase 0: R[0,0] is max
+        m0 = (max_diag_idx == 0)
+        mask2 = torch.zeros_like(mask1)
+        mask2[mask_not1] = m0
+        
+        if mask2.any():
+            S2 = torch.sqrt(1.0 + R[mask2, 0, 0] - R[mask2, 1, 1] - R[mask2, 2, 2]) * 2
+            q[mask2, 0] = (R[mask2, 2, 1] - R[mask2, 1, 2]) / S2
+            q[mask2, 1] = 0.25 * S2
+            q[mask2, 2] = (R[mask2, 0, 1] + R[mask2, 1, 0]) / S2
+            q[mask2, 3] = (R[mask2, 0, 2] + R[mask2, 2, 0]) / S2
+
+        # Subcase 1: R[1,1] is max
+        m1 = (max_diag_idx == 1)
+        mask3 = torch.zeros_like(mask1)
+        mask3[mask_not1] = m1
+        
+        if mask3.any():
+            S3 = torch.sqrt(1.0 + R[mask3, 1, 1] - R[mask3, 0, 0] - R[mask3, 2, 2]) * 2
+            q[mask3, 0] = (R[mask3, 0, 2] - R[mask3, 2, 0]) / S3
+            q[mask3, 1] = (R[mask3, 0, 1] + R[mask3, 1, 0]) / S3
+            q[mask3, 2] = 0.25 * S3
+            q[mask3, 3] = (R[mask3, 1, 2] + R[mask3, 2, 1]) / S3
+
+        # Subcase 2: R[2,2] is max
+        m2 = (max_diag_idx == 2)
+        mask4 = torch.zeros_like(mask1)
+        mask4[mask_not1] = m2
+        
+        if mask4.any():
+            S4 = torch.sqrt(1.0 + R[mask4, 2, 2] - R[mask4, 0, 0] - R[mask4, 1, 1]) * 2
+            q[mask4, 0] = (R[mask4, 1, 0] - R[mask4, 0, 1]) / S4
+            q[mask4, 1] = (R[mask4, 0, 2] + R[mask4, 2, 0]) / S4
+            q[mask4, 2] = (R[mask4, 1, 2] + R[mask4, 2, 1]) / S4
+            q[mask4, 3] = 0.25 * S4
+
+        return q
+
+    def create_from_dense_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float):
+        """
+        Initialize Gaussians from a dense point cloud with normals.
+        - XYZ: set to points
+        - Rotation: aligned with normals
+        - Scale: estimated from K-NN density
+        """
+        self.spatial_lr_scale = spatial_lr_scale
+        points = torch.tensor(np.asarray(pcd.points)).float().cuda()
+        colors = torch.tensor(np.asarray(pcd.colors)).float().cuda()
+        normals = torch.tensor(np.asarray(pcd.normals)).float().cuda()
+
+        print(f"Initializing from dense PCD with {points.shape[0]} points")
+
+        # 1. Colors to SH
+        fused_color = RGB2SH(colors)
+        features = torch.zeros((points.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        features[:, :3, 0 ] = fused_color
+        features[:, 3:, 1:] = 0.0
+
+        # 2. Scales from KNN (density)
+        # Use mean distance to 3 nearest neighbors as base scale
+        dist2 = torch.clamp_min(distCUDA2(points), 0.0000001)
+        # scales = [N, 2] for 2DGS. We use sqrt(dist) for both axes.
+        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
+
+        # 3. Rotations from Normals
+        # 2DGS surfels are disks in XY plane (local normal = +Z)
+        # We need rotation R s.t. R * [0,0,1] = target_normal
+        
+        # Normalize normals
+        normals = torch.nn.functional.normalize(normals, dim=1)
+        
+        # Construct coordinate frame [x_axis, y_axis, z_axis=normal]
+        z_axis = normals
+        
+        # Create arbitrary vector for cross product (avoid collinearity)
+        # If normal is close to [1,0,0], use [0,1,0], else [1,0,0]
+        ref_vec = torch.zeros_like(normals)
+        ref_vec[:, 0] = 1.0
+        mask = torch.abs(normals[:, 0]) > 0.9
+        ref_vec[mask, 0] = 0.0
+        ref_vec[mask, 1] = 1.0
+        
+        x_axis = torch.cross(ref_vec, z_axis, dim=1)
+        x_axis = torch.nn.functional.normalize(x_axis, dim=1)
+        
+        y_axis = torch.cross(z_axis, x_axis, dim=1)
+        y_axis = torch.nn.functional.normalize(y_axis, dim=1)
+        
+        # R = [x, y, z] columns
+        R = torch.stack((x_axis, y_axis, z_axis), dim=2) # [N, 3, 3]
+        
+        # Convert to quaternion (w, x, y, z)
+        rots = self._rotation_matrix_to_quaternion(R)
+
+        # 4. Opacities
+        # Initialize as semi-opaque
+        opacities = self.inverse_opacity_activation(0.5 * torch.ones((points.shape[0], 1), dtype=torch.float, device="cuda"))
+
+        # Set parameters
+        self._xyz = nn.Parameter(points.requires_grad_(True))
+        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._scaling = nn.Parameter(scales.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+        # Initialize PBR parameters
+        if self.use_pbr:
+            self._albedo = nn.Parameter(torch.logit(colors.clamp(0.01, 0.99)).requires_grad_(True))
+            self._roughness = nn.Parameter(torch.full((points.shape[0], 1), 0.5, device="cuda").requires_grad_(True))
+            self._metallic = nn.Parameter(torch.full((points.shape[0], 1), -2.0, device="cuda").requires_grad_(True))
+
+    def training_setup_fixed_geometry(self, training_args):
+        """
+        Setup optimizer for Fixed Geometry training.
+        - Unlocked: Scaling, Opacity, SH (Color), PBR (Albedo, Roughness, Metallic)
+        - Locked: XYZ, Rotation
+        """
+        self.percent_dense = training_args.percent_dense
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+
+        # Note: xyz and rotation are NOT in this list
+        l = [
+            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
+            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+        ]
+
+        if self.use_pbr:
+            albedo_lr = getattr(training_args, 'albedo_lr', 0.001)
+            roughness_lr = getattr(training_args, 'roughness_lr', 0.0002)
+            metallic_lr = getattr(training_args, 'metallic_lr', 0.0002)
+
+            l.extend([
+                {'params': [self._albedo], 'lr': albedo_lr, "name": "albedo"},
+                {'params': [self._roughness], 'lr': roughness_lr, "name": "roughness"},
+                {'params': [self._metallic], 'lr': metallic_lr, "name": "metallic"},
+            ])
+            print(f"Fixed Geometry (Scale Optimized) - PBR Optimizer: albedo_lr={albedo_lr}, roughness_lr={roughness_lr}, metallic_lr={metallic_lr}")
+
+        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        # Dummy scheduler for XYZ since we don't optimize it, but existing code might call it
+        self.xyz_scheduler_args = lambda x: 0.0
+
     def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()

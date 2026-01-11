@@ -108,8 +108,46 @@ def fetchPly(path):
     plydata = PlyData.read(path)
     vertices = plydata['vertex']
     positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
-    colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
-    normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    
+    # Robust color loading
+    if 'red' in vertices:
+        colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
+    else:
+        # Fallback to gray if no vertex colors
+        print(f"[Warning] No vertex colors found in {path}, using gray.")
+        colors = np.ones_like(positions) * 0.5
+        
+    # Robust normal loading
+    if 'nx' in vertices:
+        normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    else:
+        print(f"[Warning] No vertex normals found in {path}, using zero normals.")
+        normals = np.zeros_like(positions)
+        
+    return BasicPointCloud(points=positions, colors=colors, normals=normals)
+
+def sampleMesh(path, num_samples):
+    """
+    Sample points uniformly from a mesh surface using Open3D.
+    Returns a BasicPointCloud.
+    """
+    import open3d as o3d
+    mesh = o3d.io.read_triangle_mesh(path)
+    if not mesh.has_triangle_normals():
+        mesh.compute_triangle_normals()
+    
+    # Sample points
+    pcd = mesh.sample_points_uniformly(number_of_points=num_samples)
+    
+    positions = np.asarray(pcd.points)
+    normals = np.asarray(pcd.normals)
+    
+    # Try to get colors from the sampled points (if mesh has vertex colors)
+    if pcd.has_colors():
+        colors = np.asarray(pcd.colors)
+    else:
+        colors = np.ones_like(positions) * 0.5
+        
     return BasicPointCloud(points=positions, colors=colors, normals=normals)
 
 def storePly(path, xyz, rgb):
