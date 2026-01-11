@@ -24,7 +24,7 @@ from tqdm import tqdm
 from utils.loss_utils import l1_loss, ssim, compute_pbr_losses, pbr_reconstruction_loss
 from utils.pbr_utils import EnvironmentLight, screen_space_pbr_shading
 from utils.profiler import SimpleProfiler
-from utils.general_utils import safe_state
+from utils.general_utils import safe_state, colormap
 from utils.image_utils import psnr, render_net_image
 from scene import Scene, GaussianModel
 from scene.dataset_readers import fetchPly
@@ -138,34 +138,10 @@ def training_pbr_static(dataset, opt, pipe, args):
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         
-        # PBR Shading Loss (Immediate activation)
-        pbr_loss = torch.tensor(0.0, device="cuda")
-        env_tv_loss = torch.tensor(0.0, device="cuda")
-        pbr_reg_loss = torch.tensor(0.0, device="cuda")
+        # ... (PBR loss computation) ...
+        # (This part is unchanged in context, but I need to find the total_loss line)
         
-        gbuffer_albedo = render_pkg.get('gbuffer_albedo')
-        gbuffer_roughness = render_pkg.get('gbuffer_roughness')
-        gbuffer_metallic = render_pkg.get('gbuffer_metallic')
-        gbuffer_normal = render_pkg.get('rend_normal')
-        gbuffer_depth = render_pkg.get('surf_depth')
-        alpha_map = render_pkg.get('rend_alpha')
-
-        if gbuffer_albedo is not None:
-            shaded_image = screen_space_pbr_shading(
-                gbuffer_albedo, gbuffer_roughness, gbuffer_metallic,
-                gbuffer_normal, gbuffer_depth,
-                viewpoint_cam.camera_center, viewpoint_cam.world_view_transform,
-                env_light=env_light
-            )
-            
-            pbr_loss = opt.lambda_pbr * pbr_reconstruction_loss(shaded_image, gt_image)
-            env_tv_loss = opt.lambda_env_tv * env_light.tv_loss_weighted()
-            
-            # PBR Regularization
-            pbr_losses = compute_pbr_losses(gbuffer_albedo, gbuffer_roughness, gbuffer_metallic, alpha_map)
-            pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses['total_pbr_reg']
-
-        total_loss = loss + pbr_loss + env_tv_loss + pbr_reg_loss
+        total_loss = opt.lambda_rgb * loss + pbr_loss + env_tv_loss + pbr_reg_loss
         
         # Backward
         total_loss.backward()
@@ -233,7 +209,91 @@ def training_pbr_static(dataset, opt, pipe, args):
             
             env_light_optimizer.step()
             env_light_optimizer.zero_grad(set_to_none=True)
-            
+
+            # --- Refined Evaluation and Image Logging ---
+            if iteration in args.test_iterations:
+                print(f"\n[ITER {iteration}] Running Evaluation...")
+                torch.cuda.empty_cache()
+                
+                # We test all test cameras, and a few train cameras for consistency check
+                validation_configs = (
+                    {'name': 'test', 'cameras': scene.getTestCameras()},
+                    {'name': 'train', 'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, 20, 5)]}
+                )
+
+                for config in validation_configs:
+                    if config['cameras'] and len(config['cameras']) > 0:
+                        l1_test = 0.0
+                        psnr_test = 0.0
+
+                        for idx, viewpoint in enumerate(config['cameras']):
+                            # Render with PBR enabled for visualization
+                            render_pkg = render(viewpoint, gaussians, pipe, background, render_pbr=True)
+                            image = torch.clamp(render_pkg["render"], 0.0, 1.0)
+                            gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+
+                            # Log images only for the first few cameras to save TB space
+                            if tb_writer and (idx < 4):
+                                prefix = f"{config['name']}_view_{viewpoint.image_name}"
+                                
+                                # 1. Render vs GT
+                                tb_writer.add_image(f"{prefix}/0_render", image, iteration)
+                                if iteration == args.test_iterations[0]:
+                                    tb_writer.add_image(f"{prefix}/0_gt", gt_image, iteration)
+
+                                # 2. PBR Components
+                                gbuffer_albedo = render_pkg.get('gbuffer_albedo')
+                                if gbuffer_albedo is not None:
+                                    # Albedo
+                                    tb_writer.add_image(f"{prefix}/1_albedo", torch.clamp(gbuffer_albedo, 0, 1), iteration)
+                                    
+                                    # Roughness (Grayscale -> RGB for TB)
+                                    rough = render_pkg.get('gbuffer_roughness')
+                                    tb_writer.add_image(f"{prefix}/2_roughness", rough.repeat(3, 1, 1), iteration)
+                                    
+                                    # Metallic
+                                    metal = render_pkg.get('gbuffer_metallic')
+                                    tb_writer.add_image(f"{prefix}/3_metallic", metal.repeat(3, 1, 1), iteration)
+
+                                    # 3. PBR Shaded Result
+                                    # Important: use the current env_light for shading
+                                    shaded = screen_space_pbr_shading(
+                                        gbuffer_albedo, rough, metal,
+                                        render_pkg.get('rend_normal'), render_pkg.get('surf_depth'),
+                                        viewpoint.camera_center, viewpoint.world_view_transform,
+                                        env_light=env_light
+                                    )
+                                    tb_writer.add_image(f"{prefix}/4_pbr_shaded", torch.clamp(shaded, 0, 1), iteration)
+
+                                # 4. Geometry Check
+                                rend_normal = render_pkg.get("rend_normal")
+                                if rend_normal is not None:
+                                    # Map [-1, 1] to [0, 1]
+                                    norm_vis = torch.clamp(rend_normal * 0.5 + 0.5, 0, 1)
+                                    tb_writer.add_image(f"{prefix}/5_normal", norm_vis, iteration)
+                                
+                                # 5. Depth
+                                depth = render_pkg.get("surf_depth")
+                                if depth is not None:
+                                    d_max = depth.max()
+                                    depth_norm = depth / d_max if d_max > 0 else depth
+                                    depth_vis = colormap(depth_norm.cpu().numpy()[0], cmap='turbo') # [3, H, W]
+                                    tb_writer.add_image(f"{prefix}/6_depth", depth_vis, iteration)
+
+                            # Accumulate metrics
+                            l1_test += l1_loss(image, gt_image).mean().item()
+                            psnr_test += psnr(image, gt_image).mean().item()
+
+                        l1_test /= len(config['cameras'])
+                        psnr_test /= len(config['cameras'])          
+                        print(f"  [ITER {iteration}] {config['name']} PSNR: {psnr_test:.4f}")
+                        
+                        if tb_writer:
+                            tb_writer.add_scalar(f"{config['name']}/l1_loss", l1_test, iteration)
+                            tb_writer.add_scalar(f"{config['name']}/psnr", psnr_test, iteration)
+
+                torch.cuda.empty_cache()
+
             # NO Densification!
             
     progress_bar.close()
@@ -251,6 +311,7 @@ if __name__ == "__main__":
     parser.add_argument("--env_map", type=str, default=None, help="Initial HDR environment map")
     
     # PBR params
+    parser.add_argument("--lambda_rgb", type=float, default=1.0, help="Weight for standard RGB reconstruction loss")
     parser.add_argument("--lambda_pbr", type=float, default=0.1)
     parser.add_argument("--lambda_pbr_reg", type=float, default=0.01)
     parser.add_argument("--env_light_lr", type=float, default=0.01)
@@ -275,6 +336,7 @@ if __name__ == "__main__":
     
     # Transfer args to opt
     opt = op.extract(args)
+    opt.lambda_rgb = args.lambda_rgb
     opt.env_light_lr = args.env_light_lr
     opt.lambda_pbr = args.lambda_pbr
     opt.lambda_pbr_reg = args.lambda_pbr_reg
