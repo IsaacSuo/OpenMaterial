@@ -133,10 +133,19 @@ def training_pbr_static(dataset, opt, pipe, args):
         image = render_pkg["render"]
         gt_image = viewpoint_cam.original_image.cuda()
         
+        # Get Mask for loss calculation
+        mask = viewpoint_cam.gt_alpha_mask.cuda() if viewpoint_cam.gt_alpha_mask is not None else None
+        
         # Loss computation
         # Standard reconstruction loss
-        Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        Ll1 = l1_loss(image, gt_image, mask=mask)
+        
+        # SSIM expects 4D input [B, C, H, W]
+        image_4d = image.unsqueeze(0)
+        gt_image_4d = gt_image.unsqueeze(0)
+        mask_4d = mask.unsqueeze(0) if mask is not None else None
+        
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image_4d, gt_image_4d, mask=mask_4d))
         
         # PBR Shading Loss (Immediate activation)
         pbr_loss = torch.tensor(0.0, device="cuda")
@@ -158,11 +167,13 @@ def training_pbr_static(dataset, opt, pipe, args):
                 env_light=env_light
             )
             
-            pbr_loss = opt.lambda_pbr * pbr_reconstruction_loss(shaded_image, gt_image)
+            pbr_loss = opt.lambda_pbr * pbr_reconstruction_loss(shaded_image, gt_image, mask=mask)
             env_tv_loss = opt.lambda_env_tv * env_light.tv_loss_weighted()
             
             # PBR Regularization
-            pbr_losses = compute_pbr_losses(gbuffer_albedo, gbuffer_roughness, gbuffer_metallic, alpha_map)
+            # Use GT mask for regularization if available to focus on object surface
+            reg_mask = mask if mask is not None else alpha_map
+            pbr_losses = compute_pbr_losses(gbuffer_albedo, gbuffer_roughness, gbuffer_metallic, alpha_map=reg_mask)
             pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses['total_pbr_reg']
 
         total_loss = opt.lambda_rgb * loss + pbr_loss + env_tv_loss + pbr_reg_loss
@@ -305,8 +316,11 @@ def training_pbr_static(dataset, opt, pipe, args):
                                     tb_writer.add_image(f"{prefix}/6_depth", depth_vis, iteration)
 
                             # Accumulate metrics
-                            l1_test += l1_loss(image, gt_image).mean().item()
-                            psnr_test += psnr(image, gt_image).mean().item()
+                            mask = viewpoint.gt_alpha_mask.cuda() if viewpoint.gt_alpha_mask is not None else None
+                            
+                            # Use masked metrics
+                            l1_test += l1_loss(image, gt_image, mask=mask).mean().item()
+                            psnr_test += psnr(image, gt_image, mask=mask).mean().item()
 
                         l1_test /= len(config['cameras'])
                         psnr_test /= len(config['cameras'])          

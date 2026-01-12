@@ -243,6 +243,18 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             image_name = Path(cam_name).stem
             image = Image.open(image_path)
 
+            # Check for mask in sibling 'mask' directory
+            # Assuming structure: .../images/xxx.png -> .../mask/xxx.png
+            mask_path = image_path.replace("/images/", "/mask/")
+            if os.path.exists(mask_path):
+                try:
+                    mask = Image.open(mask_path).convert("L")
+                    if mask.size != image.size:
+                        mask = mask.resize(image.size, Image.NEAREST)
+                    image.putalpha(mask)
+                except Exception as e:
+                    print(f"Warning: Failed to load mask from {mask_path}: {e}")
+
             im_data = np.array(image.convert("RGBA"))
 
             bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
