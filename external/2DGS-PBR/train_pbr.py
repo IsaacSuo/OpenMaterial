@@ -17,6 +17,7 @@ import os
 import torch
 import sys
 import uuid
+import math
 from argparse import ArgumentParser, Namespace
 from random import randint
 from tqdm import tqdm
@@ -36,6 +37,36 @@ try:
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
+
+def get_ray_directions(H, W, K, R, T):
+    """
+    Compute ray directions for all pixels in world coordinate.
+    K: [3, 3] intrinsic matrix
+    R: [3, 3] rotation matrix (cam2world)
+    T: [3] translation vector (cam2world)
+    Returns: [H, W, 3] ray directions (normalized)
+    """
+    grid_x, grid_y = torch.meshgrid(torch.arange(W, device="cuda"), torch.arange(H, device="cuda"), indexing='xy')
+    
+    # Pixel to Camera space
+    # u = (x - cx) / fx, v = (y - cy) / fy, z = 1
+    # Note: 2DGS/3DGS projection usually assumes standard pinhole
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    
+    dirs_c = torch.stack([
+        (grid_x - cx) / fx,
+        (grid_y - cy) / fy,
+        torch.ones_like(grid_x)
+    ], dim=-1) # [H, W, 3]
+    
+    # Camera to World space
+    # R is typically world2cam in standard pipeline, but let's check input.
+    # We will pass cam2world R here.
+    dirs_w = (dirs_c @ R.T) # [H, W, 3]
+    dirs_w = torch.nn.functional.normalize(dirs_w, dim=-1)
+    
+    return dirs_w
 
 def prepare_output_and_logger(args):
     if not args.model_path:
@@ -130,22 +161,44 @@ def training_pbr_static(dataset, opt, pipe, args):
         # PBR is enabled from the start!
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, render_pbr=True)
         
-        image = render_pkg["render"]
-        gt_image = viewpoint_cam.original_image.cuda()
-        
         # Get Mask for loss calculation
         mask = viewpoint_cam.gt_alpha_mask.cuda() if viewpoint_cam.gt_alpha_mask is not None else None
         
+        # --- Skybox / Background Rendering ---
+        # 1. Get ray directions
+        # K from FoV: fx = W / (2 * tan(fovx/2))
+        W, H = viewpoint_cam.image_width, viewpoint_cam.image_height
+        tan_fovx = math.tan(viewpoint_cam.FoVx * 0.5)
+        tan_fovy = math.tan(viewpoint_cam.FoVy * 0.5)
+        fx = W / (2.0 * tan_fovx)
+        fy = H / (2.0 * tan_fovy)
+        cx, cy = W / 2.0, H / 2.0
+        
+        K = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], device="cuda")
+        # c2w rotation: world_view_transform is w2c.T
+        w2c = viewpoint_cam.world_view_transform.transpose(0, 1)
+        c2w_R = w2c[:3, :3].T
+        c2w_T = viewpoint_cam.camera_center # Already computed in Camera
+        
+        ray_dirs = get_ray_directions(H, W, K, c2w_R, c2w_T)
+        
+        # 2. Sample Environment Map
+        # View directions for env map sampling
+        bg_env = env_light.sample(ray_dirs.view(-1, 3)).view(3, H, W)
+        
+        # 3. Composite
+        # render_pkg["render"] is pre-multiplied alpha color on black background
+        # final = render + bg * (1 - alpha)
+        render_alpha = render_pkg["rend_alpha"]
+        image = render_pkg["render"] + bg_env * (1.0 - render_alpha)
+        
+        gt_image = viewpoint_cam.original_image.cuda()
+
         # Loss computation
-        # Standard reconstruction loss
-        Ll1 = l1_loss(image, gt_image, mask=mask)
         
-        # SSIM expects 4D input [B, C, H, W]
-        image_4d = image.unsqueeze(0)
-        gt_image_4d = gt_image.unsqueeze(0)
-        mask_4d = mask.unsqueeze(0) if mask is not None else None
-        
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image_4d, gt_image_4d, mask=mask_4d))
+        # Standard RGB Loss: NO MASK (Supervise full image to learn background)
+        Ll1 = l1_loss(image, gt_image) 
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image.unsqueeze(0), gt_image.unsqueeze(0)))
         
         # PBR Shading Loss (Immediate activation)
         pbr_loss = torch.tensor(0.0, device="cuda")
@@ -167,11 +220,11 @@ def training_pbr_static(dataset, opt, pipe, args):
                 env_light=env_light
             )
             
+            # PBR Loss: MASKED (Focus on object surface shading)
             pbr_loss = opt.lambda_pbr * pbr_reconstruction_loss(shaded_image, gt_image, mask=mask)
             env_tv_loss = opt.lambda_env_tv * env_light.tv_loss_weighted()
             
-            # PBR Regularization
-            # Use GT mask for regularization if available to focus on object surface
+            # PBR Regularization: MASKED
             reg_mask = mask if mask is not None else alpha_map
             pbr_losses = compute_pbr_losses(gbuffer_albedo, gbuffer_roughness, gbuffer_metallic, alpha_map=reg_mask)
             pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses['total_pbr_reg']
@@ -264,15 +317,35 @@ def training_pbr_static(dataset, opt, pipe, args):
                         for idx, viewpoint in enumerate(config['cameras']):
                             # Render with PBR enabled for visualization
                             render_pkg = render(viewpoint, gaussians, pipe, background, render_pbr=True)
-                            image = torch.clamp(render_pkg["render"], 0.0, 1.0)
+                            
+                            # --- Skybox Composite for Eval ---
+                            W, H = viewpoint.image_width, viewpoint.image_height
+                            tan_fovx = math.tan(viewpoint.FoVx * 0.5)
+                            tan_fovy = math.tan(viewpoint.FoVy * 0.5)
+                            fx = W / (2.0 * tan_fovx)
+                            fy = H / (2.0 * tan_fovy)
+                            cx, cy = W / 2.0, H / 2.0
+                            K = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], device="cuda")
+                            w2c = viewpoint.world_view_transform.transpose(0, 1)
+                            c2w_R = w2c[:3, :3].T
+                            c2w_T = viewpoint.camera_center
+                            
+                            ray_dirs = get_ray_directions(H, W, K, c2w_R, c2w_T)
+                            bg_env = env_light.sample(ray_dirs.view(-1, 3)).view(3, H, W)
+                            
+                            render_alpha = render_pkg["rend_alpha"]
+                            # Composite: Object + Env Background
+                            image = render_pkg["render"] + bg_env * (1.0 - render_alpha)
+                            image = torch.clamp(image, 0.0, 1.0)
+                            
                             gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
 
                             # Log images only for the first few cameras to save TB space
                             if tb_writer and (idx < 4):
                                 prefix = f"{config['name']}_view_{viewpoint.image_name}"
                                 
-                                # 1. Render vs GT
-                                tb_writer.add_image(f"{prefix}/0_render", image, iteration)
+                                # 1. Render vs GT (Full Composite)
+                                tb_writer.add_image(f"{prefix}/0_render_composite", image, iteration)
                                 if iteration == args.test_iterations[0]:
                                     tb_writer.add_image(f"{prefix}/0_gt", gt_image, iteration)
 
@@ -290,15 +363,16 @@ def training_pbr_static(dataset, opt, pipe, args):
                                     metal = render_pkg.get('gbuffer_metallic')
                                     tb_writer.add_image(f"{prefix}/3_metallic", metal.repeat(3, 1, 1), iteration)
 
-                                    # 3. PBR Shaded Result
-                                    # Important: use the current env_light for shading
+                                    # 3. PBR Shaded Result (Object Only, for checking shading)
                                     shaded = screen_space_pbr_shading(
                                         gbuffer_albedo, rough, metal,
                                         render_pkg.get('rend_normal'), render_pkg.get('surf_depth'),
                                         viewpoint.camera_center, viewpoint.world_view_transform,
                                         env_light=env_light
                                     )
-                                    tb_writer.add_image(f"{prefix}/4_pbr_shaded", torch.clamp(shaded, 0, 1), iteration)
+                                    # Composite Shaded with Env Background too
+                                    shaded_composite = shaded + bg_env * (1.0 - render_alpha)
+                                    tb_writer.add_image(f"{prefix}/4_pbr_shaded_composite", torch.clamp(shaded_composite, 0, 1), iteration)
 
                                 # 4. Geometry Check
                                 rend_normal = render_pkg.get("rend_normal")
@@ -314,13 +388,14 @@ def training_pbr_static(dataset, opt, pipe, args):
                                     depth_norm = depth / d_max if d_max > 0 else depth
                                     depth_vis = colormap(depth_norm.cpu().numpy()[0], cmap='turbo') # [3, H, W]
                                     tb_writer.add_image(f"{prefix}/6_depth", depth_vis, iteration)
+                                    
+                                # 6. Environment Map Debug
+                                # tb_writer.add_image(f"{config['name']}/env_map_preview", torch.clamp(bg_env, 0, 1), iteration)
 
-                            # Accumulate metrics
-                            mask = viewpoint.gt_alpha_mask.cuda() if viewpoint.gt_alpha_mask is not None else None
-                            
-                            # Use masked metrics
-                            l1_test += l1_loss(image, gt_image, mask=mask).mean().item()
-                            psnr_test += psnr(image, gt_image, mask=mask).mean().item()
+                            # Accumulate metrics (Full Image Metrics)
+                            # We use full image L1/PSNR because we want to evaluate background synthesis quality too.
+                            l1_test += l1_loss(image, gt_image).mean().item()
+                            psnr_test += psnr(image, gt_image).mean().item()
 
                         l1_test /= len(config['cameras'])
                         psnr_test /= len(config['cameras'])          
