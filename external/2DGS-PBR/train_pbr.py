@@ -184,7 +184,7 @@ def training_pbr_static(dataset, opt, pipe, args):
         
         # 2. Sample Environment Map
         # View directions for env map sampling
-        bg_env = env_light.sample(ray_dirs.view(-1, 3)).view(3, H, W)
+        bg_env = env_light.sample(ray_dirs.view(-1, 3)).reshape(3, H, W)
         
         # 3. Composite
         # render_pkg["render"] is pre-multiplied alpha color on black background
@@ -331,7 +331,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                             c2w_T = viewpoint.camera_center
                             
                             ray_dirs = get_ray_directions(H, W, K, c2w_R, c2w_T)
-                            bg_env = env_light.sample(ray_dirs.view(-1, 3)).view(3, H, W)
+                            bg_env = env_light.sample(ray_dirs.view(-1, 3)).reshape(3, H, W)
                             
                             render_alpha = render_pkg["rend_alpha"]
                             # Composite: Object + Env Background
