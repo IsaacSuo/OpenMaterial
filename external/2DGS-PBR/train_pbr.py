@@ -422,6 +422,9 @@ def training_pbr_static(dataset, opt, pipe, args):
 
                     l1_test = 0.0
                     psnr_test = 0.0
+                    l1_test_masked = 0.0
+                    psnr_test_masked = 0.0
+                    masked_count = 0
 
                     for cam_idx, viewpoint in enumerate(cameras):
                         render_pkg = render(viewpoint, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
@@ -450,6 +453,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                         pred = shaded * alpha_map + bg_env * (1.0 - alpha_map)
                         pred = torch.clamp(pred, 0.0, 1.0)
                         gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                        gt_mask = viewpoint.gt_alpha_mask.to("cuda") if viewpoint.gt_alpha_mask is not None else None
 
                         if tb_writer and (cam_idx < 4):
                             prefix = f"{config['name']}_view_{viewpoint.image_name}"
@@ -479,16 +483,28 @@ def training_pbr_static(dataset, opt, pipe, args):
                                 depth_vis = colormap(depth_norm.cpu().numpy()[0], cmap='turbo')
                                 tb_writer.add_image(f"{prefix}/6_depth", depth_vis, iteration)
 
-                        l1_test += l1_loss(pred, gt_image).mean().item()
+                        l1_test += l1_loss(pred, gt_image).item()
                         psnr_test += psnr(pred, gt_image).mean().item()
+                        if gt_mask is not None:
+                            l1_test_masked += l1_loss(pred, gt_image, mask=gt_mask).item()
+                            psnr_test_masked += psnr(pred, gt_image, mask=gt_mask).mean().item()
+                            masked_count += 1
 
                     l1_test /= len(cameras)
                     psnr_test /= len(cameras)
-                    print(f"  [ITER {iteration}] {config['name']} PSNR: {psnr_test:.4f}")
+                    msg = f"  [ITER {iteration}] {config['name']} PSNR: {psnr_test:.4f}"
+                    if masked_count > 0:
+                        l1_test_masked /= masked_count
+                        psnr_test_masked /= masked_count
+                        msg += f" | PSNR(mask): {psnr_test_masked:.4f}"
+                    print(msg)
 
                     if tb_writer:
                         tb_writer.add_scalar(f"{config['name']}/l1_loss", l1_test, iteration)
                         tb_writer.add_scalar(f"{config['name']}/psnr", psnr_test, iteration)
+                        if masked_count > 0:
+                            tb_writer.add_scalar(f"{config['name']}/l1_loss_masked", l1_test_masked, iteration)
+                            tb_writer.add_scalar(f"{config['name']}/psnr_masked", psnr_test_masked, iteration)
 
                 torch.cuda.empty_cache()
 
