@@ -30,6 +30,7 @@ class CameraInfo(NamedTuple):
     FovY: np.array
     FovX: np.array
     image: np.array
+    mask: object = None  # Optional PIL mask image (mode "L") for gt_alpha_mask
     image_path: str
     image_name: str
     width: int
@@ -243,37 +244,40 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             image_name = Path(cam_name).stem
             image = Image.open(image_path)
 
-            # Check for mask in sibling 'mask' directory
-            # Assuming structure: .../images/xxx.png -> .../mask/xxx.png
+            # Optional foreground mask.
+            # Priority: explicit sibling mask file > image alpha channel (if present).
+            mask_img = None
             mask_path = image_path.replace("/images/", "/mask/")
             if os.path.exists(mask_path):
                 try:
-                    mask = Image.open(mask_path).convert("L")
-                    if mask.size != image.size:
-                        mask = mask.resize(image.size, Image.NEAREST)
-                    image.putalpha(mask)
+                    mask_img = Image.open(mask_path).convert("L")
                 except Exception as e:
                     print(f"Warning: Failed to load mask from {mask_path}: {e}")
+                    mask_img = None
+            elif image.mode in ("RGBA", "LA"):
+                try:
+                    mask_img = image.split()[-1].convert("L")
+                except Exception:
+                    mask_img = None
 
-            # Keep alpha as gt_alpha_mask for downstream training (Camera.gt_alpha_mask).
-            # We still fill RGB outside the mask for visualization / optional background supervision.
-            im_data = np.array(image.convert("RGBA"))
+            rgb_img = image.convert("RGB")
+            if mask_img is not None and mask_img.size != rgb_img.size:
+                mask_img = mask_img.resize(rgb_img.size, Image.NEAREST)
 
-            bg = np.array([1, 1, 1]) if white_background else np.array([0, 0, 0])
-
-            norm_data = im_data / 255.0
-            alpha = norm_data[:, :, 3:4]
-            rgb = norm_data[:, :, :3]
-            rgb_filled = rgb * alpha + bg * (1 - alpha)
-            rgba = np.concatenate([rgb_filled, alpha], axis=2)
-            image = Image.fromarray(np.array(rgba * 255.0, dtype=np.uint8), "RGBA")
+            # Fill RGB outside mask with a constant background (keeps GT deterministic).
+            if mask_img is not None:
+                rgb = np.array(rgb_img).astype(np.float32) / 255.0
+                alpha = (np.array(mask_img).astype(np.float32) / 255.0)[..., None]
+                bg = (np.array([1, 1, 1], dtype=np.float32) if white_background else np.array([0, 0, 0], dtype=np.float32))[None, None, :]
+                rgb_filled = rgb * alpha + bg * (1.0 - alpha)
+                rgb_img = Image.fromarray(np.array(rgb_filled * 255.0, dtype=np.uint8), "RGB")
 
             fovy = focal2fov(fov2focal(fovx, image.size[0]), image.size[1])
             FovY = fovy 
             FovX = fovx
 
-            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=rgb_img, mask=mask_img,
+                            image_path=image_path, image_name=image_name, width=rgb_img.size[0], height=rgb_img.size[1]))
             
     return cam_infos
 
