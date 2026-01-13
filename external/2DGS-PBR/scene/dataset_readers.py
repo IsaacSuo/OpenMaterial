@@ -247,6 +247,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             # Optional foreground mask.
             # Priority: explicit sibling mask file > image alpha channel (if present).
             mask_img = None
+            mask_from_alpha = False
             mask_path = image_path.replace("/images/", "/mask/")
             if os.path.exists(mask_path):
                 try:
@@ -257,6 +258,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             elif image.mode in ("RGBA", "LA"):
                 try:
                     mask_img = image.split()[-1].convert("L")
+                    mask_from_alpha = True
                 except Exception:
                     mask_img = None
 
@@ -264,8 +266,10 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             if mask_img is not None and mask_img.size != rgb_img.size:
                 mask_img = mask_img.resize(rgb_img.size, Image.NEAREST)
 
-            # Fill RGB outside mask with a constant background (keeps GT deterministic).
-            if mask_img is not None:
+            # If the mask comes from an image alpha channel, RGB behind the object is often undefined
+            # (e.g., premultiplied or black). In that case, composite onto a constant background.
+            # If the mask comes from a separate /mask/ file, keep the original RGB background intact.
+            if mask_img is not None and mask_from_alpha:
                 rgb = np.array(rgb_img).astype(np.float32) / 255.0
                 alpha = (np.array(mask_img).astype(np.float32) / 255.0)[..., None]
                 bg = (np.array([1, 1, 1], dtype=np.float32) if white_background else np.array([0, 0, 0], dtype=np.float32))[None, None, :]
