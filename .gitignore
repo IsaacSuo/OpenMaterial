@@ -13,3 +13,7 @@ __pycache__/
 build/
 *.egg-info/
 .DS_Store
+
+# Local AI assistant artifacts
+GEMINI.md
+OPACITY_ANALYSIS/
