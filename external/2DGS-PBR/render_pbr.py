@@ -22,7 +22,11 @@ from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
-from utils.pbr_utils import EnvironmentLight, screen_space_pbr_shading
+from utils.pbr_utils import (
+    EnvironmentLight,
+    screen_space_pbr_shading,
+    compute_ray_directions_world_from_fov,
+)
 
 import numpy as np
 from PIL import Image
@@ -69,8 +73,8 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
     gaussians = GaussianModel(dataset.sh_degree, use_pbr=True)
     scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
-    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    # Use black background so buffers are premultiplied cleanly; skybox is composited explicitly.
+    background = torch.zeros(3, dtype=torch.float32, device="cuda")
 
     # Get cameras based on split
     if split_name == "train":
@@ -84,8 +88,20 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
         # Render with PBR G-Buffer
         render_pkg = render(view, gaussians, pipeline, background, render_pbr=True)
 
+        # Skybox for composite outputs
+        ray_dirs = compute_ray_directions_world_from_fov(
+            image_height=view.image_height,
+            image_width=view.image_width,
+            fovx=view.FoVx,
+            fovy=view.FoVy,
+            world_view_transform=view.world_view_transform,
+            device="cuda",
+        )
+        bg_env = env_light.sample(ray_dirs).permute(2, 0, 1)
+        alpha_map = render_pkg["rend_alpha"]
+
         # Standard SH rendering
-        image = render_pkg["render"]
+        image = render_pkg["render"] + bg_env * (1.0 - alpha_map)
         save_image(image, os.path.join(renders_dir, f"{view.image_name}.png"))
 
         # Ground truth
@@ -94,10 +110,13 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
 
         # PBR outputs
         if gaussians.use_pbr and 'gbuffer_albedo' in render_pkg:
-            gbuffer_albedo = render_pkg['gbuffer_albedo']
-            gbuffer_roughness = render_pkg['gbuffer_roughness']
-            gbuffer_metallic = render_pkg['gbuffer_metallic']
-            gbuffer_normal = render_pkg['rend_normal']
+            denom = alpha_map + 1e-6
+
+            # Unpremultiply to get physically meaningful material maps.
+            gbuffer_albedo = torch.clamp(render_pkg['gbuffer_albedo'] / denom, 0.0, 1.0)
+            gbuffer_roughness = torch.clamp(render_pkg['gbuffer_roughness'] / denom, 0.1, 0.999)
+            gbuffer_metallic = torch.clamp(render_pkg['gbuffer_metallic'] / denom, 0.0, 1.0)
+            gbuffer_normal = render_pkg['rend_normal'] / denom
             gbuffer_depth = render_pkg['surf_depth']
 
             # Save material maps
@@ -105,16 +124,17 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
             save_single_channel(gbuffer_roughness, os.path.join(roughness_dir, f"{view.image_name}.png"))
             save_single_channel(gbuffer_metallic, os.path.join(metallic_dir, f"{view.image_name}.png"))
 
-            # Save normal (convert from [-1, 1] to [0, 1])
-            normal_vis = gbuffer_normal * 0.5 + 0.5
+            # Save normal (normalize, then map [-1, 1] -> [0, 1])
+            nrm = gbuffer_normal / (gbuffer_normal.norm(dim=0, keepdim=True) + 1e-6)
+            normal_vis = nrm * 0.5 + 0.5
             save_image(normal_vis, os.path.join(normal_dir, f"{view.image_name}.png"))
 
             # Save depth (normalized)
             depth_norm = gbuffer_depth / (gbuffer_depth.max() + 1e-6)
             save_single_channel(depth_norm, os.path.join(depth_dir, f"{view.image_name}.png"), colormap='turbo')
 
-            # PBR shaded image
-            shaded = screen_space_pbr_shading(
+            # PBR shaded image (object only)
+            shaded_obj = screen_space_pbr_shading(
                 gbuffer_albedo,
                 gbuffer_roughness,
                 gbuffer_metallic,
@@ -123,7 +143,9 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
                 view.camera_center,
                 view.world_view_transform,
                 env_light=env_light,
+                ray_dirs_world=ray_dirs,
             )
+            shaded = shaded_obj * alpha_map + bg_env * (1.0 - alpha_map)
             save_image(shaded, os.path.join(pbr_dir, f"{view.image_name}.png"))
 
     return scene

@@ -319,6 +319,39 @@ class GaussianModel:
         # Dummy scheduler for XYZ since we don't optimize it, but existing code might call it
         self.xyz_scheduler_args = lambda x: 0.0
 
+    def training_setup_fixed_geometry_pbr_only(self, training_args):
+        """
+        Setup optimizer for Fixed Geometry PBR-only training.
+        - Unlocked: Scaling, Opacity, PBR (Albedo, Roughness, Metallic)
+        - Locked: XYZ, Rotation, SH (Color)
+        """
+        self.percent_dense = training_args.percent_dense
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+
+        l = [
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+        ]
+
+        if self.use_pbr:
+            albedo_lr = getattr(training_args, 'albedo_lr', 0.001)
+            roughness_lr = getattr(training_args, 'roughness_lr', 0.0002)
+            metallic_lr = getattr(training_args, 'metallic_lr', 0.0002)
+
+            l.extend([
+                {'params': [self._albedo], 'lr': albedo_lr, "name": "albedo"},
+                {'params': [self._roughness], 'lr': roughness_lr, "name": "roughness"},
+                {'params': [self._metallic], 'lr': metallic_lr, "name": "metallic"},
+            ])
+            print(
+                "Fixed Geometry (PBR-only) Optimizer: "
+                f"albedo_lr={albedo_lr}, roughness_lr={roughness_lr}, metallic_lr={metallic_lr}"
+            )
+
+        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        self.xyz_scheduler_args = lambda x: 0.0
+
     def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()

@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import os
+from typing import Optional, Union
 
 
 class EnvironmentLight(nn.Module):
@@ -429,6 +430,64 @@ class EnvironmentLight(nn.Module):
         return self.sample(directions)
 
 
+def compute_ray_directions_world_from_fov(
+    image_height: int,
+    image_width: int,
+    fovx: float,
+    fovy: float,
+    world_view_transform: torch.Tensor,
+    device: Optional[Union[torch.device, str]] = None,
+) -> torch.Tensor:
+    """
+    Compute per-pixel camera ray directions in world space for a pinhole camera.
+
+    Args:
+        image_height: H
+        image_width: W
+        fovx: horizontal FoV in radians
+        fovy: vertical FoV in radians
+        world_view_transform: [4, 4] world-to-view transform (same convention as Camera.world_view_transform)
+        device: torch device for output (defaults to world_view_transform.device)
+
+    Returns:
+        ray_dirs_world: [H, W, 3] normalized direction vectors (from camera into the scene, world space)
+    """
+    if device is None:
+        device = world_view_transform.device
+
+    H, W = int(image_height), int(image_width)
+    tan_fovx = float(np.tan(fovx * 0.5))
+    tan_fovy = float(np.tan(fovy * 0.5))
+    fx = W / (2.0 * tan_fovx)
+    fy = H / (2.0 * tan_fovy)
+    cx = W / 2.0
+    cy = H / 2.0
+
+    grid_x, grid_y = torch.meshgrid(
+        torch.arange(W, device=device, dtype=torch.float32),
+        torch.arange(H, device=device, dtype=torch.float32),
+        indexing="xy",
+    )
+
+    # Camera-space directions (z = +1)
+    dirs_c = torch.stack(
+        [
+            (grid_x - cx) / fx,
+            (grid_y - cy) / fy,
+            torch.ones_like(grid_x),
+        ],
+        dim=-1,
+    )  # [H, W, 3]
+
+    # Convert to world space. In this repo, Camera.world_view_transform is stored transposed.
+    # The equivalent w2c matrix is world_view_transform.T.
+    w2c = world_view_transform.transpose(0, 1)
+    c2w_R = w2c[:3, :3].T
+    dirs_w = dirs_c @ c2w_R.T
+
+    return F.normalize(dirs_w, dim=-1)
+
+
 def fresnel_schlick(cos_theta: torch.Tensor, f0: torch.Tensor) -> torch.Tensor:
     """
     Fresnel-Schlick approximation.
@@ -679,6 +738,7 @@ def screen_space_pbr_shading(
     env_light: EnvironmentLight = None,
     light_dir: torch.Tensor = None,
     light_color: torch.Tensor = None,
+    ray_dirs_world: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Apply PBR shading in screen space using G-Buffer.
@@ -710,18 +770,18 @@ def screen_space_pbr_shading(
     # Normalize normals
     normal = F.normalize(normal, dim=-1)
 
-    # Compute view direction for each pixel
-    # This is a simplified version - in practice, you'd compute this from depth and camera intrinsics
-    # For now, we use the camera center direction
-    # view_dir points FROM surface TO camera
-    if gbuffer_depth is not None:
-        # TODO: Compute actual view directions from depth and camera intrinsics
-        pass
-
-    # Simplified: assume view direction is towards camera center
-    # This is an approximation that works reasonably for rendering
-    view_dir = -camera_center.view(1, 1, 3).expand(H, W, 3)
-    view_dir = F.normalize(view_dir, dim=-1)
+    # View direction (world space), per pixel.
+    # Prefer the true pinhole ray directions if provided; for a surface point on that ray, view_dir = -ray_dir.
+    if ray_dirs_world is not None:
+        if ray_dirs_world.shape == (3, H, W):
+            ray_dirs_world = ray_dirs_world.permute(1, 2, 0)
+        if ray_dirs_world.shape != (H, W, 3):
+            raise ValueError(f"ray_dirs_world must be [H,W,3] or [3,H,W], got {tuple(ray_dirs_world.shape)}")
+        view_dir = F.normalize(-ray_dirs_world, dim=-1)
+    else:
+        # Fallback approximation: constant view direction.
+        view_dir = -camera_center.view(1, 1, 3).expand(H, W, 3)
+        view_dir = F.normalize(view_dir, dim=-1)
 
     if env_light is not None:
         # Use environment lighting

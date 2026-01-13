@@ -5,9 +5,9 @@ Static Geometry PBR Training Script for 2DGS-PBR
 This script implements a "Static Geometry" pipeline where:
 1. Geometry is initialized from a dense GT point cloud (with normals).
 2. XYZ and Rotation are LOCKED (not optimized).
-3. Only Scale, Opacity, SH, and PBR material parameters are optimized.
+3. Only Scale, Opacity, PBR material parameters, and environment lighting are optimized.
 4. Densification (split/clone/prune) is DISABLED.
-5. PBR shading and losses are enabled from the START.
+5. Supervision is on the full composite (PBR object + skybox), with masked material losses on the object.
 
 Usage:
     python train_pbr_static.py -s <dataset_path> -m <output_path> --gt_ply <path_to_dense.ply>
@@ -17,13 +17,16 @@ import os
 import torch
 import sys
 import uuid
-import math
 from argparse import ArgumentParser, Namespace
 from random import randint
 from tqdm import tqdm
 
-from utils.loss_utils import l1_loss, ssim, compute_pbr_losses, pbr_reconstruction_loss
-from utils.pbr_utils import EnvironmentLight, screen_space_pbr_shading
+from utils.loss_utils import l1_loss, ssim, compute_pbr_losses
+from utils.pbr_utils import (
+    EnvironmentLight,
+    screen_space_pbr_shading,
+    compute_ray_directions_world_from_fov,
+)
 from utils.profiler import SimpleProfiler
 from utils.general_utils import safe_state, colormap
 from utils.image_utils import psnr, render_net_image
@@ -38,35 +41,15 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-def get_ray_directions(H, W, K, R, T):
-    """
-    Compute ray directions for all pixels in world coordinate.
-    K: [3, 3] intrinsic matrix
-    R: [3, 3] rotation matrix (cam2world)
-    T: [3] translation vector (cam2world)
-    Returns: [H, W, 3] ray directions (normalized)
-    """
-    grid_x, grid_y = torch.meshgrid(torch.arange(W, device="cuda"), torch.arange(H, device="cuda"), indexing='xy')
-    
-    # Pixel to Camera space
-    # u = (x - cx) / fx, v = (y - cy) / fy, z = 1
-    # Note: 2DGS/3DGS projection usually assumes standard pinhole
-    fx, fy = K[0, 0], K[1, 1]
-    cx, cy = K[0, 2], K[1, 2]
-    
-    dirs_c = torch.stack([
-        (grid_x - cx) / fx,
-        (grid_y - cy) / fy,
-        torch.ones_like(grid_x)
-    ], dim=-1) # [H, W, 3]
-    
-    # Camera to World space
-    # R is typically world2cam in standard pipeline, but let's check input.
-    # We will pass cam2world R here.
-    dirs_w = (dirs_c @ R.T) # [H, W, 3]
-    dirs_w = torch.nn.functional.normalize(dirs_w, dim=-1)
-    
-    return dirs_w
+def _get_ray_dirs_world(viewpoint_cam) -> torch.Tensor:
+    return compute_ray_directions_world_from_fov(
+        image_height=viewpoint_cam.image_height,
+        image_width=viewpoint_cam.image_width,
+        fovx=viewpoint_cam.FoVx,
+        fovy=viewpoint_cam.FoVy,
+        world_view_transform=viewpoint_cam.world_view_transform,
+        device="cuda",
+    )
 
 def prepare_output_and_logger(args):
     if not args.model_path:
@@ -114,10 +97,12 @@ def training_pbr_static(dataset, opt, pipe, args):
 
     # 3. Setup Optimizer (Fixed Geometry Mode)
     # This locks XYZ and Rotation, but allows Scale, Opacity, and PBR to be optimized.
-    gaussians.training_setup_fixed_geometry(opt)
+    gaussians.training_setup_fixed_geometry_pbr_only(opt)
 
-    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    # PBR-only training does not supervise SH color output; keep background black so
+    # G-buffer maps are clean premultiplied attributes (no background offset).
+    background = torch.zeros(3, dtype=torch.float32, device="cuda")
+    dummy_color = torch.zeros((gaussians.get_xyz.shape[0], 3), dtype=torch.float32, device="cuda")
 
     # 4. Environment Light
     env_light = EnvironmentLight(args.env_map, resolution=256).cuda()
@@ -131,7 +116,7 @@ def training_pbr_static(dataset, opt, pipe, args):
     
     viewpoint_stack = None
     ema_loss_for_log = 0.0
-    ema_pbr_for_log = 0.0
+    ema_reg_for_log = 0.0
     
     # Early Stopping State
     best_window_loss = float('inf')
@@ -148,9 +133,7 @@ def training_pbr_static(dataset, opt, pipe, args):
         # Update learning rate (mainly for Opacity/SH, since XYZ is locked)
         gaussians.update_learning_rate(iteration)
 
-        # SH level up
-        if iteration % 1000 == 0:
-            gaussians.oneupSHdegree()
+        # No SH training in PBR-only mode.
 
         # Pick a random Camera
         if not viewpoint_stack:
@@ -159,77 +142,75 @@ def training_pbr_static(dataset, opt, pipe, args):
 
         # Render
         # PBR is enabled from the start!
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background, render_pbr=True)
+        render_pkg = render(viewpoint_cam, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
         
         # Get Mask for loss calculation
         mask = viewpoint_cam.gt_alpha_mask.cuda() if viewpoint_cam.gt_alpha_mask is not None else None
         
         # --- Skybox / Background Rendering ---
-        # 1. Get ray directions
-        # K from FoV: fx = W / (2 * tan(fovx/2))
-        W, H = viewpoint_cam.image_width, viewpoint_cam.image_height
-        tan_fovx = math.tan(viewpoint_cam.FoVx * 0.5)
-        tan_fovy = math.tan(viewpoint_cam.FoVy * 0.5)
-        fx = W / (2.0 * tan_fovx)
-        fy = H / (2.0 * tan_fovy)
-        cx, cy = W / 2.0, H / 2.0
-        
-        K = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], device="cuda")
-        # c2w rotation: world_view_transform is w2c.T
-        w2c = viewpoint_cam.world_view_transform.transpose(0, 1)
-        c2w_R = w2c[:3, :3].T
-        c2w_T = viewpoint_cam.camera_center # Already computed in Camera
-        
-        ray_dirs = get_ray_directions(H, W, K, c2w_R, c2w_T)
-        
-        # 2. Sample Environment Map
-        # View directions for env map sampling
-        bg_env = env_light.sample(ray_dirs.view(-1, 3)).reshape(3, H, W)
-        
-        # 3. Composite
-        # render_pkg["render"] is pre-multiplied alpha color on black background
-        # final = render + bg * (1 - alpha)
-        render_alpha = render_pkg["rend_alpha"]
-        image = render_pkg["render"] + bg_env * (1.0 - render_alpha)
+        H, W = viewpoint_cam.image_height, viewpoint_cam.image_width
+        ray_dirs = _get_ray_dirs_world(viewpoint_cam)
+        bg_env = env_light.sample(ray_dirs).permute(2, 0, 1)
         
         gt_image = viewpoint_cam.original_image.cuda()
 
-        # Loss computation
-        
-        # Standard RGB Loss: NO MASK (Supervise full image to learn background)
-        Ll1 = l1_loss(image, gt_image) 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image.unsqueeze(0), gt_image.unsqueeze(0)))
-        
-        # PBR Shading Loss (Immediate activation)
-        pbr_loss = torch.tensor(0.0, device="cuda")
-        env_tv_loss = torch.tensor(0.0, device="cuda")
-        pbr_reg_loss = torch.tensor(0.0, device="cuda")
-        
-        gbuffer_albedo = render_pkg.get('gbuffer_albedo')
-        gbuffer_roughness = render_pkg.get('gbuffer_roughness')
-        gbuffer_metallic = render_pkg.get('gbuffer_metallic')
-        gbuffer_normal = render_pkg.get('rend_normal')
-        gbuffer_depth = render_pkg.get('surf_depth')
-        alpha_map = render_pkg.get('rend_alpha')
+        # --- PBR + Skybox Composite Supervision (no SH render loss) ---
+        alpha_map = render_pkg.get("rend_alpha")
+        if alpha_map is None:
+            raise RuntimeError("render_pkg missing 'rend_alpha'")
 
-        if gbuffer_albedo is not None:
-            shaded_image = screen_space_pbr_shading(
-                gbuffer_albedo, gbuffer_roughness, gbuffer_metallic,
-                gbuffer_normal, gbuffer_depth,
-                viewpoint_cam.camera_center, viewpoint_cam.world_view_transform,
-                env_light=env_light
-            )
-            
-            # PBR Loss: MASKED (Focus on object surface shading)
-            pbr_loss = opt.lambda_pbr * pbr_reconstruction_loss(shaded_image, gt_image, mask=mask)
-            env_tv_loss = opt.lambda_env_tv * env_light.tv_loss_weighted()
-            
-            # PBR Regularization: MASKED
-            reg_mask = mask if mask is not None else alpha_map
-            pbr_losses = compute_pbr_losses(gbuffer_albedo, gbuffer_roughness, gbuffer_metallic, alpha_map=reg_mask)
-            pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses['total_pbr_reg']
+        gbuffer_albedo_pm = render_pkg.get("gbuffer_albedo")
+        gbuffer_roughness_pm = render_pkg.get("gbuffer_roughness")
+        gbuffer_metallic_pm = render_pkg.get("gbuffer_metallic")
+        gbuffer_normal_pm = render_pkg.get("rend_normal")
+        gbuffer_depth = render_pkg.get("surf_depth")
+        if gbuffer_albedo_pm is None:
+            raise RuntimeError("render_pbr=True but missing G-buffer outputs")
 
-        total_loss = opt.lambda_rgb * loss + pbr_loss + env_tv_loss + pbr_reg_loss
+        # Unpremultiply (physical correctness requirement).
+        eps = 1e-6
+        denom = alpha_map + eps
+        gbuffer_albedo = torch.clamp(gbuffer_albedo_pm / denom, 0.0, 1.0)
+        gbuffer_roughness = torch.clamp(gbuffer_roughness_pm / denom, 0.1, 0.999)
+        gbuffer_metallic = torch.clamp(gbuffer_metallic_pm / denom, 0.0, 1.0)
+        gbuffer_normal = gbuffer_normal_pm / denom
+
+        shaded_obj = screen_space_pbr_shading(
+            gbuffer_albedo, gbuffer_roughness, gbuffer_metallic,
+            gbuffer_normal, gbuffer_depth,
+            viewpoint_cam.camera_center, viewpoint_cam.world_view_transform,
+            env_light=env_light,
+            ray_dirs_world=ray_dirs,
+        )
+
+        pred = shaded_obj * alpha_map + bg_env * (1.0 - alpha_map)
+
+        # Composite supervision weights:
+        # - Base weight 1 everywhere (supervise skybox too)
+        # - Extra weight on object region (mask if available, else alpha) controlled by opt.lambda_pbr
+        obj_mask = mask if mask is not None else alpha_map.detach()
+        recon_weight = torch.ones_like(alpha_map)
+        if getattr(opt, "lambda_pbr", 0.0) > 0:
+            recon_weight = recon_weight + opt.lambda_pbr * obj_mask
+
+        env_tv_loss = opt.lambda_env_tv * env_light.tv_loss_weighted()
+
+        reg_mask = mask if mask is not None else alpha_map.detach()
+        pbr_losses = compute_pbr_losses(
+            gbuffer_albedo, gbuffer_roughness, gbuffer_metallic, alpha_map=reg_mask
+        )
+        pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses["total_pbr_reg"]
+
+        # Full-image reconstruction loss (PBR object + skybox), with extra object-region weighting.
+        Ll1 = l1_loss(pred, gt_image, mask=recon_weight)
+        ssim_val = ssim(
+            pred.unsqueeze(0),
+            gt_image.unsqueeze(0),
+            mask=recon_weight.unsqueeze(0),
+        )
+        recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
+
+        total_loss = opt.lambda_rgb * recon_loss + env_tv_loss + pbr_reg_loss
         
         # Backward
         total_loss.backward()
@@ -238,13 +219,13 @@ def training_pbr_static(dataset, opt, pipe, args):
         # Optimize
         with torch.no_grad():
             # Logging
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            ema_pbr_for_log = 0.4 * pbr_loss.item() + 0.6 * ema_pbr_for_log
+            ema_loss_for_log = 0.4 * recon_loss.item() + 0.6 * ema_loss_for_log
+            ema_reg_for_log = 0.4 * pbr_reg_loss.item() + 0.6 * ema_reg_for_log
             
             if iteration % 10 == 0:
                 progress_bar.set_postfix({
                     "Loss": f"{ema_loss_for_log:.{5}f}",
-                    "PBR": f"{ema_pbr_for_log:.{5}f}",
+                    "Reg": f"{ema_reg_for_log:.{5}f}",
                     "Pts": f"{len(gaussians.get_xyz)}"
                 })
                 progress_bar.update(10)
@@ -283,7 +264,7 @@ def training_pbr_static(dataset, opt, pipe, args):
 
             if tb_writer:
                 tb_writer.add_scalar('train_loss_patches/total_loss', total_loss.item(), iteration)
-                tb_writer.add_scalar('train_loss_patches/pbr_loss', pbr_loss.item(), iteration)
+                tb_writer.add_scalar('train_loss_patches/pbr_reg_loss', pbr_reg_loss.item(), iteration)
 
             # Save
             if iteration in args.save_iterations:
@@ -302,108 +283,80 @@ def training_pbr_static(dataset, opt, pipe, args):
             if iteration in args.test_iterations:
                 print(f"\n[ITER {iteration}] Running Evaluation...")
                 torch.cuda.empty_cache()
-                
+
                 # We test all test cameras, and a few train cameras for consistency check
                 validation_configs = (
                     {'name': 'test', 'cameras': scene.getTestCameras()},
-                    {'name': 'train', 'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, 20, 5)]}
+                    {'name': 'train', 'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, 20, 5)]},
                 )
 
                 for config in validation_configs:
-                    if config['cameras'] and len(config['cameras']) > 0:
-                        l1_test = 0.0
-                        psnr_test = 0.0
+                    cameras = config['cameras']
+                    if not cameras:
+                        continue
 
-                        for idx, viewpoint in enumerate(config['cameras']):
-                            # Render with PBR enabled for visualization
-                            render_pkg = render(viewpoint, gaussians, pipe, background, render_pbr=True)
-                            
-                            # --- Skybox Composite for Eval ---
-                            W, H = viewpoint.image_width, viewpoint.image_height
-                            tan_fovx = math.tan(viewpoint.FoVx * 0.5)
-                            tan_fovy = math.tan(viewpoint.FoVy * 0.5)
-                            fx = W / (2.0 * tan_fovx)
-                            fy = H / (2.0 * tan_fovy)
-                            cx, cy = W / 2.0, H / 2.0
-                            K = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], device="cuda")
-                            w2c = viewpoint.world_view_transform.transpose(0, 1)
-                            c2w_R = w2c[:3, :3].T
-                            c2w_T = viewpoint.camera_center
-                            
-                            ray_dirs = get_ray_directions(H, W, K, c2w_R, c2w_T)
-                            bg_env = env_light.sample(ray_dirs.view(-1, 3)).reshape(3, H, W)
-                            
-                            render_alpha = render_pkg["rend_alpha"]
-                            # Composite: Object + Env Background
-                            image = render_pkg["render"] + bg_env * (1.0 - render_alpha)
-                            image = torch.clamp(image, 0.0, 1.0)
-                            
-                            gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    l1_test = 0.0
+                    psnr_test = 0.0
 
-                            # Log images only for the first few cameras to save TB space
-                            if tb_writer and (idx < 4):
-                                prefix = f"{config['name']}_view_{viewpoint.image_name}"
-                                
-                                # 1. Render vs GT (Full Composite)
-                                tb_writer.add_image(f"{prefix}/0_render_composite", image, iteration)
-                                if iteration == args.test_iterations[0]:
-                                    tb_writer.add_image(f"{prefix}/0_gt", gt_image, iteration)
+                    for cam_idx, viewpoint in enumerate(cameras):
+                        render_pkg = render(viewpoint, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
 
-                                # 2. PBR Components
-                                gbuffer_albedo = render_pkg.get('gbuffer_albedo')
-                                if gbuffer_albedo is not None:
-                                    # Albedo
-                                    tb_writer.add_image(f"{prefix}/1_albedo", torch.clamp(gbuffer_albedo, 0, 1), iteration)
-                                    
-                                    # Roughness (Grayscale -> RGB for TB)
-                                    rough = render_pkg.get('gbuffer_roughness')
-                                    tb_writer.add_image(f"{prefix}/2_roughness", rough.repeat(3, 1, 1), iteration)
-                                    
-                                    # Metallic
-                                    metal = render_pkg.get('gbuffer_metallic')
-                                    tb_writer.add_image(f"{prefix}/3_metallic", metal.repeat(3, 1, 1), iteration)
+                        H, W = viewpoint.image_height, viewpoint.image_width
+                        ray_dirs = _get_ray_dirs_world(viewpoint)
+                        bg_env = env_light.sample(ray_dirs).permute(2, 0, 1)
 
-                                    # 3. PBR Shaded Result (Object Only, for checking shading)
-                                    shaded = screen_space_pbr_shading(
-                                        gbuffer_albedo, rough, metal,
-                                        render_pkg.get('rend_normal'), render_pkg.get('surf_depth'),
-                                        viewpoint.camera_center, viewpoint.world_view_transform,
-                                        env_light=env_light
-                                    )
-                                    # Composite Shaded with Env Background too
-                                    shaded_composite = shaded + bg_env * (1.0 - render_alpha)
-                                    tb_writer.add_image(f"{prefix}/4_pbr_shaded_composite", torch.clamp(shaded_composite, 0, 1), iteration)
+                        alpha_map = render_pkg["rend_alpha"]
+                        denom = alpha_map + 1e-6
 
-                                # 4. Geometry Check
-                                rend_normal = render_pkg.get("rend_normal")
-                                if rend_normal is not None:
-                                    # Map [-1, 1] to [0, 1]
-                                    norm_vis = torch.clamp(rend_normal * 0.5 + 0.5, 0, 1)
-                                    tb_writer.add_image(f"{prefix}/5_normal", norm_vis, iteration)
-                                
-                                # 5. Depth
-                                depth = render_pkg.get("surf_depth")
-                                if depth is not None:
-                                    d_max = depth.max()
-                                    depth_norm = depth / d_max if d_max > 0 else depth
-                                    depth_vis = colormap(depth_norm.cpu().numpy()[0], cmap='turbo') # [3, H, W]
-                                    tb_writer.add_image(f"{prefix}/6_depth", depth_vis, iteration)
-                                    
-                                # 6. Environment Map Debug
-                                # tb_writer.add_image(f"{config['name']}/env_map_preview", torch.clamp(bg_env, 0, 1), iteration)
+                        albedo = torch.clamp(render_pkg["gbuffer_albedo"] / denom, 0.0, 1.0)
+                        rough = torch.clamp(render_pkg["gbuffer_roughness"] / denom, 0.1, 0.999)
+                        metal = torch.clamp(render_pkg["gbuffer_metallic"] / denom, 0.0, 1.0)
+                        normal = render_pkg["rend_normal"] / denom
+                        depth_map = render_pkg.get("surf_depth")
 
-                            # Accumulate metrics (Full Image Metrics)
-                            # We use full image L1/PSNR because we want to evaluate background synthesis quality too.
-                            l1_test += l1_loss(image, gt_image).mean().item()
-                            psnr_test += psnr(image, gt_image).mean().item()
+                        shaded = screen_space_pbr_shading(
+                            albedo, rough, metal,
+                            normal, depth_map,
+                            viewpoint.camera_center, viewpoint.world_view_transform,
+                            env_light=env_light,
+                            ray_dirs_world=ray_dirs,
+                        )
 
-                        l1_test /= len(config['cameras'])
-                        psnr_test /= len(config['cameras'])          
-                        print(f"  [ITER {iteration}] {config['name']} PSNR: {psnr_test:.4f}")
-                        
-                        if tb_writer:
-                            tb_writer.add_scalar(f"{config['name']}/l1_loss", l1_test, iteration)
-                            tb_writer.add_scalar(f"{config['name']}/psnr", psnr_test, iteration)
+                        pred = shaded * alpha_map + bg_env * (1.0 - alpha_map)
+                        pred = torch.clamp(pred, 0.0, 1.0)
+                        gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+
+                        if tb_writer and (cam_idx < 4):
+                            prefix = f"{config['name']}_view_{viewpoint.image_name}"
+                            tb_writer.add_image(f"{prefix}/0_render_composite", pred, iteration)
+                            if iteration == args.test_iterations[0]:
+                                tb_writer.add_image(f"{prefix}/0_gt", gt_image, iteration)
+                            tb_writer.add_image(f"{prefix}/1_albedo", albedo, iteration)
+                            tb_writer.add_image(f"{prefix}/2_roughness", rough.repeat(3, 1, 1), iteration)
+                            tb_writer.add_image(f"{prefix}/3_metallic", metal.repeat(3, 1, 1), iteration)
+                            tb_writer.add_image(f"{prefix}/4_pbr_shaded_obj", shaded, iteration)
+
+                            rend_normal = render_pkg.get("rend_normal")
+                            if rend_normal is not None:
+                                norm_vis = torch.clamp(rend_normal * 0.5 + 0.5, 0, 1)
+                                tb_writer.add_image(f"{prefix}/5_normal", norm_vis, iteration)
+
+                            if depth_map is not None:
+                                d_max = depth_map.max()
+                                depth_norm = depth_map / d_max if d_max > 0 else depth_map
+                                depth_vis = colormap(depth_norm.cpu().numpy()[0], cmap='turbo')
+                                tb_writer.add_image(f"{prefix}/6_depth", depth_vis, iteration)
+
+                        l1_test += l1_loss(pred, gt_image).mean().item()
+                        psnr_test += psnr(pred, gt_image).mean().item()
+
+                    l1_test /= len(cameras)
+                    psnr_test /= len(cameras)
+                    print(f"  [ITER {iteration}] {config['name']} PSNR: {psnr_test:.4f}")
+
+                    if tb_writer:
+                        tb_writer.add_scalar(f"{config['name']}/l1_loss", l1_test, iteration)
+                        tb_writer.add_scalar(f"{config['name']}/psnr", psnr_test, iteration)
 
                 torch.cuda.empty_cache()
 
@@ -424,8 +377,18 @@ if __name__ == "__main__":
     parser.add_argument("--env_map", type=str, default=None, help="Initial HDR environment map")
     
     # PBR params
-    parser.add_argument("--lambda_rgb", type=float, default=1.0, help="Weight for standard RGB reconstruction loss")
-    parser.add_argument("--lambda_pbr", type=float, default=0.1)
+    parser.add_argument(
+        "--lambda_rgb",
+        type=float,
+        default=1.0,
+        help="Weight for full-image composite reconstruction loss (PBR object + skybox)",
+    )
+    parser.add_argument(
+        "--lambda_pbr",
+        type=float,
+        default=0.1,
+        help="Extra reconstruction weight on the object region (mask if available, else alpha)",
+    )
     parser.add_argument("--lambda_pbr_reg", type=float, default=0.01)
     parser.add_argument("--env_light_lr", type=float, default=0.01)
     parser.add_argument("--lambda_env_tv", type=float, default=0.001)
