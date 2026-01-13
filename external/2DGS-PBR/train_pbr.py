@@ -115,7 +115,9 @@ def training_pbr_static(dataset, opt, pipe, args):
     iter_end = torch.cuda.Event(enable_timing=True)
     
     viewpoint_stack = None
-    ema_loss_for_log = 0.0
+    ema_total_for_log = 0.0
+    ema_recon_for_log = 0.0
+    ema_env_for_log = 0.0
     ema_reg_for_log = 0.0
     
     # Early Stopping State
@@ -186,18 +188,31 @@ def training_pbr_static(dataset, opt, pipe, args):
         pred = shaded_obj * alpha_map + bg_env * (1.0 - alpha_map)
 
         # Composite supervision weights:
-        # - Base weight 1 everywhere (supervise skybox too)
-        # - Extra weight on object region (mask if available, else alpha) controlled by opt.lambda_pbr
+        # - Default: if gt_alpha_mask exists, supervise reconstruction only on the object region
+        #   to avoid forcing env_light to match matted/black GT backgrounds.
+        # - Opt-in: --supervise_background to supervise full composite (object + skybox).
         obj_mask = mask if mask is not None else alpha_map.detach()
-        recon_weight = torch.ones_like(alpha_map)
-        if getattr(opt, "lambda_pbr", 0.0) > 0:
-            recon_weight = recon_weight + opt.lambda_pbr * obj_mask
+        if (not getattr(args, "supervise_background", False)) and (mask is not None):
+            recon_weight = mask
+        else:
+            recon_weight = torch.ones_like(alpha_map)
+            if getattr(opt, "lambda_pbr", 0.0) > 0:
+                recon_weight = recon_weight + opt.lambda_pbr * obj_mask
 
         env_tv_loss = opt.lambda_env_tv * env_light.tv_loss_weighted()
 
         reg_mask = mask if mask is not None else alpha_map.detach()
         pbr_losses = compute_pbr_losses(
-            gbuffer_albedo, gbuffer_roughness, gbuffer_metallic, alpha_map=reg_mask
+            gbuffer_albedo,
+            gbuffer_roughness,
+            gbuffer_metallic,
+            alpha_map=reg_mask,
+            lambda_albedo_smooth=args.lambda_albedo_smooth,
+            lambda_roughness_smooth=args.lambda_roughness_smooth,
+            lambda_metallic_smooth=args.lambda_metallic_smooth,
+            lambda_metallic_prior=args.lambda_metallic_prior,
+            lambda_roughness_prior=args.lambda_roughness_prior,
+            lambda_albedo_chroma=args.lambda_albedo_chroma,
         )
         pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses["total_pbr_reg"]
 
@@ -219,16 +234,34 @@ def training_pbr_static(dataset, opt, pipe, args):
         # Optimize
         with torch.no_grad():
             # Logging
-            ema_loss_for_log = 0.4 * recon_loss.item() + 0.6 * ema_loss_for_log
+            ema_total_for_log = 0.4 * total_loss.item() + 0.6 * ema_total_for_log
+            ema_recon_for_log = 0.4 * recon_loss.item() + 0.6 * ema_recon_for_log
+            ema_env_for_log = 0.4 * env_tv_loss.item() + 0.6 * ema_env_for_log
             ema_reg_for_log = 0.4 * pbr_reg_loss.item() + 0.6 * ema_reg_for_log
             
             if iteration % 10 == 0:
                 progress_bar.set_postfix({
-                    "Loss": f"{ema_loss_for_log:.{5}f}",
-                    "Reg": f"{ema_reg_for_log:.{5}f}",
+                    "Tot": f"{ema_total_for_log:.{5}f}",
+                    "Recon": f"{ema_recon_for_log:.{5}f}",
+                    "Env": f"{ema_env_for_log:.{2}e}",
+                    "Reg": f"{ema_reg_for_log:.{2}e}",
                     "Pts": f"{len(gaussians.get_xyz)}"
                 })
                 progress_bar.update(10)
+
+            if args.log_interval > 0 and (iteration % args.log_interval == 0):
+                env_tv_unscaled = env_light.tv_loss_weighted().item()
+                pbr_reg_unscaled = pbr_losses["total_pbr_reg"].item()
+                obj_cov = (obj_mask > 0.5).float().mean().item()
+                print(
+                    f"\n[ITER {iteration}] total={total_loss.item():.6f} "
+                    f"(lambda_rgb*recon={opt.lambda_rgb * recon_loss.item():.6f}, "
+                    f"lambda_env_tv*tv={env_tv_loss.item():.6f}, "
+                    f"lambda_pbr_reg*reg={pbr_reg_loss.item():.6f}) | "
+                    f"recon={recon_loss.item():.6f} (L1={Ll1.item():.6f}, 1-SSIM={(1.0-ssim_val).item():.6f}) | "
+                    f"tv_unscaled={env_tv_unscaled:.6e} reg_unscaled={pbr_reg_unscaled:.6e} | "
+                    f"obj_cov={obj_cov:.3f} alpha_mean={alpha_map.mean().item():.3f} w_mean={recon_weight.mean().item():.3f}"
+                )
 
             # Early Stopping Check (Relative Percentage Strategy)
             if args.enable_early_stopping:
@@ -263,8 +296,49 @@ def training_pbr_static(dataset, opt, pipe, args):
                                 return # Exit function directly
 
             if tb_writer:
-                tb_writer.add_scalar('train_loss_patches/total_loss', total_loss.item(), iteration)
-                tb_writer.add_scalar('train_loss_patches/pbr_reg_loss', pbr_reg_loss.item(), iteration)
+                tb_writer.add_scalar('train/total_loss', total_loss.item(), iteration)
+                tb_writer.add_scalar('train/recon_loss', recon_loss.item(), iteration)
+                tb_writer.add_scalar('train/recon_l1', Ll1.item(), iteration)
+                tb_writer.add_scalar('train/recon_ssim_term', (1.0 - ssim_val).item(), iteration)
+                tb_writer.add_scalar('train/env_tv_loss', env_tv_loss.item(), iteration)
+                tb_writer.add_scalar('train/pbr_reg_loss', pbr_reg_loss.item(), iteration)
+
+                # Unscaled components (useful for tuning lambdas)
+                tb_writer.add_scalar('train_unscaled/env_tv', env_light.tv_loss_weighted().item(), iteration)
+                tb_writer.add_scalar('train_unscaled/pbr_reg', pbr_losses["total_pbr_reg"].item(), iteration)
+
+                for k, v in pbr_losses.items():
+                    if k == "total_pbr_reg":
+                        continue
+                    tb_writer.add_scalar(f"train_unscaled/pbr_reg/{k}", v.item(), iteration)
+
+                # Weight/mask diagnostics
+                obj_coverage = (obj_mask > 0.5).float().mean().item()
+                alpha_mean = alpha_map.mean().item()
+                w_mean = recon_weight.mean().item()
+                tb_writer.add_scalar("train_diag/obj_coverage", obj_coverage, iteration)
+                tb_writer.add_scalar("train_diag/alpha_mean", alpha_mean, iteration)
+                tb_writer.add_scalar("train_diag/recon_weight_mean", w_mean, iteration)
+
+                # Material stats (object region only, if any)
+                if obj_coverage > 0:
+                    m = (obj_mask > 0.5).expand_as(gbuffer_albedo)
+                    tb_writer.add_scalar("train_diag/albedo_mean_obj", gbuffer_albedo[m].mean().item(), iteration)
+                    tb_writer.add_scalar("train_diag/roughness_mean_obj", gbuffer_roughness[obj_mask > 0.5].mean().item(), iteration)
+                    tb_writer.add_scalar("train_diag/metallic_mean_obj", gbuffer_metallic[obj_mask > 0.5].mean().item(), iteration)
+                tb_writer.add_scalar('train_loss_patches/recon_loss', recon_loss.item(), iteration)
+                tb_writer.add_scalar('train_loss_patches/env_tv_loss', env_tv_loss.item(), iteration)
+                tb_writer.add_scalar('train_loss_patches/pbr_reg_pre_scale', pbr_losses["total_pbr_reg"].item(), iteration)
+                tb_writer.add_scalar('train_stats/alpha_mean', alpha_map.mean().item(), iteration)
+                tb_writer.add_scalar('train_stats/obj_weight_mean', recon_weight.mean().item(), iteration)
+                tb_writer.add_scalar('train_stats/albedo_mean', gbuffer_albedo.mean().item(), iteration)
+                tb_writer.add_scalar('train_stats/roughness_mean', gbuffer_roughness.mean().item(), iteration)
+                tb_writer.add_scalar('train_stats/metallic_mean', gbuffer_metallic.mean().item(), iteration)
+
+                for k, v in pbr_losses.items():
+                    if k == "total_pbr_reg":
+                        continue
+                    tb_writer.add_scalar(f"train_loss_patches/pbr_reg_terms/{k}", v.item(), iteration)
 
             # Save
             if iteration in args.save_iterations:
@@ -393,6 +467,19 @@ if __name__ == "__main__":
     parser.add_argument("--env_light_lr", type=float, default=0.01)
     parser.add_argument("--lambda_env_tv", type=float, default=0.001)
     parser.add_argument("--no_env_gradient_scaling", action="store_true")
+    parser.add_argument(
+        "--supervise_background",
+        action="store_true",
+        help="Supervise full composite (object + background). If unset and gt_alpha_mask exists, L1/SSIM is computed only on the mask region to avoid black-background supervision.",
+    )
+
+    # Material regularization term weights (inside compute_pbr_losses, before global lambda_pbr_reg)
+    parser.add_argument("--lambda_albedo_smooth", type=float, default=0.01)
+    parser.add_argument("--lambda_roughness_smooth", type=float, default=0.01)
+    parser.add_argument("--lambda_metallic_smooth", type=float, default=0.01)
+    parser.add_argument("--lambda_metallic_prior", type=float, default=0.001)
+    parser.add_argument("--lambda_roughness_prior", type=float, default=0.001)
+    parser.add_argument("--lambda_albedo_chroma", type=float, default=0.001)
 
     # Early Stopping Params
     parser.add_argument("--enable_early_stopping", action="store_true", help="Enable automatic early stopping")
@@ -406,6 +493,12 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--log_interval",
+        type=int,
+        default=500,
+        help="Print a detailed console loss breakdown every N iterations (0 disables)",
+    )
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -418,4 +511,4 @@ if __name__ == "__main__":
     opt.lambda_pbr_reg = args.lambda_pbr_reg
     opt.lambda_env_tv = args.lambda_env_tv
     
-training_pbr_static(lp.extract(args), opt, pp.extract(args), args)
+    training_pbr_static(lp.extract(args), opt, pp.extract(args), args)
