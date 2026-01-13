@@ -255,13 +255,18 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
                 except Exception as e:
                     print(f"Warning: Failed to load mask from {mask_path}: {e}")
 
+            # Keep alpha as gt_alpha_mask for downstream training (Camera.gt_alpha_mask).
+            # We still fill RGB outside the mask for visualization / optional background supervision.
             im_data = np.array(image.convert("RGBA"))
 
-            bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+            bg = np.array([1, 1, 1]) if white_background else np.array([0, 0, 0])
 
             norm_data = im_data / 255.0
-            arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
-            image = Image.fromarray(np.array(arr*255.0, dtype=np.uint8), "RGB")
+            alpha = norm_data[:, :, 3:4]
+            rgb = norm_data[:, :, :3]
+            rgb_filled = rgb * alpha + bg * (1 - alpha)
+            rgba = np.concatenate([rgb_filled, alpha], axis=2)
+            image = Image.fromarray(np.array(rgba * 255.0, dtype=np.uint8), "RGBA")
 
             fovy = focal2fov(fov2focal(fovx, image.size[0]), image.size[1])
             FovY = fovy 
