@@ -17,6 +17,7 @@ import os
 import torch
 import sys
 import uuid
+import numpy as np
 from argparse import ArgumentParser, Namespace
 from random import randint
 from tqdm import tqdm
