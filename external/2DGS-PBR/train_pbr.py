@@ -458,6 +458,13 @@ def training_pbr_static(dataset, opt, pipe, args):
                             tb_writer.add_image(f"{prefix}/2_roughness", rough.repeat(3, 1, 1), iteration)
                             tb_writer.add_image(f"{prefix}/3_metallic", metal.repeat(3, 1, 1), iteration)
                             tb_writer.add_image(f"{prefix}/4_pbr_shaded_obj", shaded, iteration)
+                            tb_writer.add_image(f"{prefix}/7_alpha", alpha_map.repeat(3, 1, 1), iteration)
+                            if viewpoint.gt_alpha_mask is not None:
+                                tb_writer.add_image(
+                                    f"{prefix}/8_gt_alpha_mask",
+                                    viewpoint.gt_alpha_mask.to("cuda").repeat(3, 1, 1),
+                                    iteration,
+                                )
 
                             rend_normal = render_pkg.get("rend_normal")
                             if rend_normal is not None:
