@@ -200,6 +200,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                 recon_weight = recon_weight + opt.lambda_pbr * obj_mask
 
         env_tv_loss = opt.lambda_env_tv * env_light.tv_loss_weighted()
+        env_smooth_loss = getattr(args, "lambda_env_smooth", 0.0) * env_light.smoothness_loss_weighted()
 
         reg_mask = mask if mask is not None else alpha_map.detach()
         pbr_losses = compute_pbr_losses(
@@ -225,7 +226,7 @@ def training_pbr_static(dataset, opt, pipe, args):
         )
         recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
 
-        total_loss = opt.lambda_rgb * recon_loss + env_tv_loss + pbr_reg_loss
+        total_loss = opt.lambda_rgb * recon_loss + env_tv_loss + env_smooth_loss + pbr_reg_loss
         
         # Backward
         total_loss.backward()
@@ -253,13 +254,17 @@ def training_pbr_static(dataset, opt, pipe, args):
                 env_tv_unscaled = env_light.tv_loss_weighted().item()
                 pbr_reg_unscaled = pbr_losses["total_pbr_reg"].item()
                 obj_cov = (obj_mask > 0.5).float().mean().item()
+                env_mean = env_light.env_map.mean().item()
+                env_max = env_light.env_map.max().item()
                 print(
                     f"\n[ITER {iteration}] total={total_loss.item():.6f} "
                     f"(lambda_rgb*recon={opt.lambda_rgb * recon_loss.item():.6f}, "
                     f"lambda_env_tv*tv={env_tv_loss.item():.6f}, "
+                    f"lambda_env_smooth*smooth={env_smooth_loss.item():.6f}, "
                     f"lambda_pbr_reg*reg={pbr_reg_loss.item():.6f}) | "
                     f"recon={recon_loss.item():.6f} (L1={Ll1.item():.6f}, 1-SSIM={(1.0-ssim_val).item():.6f}) | "
                     f"tv_unscaled={env_tv_unscaled:.6e} reg_unscaled={pbr_reg_unscaled:.6e} | "
+                    f"env_mean={env_mean:.3f} env_max={env_max:.3f} | "
                     f"obj_cov={obj_cov:.3f} alpha_mean={alpha_map.mean().item():.3f} w_mean={recon_weight.mean().item():.3f}"
                 )
 
@@ -352,6 +357,14 @@ def training_pbr_static(dataset, opt, pipe, args):
             
             env_light_optimizer.step()
             env_light_optimizer.zero_grad(set_to_none=True)
+
+            env_clamp_min = getattr(args, "env_clamp_min", None)
+            env_clamp_max = getattr(args, "env_clamp_max", None)
+            if (env_clamp_min is not None) or (env_clamp_max is not None):
+                with torch.no_grad():
+                    min_v = float(env_clamp_min) if env_clamp_min is not None else -float("inf")
+                    max_v = float(env_clamp_max) if env_clamp_max is not None else float("inf")
+                    env_light.env_map.data.clamp_(min=min_v, max=max_v)
 
             # --- Refined Evaluation and Image Logging ---
             if iteration in args.test_iterations:
@@ -466,6 +479,24 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_pbr_reg", type=float, default=0.01)
     parser.add_argument("--env_light_lr", type=float, default=0.01)
     parser.add_argument("--lambda_env_tv", type=float, default=0.001)
+    parser.add_argument(
+        "--lambda_env_smooth",
+        type=float,
+        default=0.0,
+        help="Additional L2 Laplacian smoothness regularizer for env_map (helps suppress speckle hotspots).",
+    )
+    parser.add_argument(
+        "--env_clamp_min",
+        type=float,
+        default=None,
+        help="Optional clamp min for env_map values after each optimizer step (e.g., 0.0).",
+    )
+    parser.add_argument(
+        "--env_clamp_max",
+        type=float,
+        default=None,
+        help="Optional clamp max for env_map values after each optimizer step (e.g., 5.0).",
+    )
     parser.add_argument("--no_env_gradient_scaling", action="store_true")
     parser.add_argument(
         "--supervise_background",
