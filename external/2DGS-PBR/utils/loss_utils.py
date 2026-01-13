@@ -71,6 +71,10 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True, mask=None
     ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
 
     if mask is not None:
+        # If mask is [B, 1, H, W] but ssim_map is [B, C, H, W], expand so the
+        # normalization accounts for channels (otherwise SSIM can exceed 1).
+        if mask.dim() == 4 and mask.shape[1] == 1 and ssim_map.shape[1] != 1:
+            mask = mask.expand(-1, ssim_map.shape[1], -1, -1)
         return (ssim_map * mask).sum() / (mask.sum() + 1e-8)
     elif size_average:
         return ssim_map.mean()
@@ -256,4 +260,3 @@ def compute_pbr_losses(
     losses['total_pbr_reg'] = sum(losses.values())
 
     return losses
-
