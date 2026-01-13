@@ -91,6 +91,12 @@ def training_pbr_static(dataset, opt, pipe, args):
     # 2. Initialize Scene
     # Since gaussians._xyz is now populated, Scene will NOT re-initialize them from COLMAP.
     scene = Scene(dataset, gaussians)
+
+    if getattr(args, "load_pseudo_gt", False):
+        scene.load_pseudo_gt_cache(
+            depth_subdir=getattr(args, "depth_subdir", "depth"),
+            normal_subdir=getattr(args, "normal_subdir", "normal"),
+        )
     
     # Update spatial_lr_scale with the correct extent from Scene
     gaussians.spatial_lr_scale = scene.cameras_extent
@@ -481,6 +487,20 @@ def training_pbr_static(dataset, opt, pipe, args):
                                 depth_vis = colormap(depth_norm.cpu().numpy()[0], cmap='turbo')
                                 tb_writer.add_image(f"{prefix}/6_depth", depth_vis, iteration)
 
+                            # Optional pseudo-GT visualizations (if present on disk and --load_pseudo_gt enabled)
+                            gt_depth = getattr(viewpoint, "pseudo_gt_depth", None)
+                            if gt_depth is not None:
+                                gt_depth_cuda = gt_depth.to("cuda")
+                                d_max = gt_depth_cuda.max()
+                                gt_depth_norm = gt_depth_cuda / d_max if d_max > 0 else gt_depth_cuda
+                                gt_depth_vis = colormap(gt_depth_norm.detach().cpu().numpy()[0], cmap="turbo")
+                                tb_writer.add_image(f"{prefix}/6_gt_depth", gt_depth_vis, iteration)
+
+                            gt_normal = getattr(viewpoint, "pseudo_gt_normal", None)
+                            if gt_normal is not None:
+                                gt_normal_vis = torch.clamp(gt_normal * 0.5 + 0.5, 0, 1)
+                                tb_writer.add_image(f"{prefix}/5_gt_normal", gt_normal_vis, iteration)
+
                         l1_test += l1_loss(pred, gt_image).mean().item()
                         psnr_test += psnr(pred, gt_image).mean().item()
 
@@ -509,6 +529,13 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument("--gt_ply", type=str, required=True, help="Path to dense GT .ply file")
     parser.add_argument("--env_map", type=str, default=None, help="Initial HDR environment map")
+    parser.add_argument(
+        "--load_pseudo_gt",
+        action="store_true",
+        help="Preload pseudo-GT depth/normal from `<source_path>/<depth_subdir|normal_subdir>/<image_name>.png` into Camera objects.",
+    )
+    parser.add_argument("--depth_subdir", type=str, default="depth", help="Subdirectory for pseudo-GT depth maps.")
+    parser.add_argument("--normal_subdir", type=str, default="normal", help="Subdirectory for pseudo-GT normal maps.")
     
     # PBR params
     parser.add_argument(
