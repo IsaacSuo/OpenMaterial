@@ -30,11 +30,11 @@ class CameraInfo(NamedTuple):
     FovY: np.array
     FovX: np.array
     image: np.array
-    mask: object = None  # Optional PIL mask image (mode "L") for gt_alpha_mask
     image_path: str
     image_name: str
     width: int
     height: int
+    mask: object = None  # Optional PIL mask image (mode "L") for gt_alpha_mask
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
