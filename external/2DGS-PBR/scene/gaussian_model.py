@@ -232,7 +232,10 @@ class GaussianModel:
 
         # 2. Scales from KNN (density)
         # Use mean distance to 3 nearest neighbors as base scale
-        dist2 = torch.clamp_min(distCUDA2(points), 0.0000001)
+        # distCUDA2 can output NaN for degenerate inputs; clamp_min does not fix NaNs.
+        dist2 = distCUDA2(points)
+        dist2 = torch.nan_to_num(dist2, nan=1e-7, posinf=1e-7, neginf=1e-7)
+        dist2 = torch.clamp_min(dist2, 1e-7)
         # scales = [N, 2] for 2DGS. We use sqrt(dist) for both axes.
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
 
@@ -363,7 +366,9 @@ class GaussianModel:
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
         num_pts = fused_point_cloud.shape[0]
 
-        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
+        dist2 = distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda())
+        dist2 = torch.nan_to_num(dist2, nan=1e-7, posinf=1e-7, neginf=1e-7)
+        dist2 = torch.clamp_min(dist2, 1e-7)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
         rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
 

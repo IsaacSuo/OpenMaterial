@@ -207,10 +207,14 @@ def training_pbr_static(dataset, opt, pipe, args):
         scale_reg_loss = torch.tensor(0.0, device="cuda")
         lambda_scale_reg = float(getattr(args, "lambda_scale_reg", 0.0) or 0.0)
         if lambda_scale_reg > 0:
-            scale_max = gaussians.get_scaling.max(dim=1).values
+            # Regularize in log-scale space to avoid exp overflow / NaN propagation.
+            # _scaling stores log(scale); get_scaling = exp(_scaling).
+            log_scale_max = gaussians._scaling.max(dim=1).values
             scale_thresh = float(getattr(args, "scale_reg_max_ratio", 0.1)) * scene_extent
-            scale_over = torch.relu(scale_max - scale_thresh)
-            scale_reg_loss = lambda_scale_reg * (scale_over ** 2).mean()
+            log_thresh = float(np.log(max(scale_thresh, 1e-12)))
+            log_scale_max = torch.nan_to_num(log_scale_max, nan=log_thresh, posinf=log_thresh + 10.0, neginf=-20.0)
+            scale_over_log = torch.relu(log_scale_max - log_thresh)
+            scale_reg_loss = lambda_scale_reg * (scale_over_log ** 2).mean()
 
         reg_mask = mask if mask is not None else alpha_map.detach()
         pbr_losses = compute_pbr_losses(
@@ -237,7 +241,17 @@ def training_pbr_static(dataset, opt, pipe, args):
         recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
 
         total_loss = opt.lambda_rgb * recon_loss + env_tv_loss + env_smooth_loss + scale_reg_loss + pbr_reg_loss
-        
+
+        if not torch.isfinite(total_loss):
+            raise FloatingPointError(
+                "Non-finite total_loss detected: "
+                f"recon={float(recon_loss.detach().cpu()):.6f}, "
+                f"env_tv={float(env_tv_loss.detach().cpu()):.6f}, "
+                f"env_smooth={float(env_smooth_loss.detach().cpu()):.6f}, "
+                f"scale_reg={float(scale_reg_loss.detach().cpu()):.6f}, "
+                f"pbr_reg={float(pbr_reg_loss.detach().cpu()):.6f}"
+            )
+
         # Backward
         total_loss.backward()
         iter_end.record()
@@ -264,7 +278,8 @@ def training_pbr_static(dataset, opt, pipe, args):
                 env_tv_unscaled = env_light.tv_loss_weighted().item()
                 pbr_reg_unscaled = pbr_losses["total_pbr_reg"].item()
                 obj_cov = (obj_mask > 0.5).float().mean().item()
-                scale_max_val = gaussians.get_scaling.max(dim=1).values.max().item()
+                scale_max_all = gaussians.get_scaling.max(dim=1).values
+                scale_max_val = torch.nan_to_num(scale_max_all, nan=0.0, posinf=1e9, neginf=0.0).max().item()
                 env_mean = env_light.env_map.mean().item()
                 env_max = env_light.env_map.max().item()
                 print(
