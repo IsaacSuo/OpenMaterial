@@ -110,6 +110,8 @@ def training_pbr_static(dataset, opt, pipe, args):
     if not args.no_env_gradient_scaling:
         env_light.register_gradient_scaling_hook()
 
+    scene_extent = float(scene.cameras_extent)
+
     # 5. Training Loop
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
@@ -202,6 +204,14 @@ def training_pbr_static(dataset, opt, pipe, args):
         env_tv_loss = opt.lambda_env_tv * env_light.tv_loss_weighted()
         env_smooth_loss = getattr(args, "lambda_env_smooth", 0.0) * env_light.smoothness_loss_weighted()
 
+        scale_reg_loss = torch.tensor(0.0, device="cuda")
+        lambda_scale_reg = float(getattr(args, "lambda_scale_reg", 0.0) or 0.0)
+        if lambda_scale_reg > 0:
+            scale_max = gaussians.get_scaling.max(dim=1).values
+            scale_thresh = float(getattr(args, "scale_reg_max_ratio", 0.1)) * scene_extent
+            scale_over = torch.relu(scale_max - scale_thresh)
+            scale_reg_loss = lambda_scale_reg * (scale_over ** 2).mean()
+
         reg_mask = mask if mask is not None else alpha_map.detach()
         pbr_losses = compute_pbr_losses(
             gbuffer_albedo,
@@ -226,7 +236,7 @@ def training_pbr_static(dataset, opt, pipe, args):
         )
         recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
 
-        total_loss = opt.lambda_rgb * recon_loss + env_tv_loss + env_smooth_loss + pbr_reg_loss
+        total_loss = opt.lambda_rgb * recon_loss + env_tv_loss + env_smooth_loss + scale_reg_loss + pbr_reg_loss
         
         # Backward
         total_loss.backward()
@@ -254,6 +264,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                 env_tv_unscaled = env_light.tv_loss_weighted().item()
                 pbr_reg_unscaled = pbr_losses["total_pbr_reg"].item()
                 obj_cov = (obj_mask > 0.5).float().mean().item()
+                scale_max_val = gaussians.get_scaling.max(dim=1).values.max().item()
                 env_mean = env_light.env_map.mean().item()
                 env_max = env_light.env_map.max().item()
                 print(
@@ -261,10 +272,12 @@ def training_pbr_static(dataset, opt, pipe, args):
                     f"(lambda_rgb*recon={opt.lambda_rgb * recon_loss.item():.6f}, "
                     f"lambda_env_tv*tv={env_tv_loss.item():.6f}, "
                     f"lambda_env_smooth*smooth={env_smooth_loss.item():.6f}, "
+                    f"lambda_scale_reg*scale={scale_reg_loss.item():.6f}, "
                     f"lambda_pbr_reg*reg={pbr_reg_loss.item():.6f}) | "
                     f"recon={recon_loss.item():.6f} (L1={Ll1.item():.6f}, 1-SSIM={(1.0-ssim_val).item():.6f}) | "
                     f"tv_unscaled={env_tv_unscaled:.6e} reg_unscaled={pbr_reg_unscaled:.6e} | "
                     f"env_mean={env_mean:.3f} env_max={env_max:.3f} | "
+                    f"scale_max={scale_max_val:.3f} | "
                     f"obj_cov={obj_cov:.3f} alpha_mean={alpha_map.mean().item():.3f} w_mean={recon_weight.mean().item():.3f}"
                 )
 
@@ -365,6 +378,13 @@ def training_pbr_static(dataset, opt, pipe, args):
                     min_v = float(env_clamp_min) if env_clamp_min is not None else -float("inf")
                     max_v = float(env_clamp_max) if env_clamp_max is not None else float("inf")
                     env_light.env_map.data.clamp_(min=min_v, max=max_v)
+
+            scale_clamp_ratio = getattr(args, "scale_clamp_max_ratio", None)
+            if scale_clamp_ratio is not None:
+                max_scale = float(scale_clamp_ratio) * scene_extent
+                if max_scale > 0:
+                    with torch.no_grad():
+                        gaussians._scaling.data.clamp_(max=float(torch.log(torch.tensor(max_scale)).item()))
 
             # --- Refined Evaluation and Image Logging ---
             if iteration in args.test_iterations:
@@ -496,6 +516,24 @@ if __name__ == "__main__":
         type=float,
         default=None,
         help="Optional clamp max for env_map values after each optimizer step (e.g., 5.0).",
+    )
+    parser.add_argument(
+        "--lambda_scale_reg",
+        type=float,
+        default=0.0,
+        help="Penalize oversized Gaussians to prevent scale blow-up; weight for (relu(scale_max - thresh)^2).",
+    )
+    parser.add_argument(
+        "--scale_reg_max_ratio",
+        type=float,
+        default=0.1,
+        help="Scale threshold as a ratio of scene extent for scale regularization (thresh = ratio * cameras_extent).",
+    )
+    parser.add_argument(
+        "--scale_clamp_max_ratio",
+        type=float,
+        default=None,
+        help="Optional hard clamp on Gaussian scales (ratio * cameras_extent), applied after each optimizer step.",
     )
     parser.add_argument("--no_env_gradient_scaling", action="store_true")
     parser.add_argument(
