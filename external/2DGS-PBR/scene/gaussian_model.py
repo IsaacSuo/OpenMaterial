@@ -51,6 +51,10 @@ class GaussianModel:
         self.max_sh_degree = sh_degree
         self.use_pbr = use_pbr  # PBR mode flag
 
+        # Roughness bounds (can be overridden by training script).
+        self.roughness_min = 0.02
+        self.roughness_max = 0.999
+
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -135,8 +139,12 @@ class GaussianModel:
 
     @property
     def get_roughness(self):
-        """Get roughness constrained to [0.1, 0.999] to avoid too smooth surfaces"""
-        return torch.clamp(self.roughness_activation(self._roughness), min=0.1, max=0.999)
+        """Get roughness constrained to [roughness_min, roughness_max]"""
+        return torch.clamp(
+            self.roughness_activation(self._roughness),
+            min=float(self.roughness_min),
+            max=float(self.roughness_max),
+        )
 
     @property
     def get_metallic(self):

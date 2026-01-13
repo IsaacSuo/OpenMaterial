@@ -83,6 +83,8 @@ def training_pbr_static(dataset, opt, pipe, args):
     pcd = fetchPly(args.gt_ply)
     
     gaussians = GaussianModel(dataset.sh_degree, use_pbr=True)
+    gaussians.roughness_min = float(getattr(args, "roughness_min", 0.02))
+    gaussians.roughness_max = float(getattr(args, "roughness_max", 0.999))
     
     # Note: We use a placeholder spatial_lr_scale=1.0 initially.
     # It will be updated after Scene creation when we know the true extent.
@@ -560,6 +562,36 @@ if __name__ == "__main__":
     )
     parser.add_argument("--no_env_gradient_scaling", action="store_true")
     parser.add_argument(
+        "--roughness_min",
+        type=float,
+        default=0.02,
+        help="Minimum roughness clamp (lower allows sharper highlights; too low can introduce noise).",
+    )
+    parser.add_argument(
+        "--roughness_max",
+        type=float,
+        default=0.999,
+        help="Maximum roughness clamp.",
+    )
+    parser.add_argument(
+        "--albedo_lr",
+        type=float,
+        default=5e-4,
+        help="Learning rate for albedo (lower helps prevent baking specular into albedo).",
+    )
+    parser.add_argument(
+        "--roughness_lr",
+        type=float,
+        default=5e-4,
+        help="Learning rate for roughness (higher helps explain highlights via roughness instead of albedo).",
+    )
+    parser.add_argument(
+        "--metallic_lr",
+        type=float,
+        default=2e-4,
+        help="Learning rate for metallic.",
+    )
+    parser.add_argument(
         "--supervise_background",
         action="store_true",
         help="Supervise full composite (object + background). If unset and gt_alpha_mask exists, L1/SSIM is computed only on the mask region to avoid black-background supervision.",
@@ -602,5 +634,8 @@ if __name__ == "__main__":
     opt.lambda_pbr = args.lambda_pbr
     opt.lambda_pbr_reg = args.lambda_pbr_reg
     opt.lambda_env_tv = args.lambda_env_tv
+    opt.albedo_lr = args.albedo_lr
+    opt.roughness_lr = args.roughness_lr
+    opt.metallic_lr = args.metallic_lr
     
     training_pbr_static(lp.extract(args), opt, pp.extract(args), args)
