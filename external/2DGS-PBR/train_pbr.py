@@ -192,6 +192,12 @@ def training_pbr_static(dataset, opt, pipe, args):
 
         pred = shaded_obj * alpha_map + bg_env * (1.0 - alpha_map)
 
+        alpha_sup_loss = torch.tensor(0.0, device="cuda")
+        if mask is not None:
+            lambda_alpha = float(getattr(args, "lambda_alpha", 0.0) or 0.0)
+            if lambda_alpha > 0:
+                alpha_sup_loss = lambda_alpha * torch.abs(alpha_map - mask).mean()
+
         # Composite supervision weights:
         # - Default: if gt_alpha_mask exists, supervise reconstruction only on the object region
         #   to avoid forcing env_light to match matted/black GT backgrounds.
@@ -243,7 +249,7 @@ def training_pbr_static(dataset, opt, pipe, args):
         )
         recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
 
-        total_loss = opt.lambda_rgb * recon_loss + env_tv_loss + env_smooth_loss + scale_reg_loss + pbr_reg_loss
+        total_loss = opt.lambda_rgb * recon_loss + env_tv_loss + env_smooth_loss + scale_reg_loss + alpha_sup_loss + pbr_reg_loss
 
         if not torch.isfinite(total_loss):
             raise FloatingPointError(
@@ -291,6 +297,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                     f"lambda_env_tv*tv={env_tv_loss.item():.6f}, "
                     f"lambda_env_smooth*smooth={env_smooth_loss.item():.6f}, "
                     f"lambda_scale_reg*scale={scale_reg_loss.item():.6f}, "
+                    f"lambda_alpha*alpha={alpha_sup_loss.item():.6f}, "
                     f"lambda_pbr_reg*reg={pbr_reg_loss.item():.6f}) | "
                     f"recon={recon_loss.item():.6f} (L1={Ll1.item():.6f}, 1-SSIM={(1.0-ssim_val).item():.6f}) | "
                     f"tv_unscaled={env_tv_unscaled:.6e} reg_unscaled={pbr_reg_unscaled:.6e} | "
@@ -337,6 +344,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                 tb_writer.add_scalar('train/recon_l1', Ll1.item(), iteration)
                 tb_writer.add_scalar('train/recon_ssim_term', (1.0 - ssim_val).item(), iteration)
                 tb_writer.add_scalar('train/env_tv_loss', env_tv_loss.item(), iteration)
+                tb_writer.add_scalar('train/alpha_sup_loss', alpha_sup_loss.item(), iteration)
                 tb_writer.add_scalar('train/pbr_reg_loss', pbr_reg_loss.item(), iteration)
 
                 # Unscaled components (useful for tuning lambdas)
@@ -557,6 +565,12 @@ if __name__ == "__main__":
         type=float,
         default=None,
         help="Optional clamp max for env_map values after each optimizer step (e.g., 5.0).",
+    )
+    parser.add_argument(
+        "--lambda_alpha",
+        type=float,
+        default=0.0,
+        help="Supervise rendered alpha (rend_alpha) to match gt_alpha_mask to prevent opacity cheating.",
     )
     parser.add_argument(
         "--lambda_scale_reg",
