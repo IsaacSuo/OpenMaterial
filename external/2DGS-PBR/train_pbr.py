@@ -18,7 +18,6 @@ import torch
 import sys
 import uuid
 import math
-import torch.nn.functional as F
 from argparse import ArgumentParser, Namespace
 from random import randint
 from tqdm import tqdm
@@ -479,23 +478,13 @@ def training_pbr_static(dataset, opt, pipe, args):
 
                             rend_normal = render_pkg.get("rend_normal")
                             if rend_normal is not None:
-                                # rend_normal is an accumulated (often premultiplied) quantity; normalize for visualization.
-                                n = rend_normal / (alpha_map + 1e-6)
-                                n = n / (n.norm(dim=0, keepdim=True) + 1e-6)
-                                norm_vis = torch.clamp(n * 0.5 + 0.5, 0, 1)
+                                norm_vis = torch.clamp(rend_normal * 0.5 + 0.5, 0, 1)
                                 tb_writer.add_image(f"{prefix}/5_normal", norm_vis, iteration)
 
                             if depth_map is not None:
-                                # Depth is 0 in empty/background regions; normalize based on valid pixels.
-                                valid = alpha_map > 1e-3
-                                if valid.any():
-                                    d = depth_map.clone()
-                                    d[~valid] = 0
-                                    d_max = d.max()
-                                else:
-                                    d_max = depth_map.max()
+                                d_max = depth_map.max()
                                 depth_norm = depth_map / d_max if d_max > 0 else depth_map
-                                depth_vis = colormap(depth_norm.detach().cpu().numpy()[0], cmap='turbo')
+                                depth_vis = colormap(depth_norm.cpu().numpy()[0], cmap='turbo')
                                 tb_writer.add_image(f"{prefix}/6_depth", depth_vis, iteration)
 
                             # Optional pseudo-GT visualizations (if present on disk and --load_pseudo_gt enabled)
