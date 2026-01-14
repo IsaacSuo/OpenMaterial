@@ -108,7 +108,7 @@ def training_pbr_static(dataset, opt, pipe, args):
     dummy_color = torch.zeros((gaussians.get_xyz.shape[0], 3), dtype=torch.float32, device="cuda")
 
     # 4. Environment Light
-    env_light = EnvironmentLight(args.env_map, resolution=256).cuda()
+    env_light = EnvironmentLight(args.env_map, resolution=args.env_map_res).cuda()
     env_light_optimizer = torch.optim.Adam(env_light.parameters(), lr=opt.env_light_lr)
     if not args.no_env_gradient_scaling:
         env_light.register_gradient_scaling_hook()
@@ -660,6 +660,7 @@ if __name__ == "__main__":
     parser.add_argument("--early_stopping_min_delta", type=float, default=1e-4, help="Minimum relative improvement to be considered significant")
     parser.add_argument("--early_stopping_interval", type=int, default=500, help="Interval (iterations) to check for improvement")
     parser.add_argument("--env_warmup_iters", type=int, default=1000, help="Number of iterations to optimize ONLY the environment map at the beginning.")
+    parser.add_argument("--env_map_res", type=int, default=1024, help="Resolution of the environment map (height). Width will be 2x height.")
     
     # Save/Test
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
