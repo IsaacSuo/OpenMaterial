@@ -278,8 +278,8 @@ class GaussianModel:
         rots = self._rotation_matrix_to_quaternion(R)
 
         # 4. Opacities
-        # Initialize as semi-opaque
-        opacities = self.inverse_opacity_activation(0.5 * torch.ones((points.shape[0], 1), dtype=torch.float, device="cuda"))
+        # Initialize as opaque (0.999) instead of semi-opaque (0.5)
+        opacities = self.inverse_opacity_activation(0.999 * torch.ones((points.shape[0], 1), dtype=torch.float, device="cuda"))
 
         # Set parameters
         self._xyz = nn.Parameter(points.requires_grad_(True))
