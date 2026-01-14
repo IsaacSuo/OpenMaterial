@@ -14,9 +14,36 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
 
+def _expand_mask_to_channels(mask: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Expand a single-channel mask to match the channel dimension of a tensor.
+
+    Supported:
+    - tensor: [C, H, W], mask: [1, H, W] -> [C, H, W]
+    - tensor: [B, C, H, W], mask: [B, 1, H, W] -> [B, C, H, W]
+    - tensor: [B, C, H, W], mask: [1, H, W] -> [1, C, H, W] (broadcastable to B)
+    """
+    if mask is None:
+        return None
+
+    if tensor.dim() == 3 and mask.dim() == 3:
+        if mask.shape[0] == 1 and tensor.shape[0] != 1:
+            return mask.expand(tensor.shape[0], -1, -1)
+        return mask
+
+    if tensor.dim() == 4:
+        if mask.dim() == 3:
+            mask = mask.unsqueeze(0)
+        if mask.dim() == 4 and mask.shape[1] == 1 and tensor.shape[1] != 1:
+            return mask.expand(-1, tensor.shape[1], -1, -1)
+        return mask
+
+    return mask
+
 def l1_loss(network_output, gt, mask=None):
     diff = torch.abs(network_output - gt)
     if mask is not None:
+        mask = _expand_mask_to_channels(mask, diff)
         return (diff * mask).sum() / (mask.sum() + 1e-8)
     return diff.mean()
 

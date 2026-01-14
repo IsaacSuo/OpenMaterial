@@ -13,15 +13,43 @@ import torch
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
+def _expand_mask_to_channels(mask: torch.Tensor, img: torch.Tensor) -> torch.Tensor:
+    """
+    Expand a single-channel mask to match the channel dimension of an image tensor.
+
+    Supported:
+    - img: [C, H, W], mask: [1, H, W] -> [C, H, W]
+    - img: [B, C, H, W], mask: [B, 1, H, W] -> [B, C, H, W]
+    - img: [B, C, H, W], mask: [1, H, W] -> [1, C, H, W] (broadcastable to B)
+    """
+    if mask is None:
+        return None
+
+    if img.dim() == 3 and mask.dim() == 3:
+        if mask.shape[0] == 1 and img.shape[0] != 1:
+            return mask.expand(img.shape[0], -1, -1)
+        return mask
+
+    if img.dim() == 4:
+        if mask.dim() == 3:
+            mask = mask.unsqueeze(0)
+        if mask.dim() == 4 and mask.shape[1] == 1 and img.shape[1] != 1:
+            return mask.expand(-1, img.shape[1], -1, -1)
+        return mask
+
+    return mask
+
 def mse(img1, img2, mask=None):
     diff_sq = ((img1 - img2)) ** 2
     if mask is not None:
+        mask = _expand_mask_to_channels(mask, diff_sq)
         return (diff_sq * mask).sum() / (mask.sum() + 1e-8)
     return diff_sq.reshape(img1.shape[0], -1).mean(1, keepdim=True)
 
 def psnr(img1, img2, mask=None):
     diff_sq = ((img1 - img2)) ** 2
     if mask is not None:
+        mask = _expand_mask_to_channels(mask, diff_sq)
         mse_val = (diff_sq * mask).sum() / (mask.sum() + 1e-8)
     else:
         mse_val = diff_sq.reshape(img1.shape[0], -1).mean(1, keepdim=True)
