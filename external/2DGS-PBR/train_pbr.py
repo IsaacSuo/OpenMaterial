@@ -665,6 +665,12 @@ if __name__ == "__main__":
     # Save/Test
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument(
+        "--test_interval",
+        type=int,
+        default=0,
+        help="If >0, run evaluation every N iterations (overrides --test_iterations).",
+    )
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--quiet", action="store_true")
@@ -677,6 +683,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
+
+    if args.test_interval and args.test_interval > 0:
+        args.test_iterations = list(range(args.test_interval, args.iterations + 1, args.test_interval))
+        if args.iterations not in args.test_iterations:
+            args.test_iterations.append(args.iterations)
+        args.test_iterations = sorted(set(args.test_iterations))
     
     # Transfer args to opt
     opt = op.extract(args)
