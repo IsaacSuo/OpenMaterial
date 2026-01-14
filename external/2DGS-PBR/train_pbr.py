@@ -161,6 +161,9 @@ def training_pbr_static(dataset, opt, pipe, args):
         
         gt_image = viewpoint_cam.original_image.cuda()
 
+        # [New] EnvMap Warmup Logic
+        is_env_warmup = iteration <= args.env_warmup_iters
+
         # --- PBR + Skybox Composite Supervision (no SH render loss) ---
         alpha_map = render_pkg.get("rend_alpha")
         if alpha_map is None:
@@ -195,7 +198,7 @@ def training_pbr_static(dataset, opt, pipe, args):
         alpha_sup_loss = torch.tensor(0.0, device="cuda")
         if mask is not None:
             lambda_alpha = float(getattr(args, "lambda_alpha", 0.0) or 0.0)
-            if lambda_alpha > 0:
+            if lambda_alpha > 0 and (not is_env_warmup):
                 alpha_sup_loss = lambda_alpha * torch.abs(alpha_map - mask).mean()
 
         # Composite supervision weights:
@@ -203,7 +206,11 @@ def training_pbr_static(dataset, opt, pipe, args):
         #   to avoid forcing env_light to match matted/black GT backgrounds.
         # - Opt-in: --supervise_background to supervise full composite (object + skybox).
         obj_mask = mask if mask is not None else alpha_map.detach()
-        if (not getattr(args, "supervise_background", False)) and (mask is not None):
+
+        if is_env_warmup:
+            # Warmup Phase: Force full-image supervision to let EnvMap see the background
+            recon_weight = torch.ones_like(alpha_map)
+        elif (not getattr(args, "supervise_background", False)) and (mask is not None):
             recon_weight = mask
         else:
             recon_weight = torch.ones_like(alpha_map)
@@ -215,7 +222,7 @@ def training_pbr_static(dataset, opt, pipe, args):
 
         scale_reg_loss = torch.tensor(0.0, device="cuda")
         lambda_scale_reg = float(getattr(args, "lambda_scale_reg", 0.0) or 0.0)
-        if lambda_scale_reg > 0:
+        if lambda_scale_reg > 0 and (not is_env_warmup):
             # Regularize in log-scale space to avoid exp overflow / NaN propagation.
             # _scaling stores log(scale); get_scaling = exp(_scaling).
             log_scale_max = gaussians._scaling.max(dim=1).values
@@ -226,19 +233,25 @@ def training_pbr_static(dataset, opt, pipe, args):
             scale_reg_loss = lambda_scale_reg * (scale_over_log ** 2).mean()
 
         reg_mask = mask if mask is not None else alpha_map.detach()
-        pbr_losses = compute_pbr_losses(
-            gbuffer_albedo,
-            gbuffer_roughness,
-            gbuffer_metallic,
-            alpha_map=reg_mask,
-            lambda_albedo_smooth=args.lambda_albedo_smooth,
-            lambda_roughness_smooth=args.lambda_roughness_smooth,
-            lambda_metallic_smooth=args.lambda_metallic_smooth,
-            lambda_metallic_prior=args.lambda_metallic_prior,
-            lambda_roughness_prior=args.lambda_roughness_prior,
-            lambda_albedo_chroma=args.lambda_albedo_chroma,
-        )
-        pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses["total_pbr_reg"]
+        
+        if is_env_warmup:
+            # Warmup Phase: Skip material regularization
+            pbr_losses = {"total_pbr_reg": torch.tensor(0.0, device="cuda")}
+            pbr_reg_loss = torch.tensor(0.0, device="cuda")
+        else:
+            pbr_losses = compute_pbr_losses(
+                gbuffer_albedo,
+                gbuffer_roughness,
+                gbuffer_metallic,
+                alpha_map=reg_mask,
+                lambda_albedo_smooth=args.lambda_albedo_smooth,
+                lambda_roughness_smooth=args.lambda_roughness_smooth,
+                lambda_metallic_smooth=args.lambda_metallic_smooth,
+                lambda_metallic_prior=args.lambda_metallic_prior,
+                lambda_roughness_prior=args.lambda_roughness_prior,
+                lambda_albedo_chroma=args.lambda_albedo_chroma,
+            )
+            pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses["total_pbr_reg"]
 
         # Full-image reconstruction loss (PBR object + skybox), with extra object-region weighting.
         Ll1 = l1_loss(pred, gt_image, mask=recon_weight)
@@ -275,6 +288,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             
             if iteration % 10 == 0:
                 progress_bar.set_postfix({
+                    "Status": "Warmup" if is_env_warmup else "Normal",
                     "Tot": f"{ema_total_for_log:.{5}f}",
                     "Recon": f"{ema_recon_for_log:.{5}f}",
                     "Env": f"{ema_env_for_log:.{2}e}",
@@ -391,9 +405,14 @@ def training_pbr_static(dataset, opt, pipe, args):
                 torch.save(env_light.state_dict(), os.path.join(scene.model_path, f"env_light_{iteration}.pth"))
 
             # Step
-            gaussians.optimizer.step()
+            # [EnvMap Warmup] Only step Gaussians if NOT in warmup phase
+            if not is_env_warmup:
+                gaussians.optimizer.step()
+            
+            # ALWAYS zero grad for Gaussians to prevent accumulation during warmup
             gaussians.optimizer.zero_grad(set_to_none=True)
             
+            # Always step EnvMap
             env_light_optimizer.step()
             env_light_optimizer.zero_grad(set_to_none=True)
 
@@ -640,6 +659,7 @@ if __name__ == "__main__":
     parser.add_argument("--early_stopping_patience", type=int, default=3, help="Number of checks with no improvement before stopping")
     parser.add_argument("--early_stopping_min_delta", type=float, default=1e-4, help="Minimum relative improvement to be considered significant")
     parser.add_argument("--early_stopping_interval", type=int, default=500, help="Interval (iterations) to check for improvement")
+    parser.add_argument("--env_warmup_iters", type=int, default=1000, help="Number of iterations to optimize ONLY the environment map at the beginning.")
     
     # Save/Test
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
