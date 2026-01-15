@@ -82,6 +82,7 @@ def _run_pbr_eval(
     background: torch.Tensor,
     dummy_color: torch.Tensor,
     env_light,
+    log_gt: bool = False,
 ):
     print(f"\n[ITER {iteration}] Running Evaluation...")
     torch.cuda.empty_cache()
@@ -140,7 +141,7 @@ def _run_pbr_eval(
             if tb_writer and (cam_idx < 4):
                 prefix = f"{config['name']}_view_{viewpoint.image_name}"
                 tb_writer.add_image(f"{prefix}/0_render_composite", pred, iteration)
-                if iteration == 0:
+                if log_gt:
                     tb_writer.add_image(f"{prefix}/0_gt", gt_image, iteration)
                 tb_writer.add_image(f"{prefix}/1_albedo", albedo, iteration)
                 tb_writer.add_image(f"{prefix}/2_roughness", rough.repeat(3, 1, 1), iteration)
@@ -243,6 +244,8 @@ def training_pbr_static(dataset, opt, pipe, args):
 
     progress_bar = tqdm(range(1, opt.iterations + 1), desc="Training Static PBR")
 
+    first_eval_iter = min(args.test_iterations) if getattr(args, "test_iterations", None) else None
+
     if getattr(args, "eval_first", False):
         _run_pbr_eval(
             tb_writer=tb_writer,
@@ -253,6 +256,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             background=background,
             dummy_color=dummy_color,
             env_light=env_light,
+            log_gt=True,
         )
 
     first_iter = 1
@@ -564,6 +568,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                     background=background,
                     dummy_color=dummy_color,
                     env_light=env_light,
+                    log_gt=(first_eval_iter is not None and iteration == first_eval_iter),
                 )
 
             # NO Densification!
