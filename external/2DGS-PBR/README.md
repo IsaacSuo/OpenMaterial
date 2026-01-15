@@ -1,212 +1,414 @@
-# 2D Gaussian Splatting for Geometrically Accurate Radiance Fields
+# 2DGS-PBR (Static Geometry): Materials + Environment Light
 
-[Project page](https://surfsplatting.github.io/) | [Paper](https://arxiv.org/pdf/2403.17888) | [Video](https://www.youtube.com/watch?v=oaHCtB6yiKU) | [Surfel Rasterizer (CUDA)](https://github.com/hbb1/diff-surfel-rasterization) | [Surfel Rasterizer (Python)](https://colab.research.google.com/drive/1qoclD7HJ3-o0O1R8cvV3PxLhoDCMsH8W?usp=sharing) | [DTU+COLMAP (3.5GB)](https://drive.google.com/drive/folders/1SJFgt8qhQomHX55Q4xSvYE2C6-8tFll9) | [SIBR Viewer Pre-built for Windows](https://github.com/RongLiu-Leo/Gaussian-Splatting-Monitor/releases/download/v1.0/GS_Monitor.zip) | [Web Viewer](https://github.com/mkkellogg/GaussianSplats3D) <br>
+## English
 
-![Teaser image](assets/teaser.jpg)
+This directory contains a static-geometry PBR training/rendering pipeline:
 
-This repo contains the official implementation for the paper "2D Gaussian Splatting for Geometrically Accurate Radiance Fields". Our work represents a scene with a set of 2D oriented disks (surface elements) and rasterizes the surfels with [perspective correct differentiable raseterization](https://colab.research.google.com/drive/1qoclD7HJ3-o0O1R8cvV3PxLhoDCMsH8W?usp=sharing). Our work also develops regularizations that enhance the reconstruction quality. We also devise meshing approaches for Gaussian splatting.
+- Initialize geometry from a dense point cloud (`--gt_ply`) and **lock** `xyz/rotation` (no densification).
+- Optimize: `opacity/scale`, PBR materials (`albedo/roughness/metallic`), and a learnable environment map (`env_light`).
+- Supervise the composite image: `PBR(object) * alpha + skybox(env_map) * (1-alpha)`.
 
-
-## ⭐ New Features 
-- 2025/12/19: Our work is featured in an in-depth blog post on [LearnOpenCV](https://learnopencv.com/)! Thanks to [Shubham Anand](https://www.linkedin.com/in/shubham-anand-91a10b211/).
-- 2024/07/20: Web-based viewer [GaussianSplats3D](https://github.com/mkkellogg/GaussianSplats3D) also supports 2DGS. Thanks to [Mark Kellogg](https://github.com/mkkellogg).
-- 2024/07/19: [Colab Notebook](https://github.com/atakan-topaloglu/2d_gaussian_splatting_colab) is supported! Thanks to [atakan-topaloglu](https://github.com/atakan-topaloglu)
-- 2024/06/10: [SIBR Viewer](https://github.com/RongLiu-Leo/2d-gaussian-splatting) is supported! Thanks to [Rong](https://github.com/RongLiu-Leo/).
-- 2024/06/05: [Remote Viewer](https://github.com/hwanhuh/2D-GS-Viser-Viewer) based on Viser is supported! Thanks to [HwanHeo](https://github.com/hwanhuh).
-- 2024/05/30:  Fixed a bug related to unbounded meshing. The foreground mesh quality should now be consistent with the bounded mesh.
-- 2024/05/17: Improve training speed by 30%~40% through the [cuda operator fusing](https://github.com/hbb1/diff-surfel-rasterization/pull/7). Please update the diff-surfel-rasterization submodule if you have already installed it. 
-    ```bash
-    git submodule update --remote  
-    pip install submodules/diff-surfel-rasterization
-    ```
-- 2024/05/05: Important updates - Now our algorithm supports **unbounded mesh extraction**!
-Our key idea is to contract the space into a sphere and then perform **adaptive TSDF truncation**. 
-
-![visualization](assets/unbounded.gif)
-
-## 🎓 Community Resources & Tutorials
-
-- **gsplat library documentation** (official rasterization API reference)  
-  https://docs.gsplat.studio/main/apis/rasterization.html#id1
-
-- **GaussianSplats3D** – Popular WebGL/Three.js viewer with strong community support  
-  https://github.com/mkkellogg/GaussianSplats3D
-
-- **SuperSplat** – High-performance WebGPU viewer by PlayCanvas  
-  https://github.com/playcanvas/supersplat
-
-- **In-Depth Practitioner Guide** – Comprehensive tutorial on the full 2D Gaussian Splatting pipeline (theory to implementation) by Shubham Anand  
-  [LearnOpenCV Blog Post](https://learnopencv.com/2d-gaussian-splatting/)
-
-- **Diff-Surfel-Tracing** - A differentiable ray-tracing implementation built on the surfel representation by [xbillowy](https://github.com/xbillowy)
-   https://github.com/xbillowy/diff-surfel-tracing
-
-## SIBR Viewer
-
-
-https://github.com/RongLiu-Leo/2d-gaussian-splatting/assets/102014841/b75dd9a7-e3ee-4666-99ff-8c9121ff66dc
-
-
-The Pre-built Viewer for Windows can be found [here](https://github.com/RongLiu-Leo/Gaussian-Splatting-Monitor/releases/download/v1.0/GS_Monitor.zip). If you use Ubuntu or want to check the viewer usage, please refer to [GS Monitor](https://github.com/RongLiu-Leo/Gaussian-Splatting-Monitor).
-### How to use
-Firstly open the viewer, 
-```shell
-<path to downloaded/compiled viewer>/bin/SIBR_remoteGaussian_app_rwdi
-```
-and then
-```shell
-# Monitor the training process
-python train.py -s <path to COLMAP or NeRF Synthetic dataset> 
-# View the trained model
-python view.py -s <path to COLMAP or NeRF Synthetic dataset> -m <path to trained model> 
-```
-
-## Installation
+### Install (pip venv)
 
 ```bash
-# download
-git clone https://github.com/hbb1/2d-gaussian-splatting.git --recursive
-
-# if you have an environment used for 3dgs, use it
-# if not, create a new environment
-conda env create --file environment.yml
-conda activate surfel_splatting
-```
-## Training
-To train a scene, simply use
-```bash
-python train.py -s <path to COLMAP or NeRF Synthetic dataset>
-```
-Commandline arguments for regularizations
-```bash
---lambda_normal  # hyperparameter for normal consistency
---lambda_distortion # hyperparameter for depth distortion
---depth_ratio # 0 for mean depth and 1 for median depth, 0 works for most cases
-```
-**Tips for adjusting the parameters on your own dataset:**
-- For unbounded/large scenes, we suggest using mean depth, i.e., ``depth_ratio=0``,  for less "disk-aliasing" artifacts.
-
-## Testing
-### Bounded Mesh Extraction
-To export a mesh within a bounded volume, simply use
-```bash
-python render.py -m <path to pre-trained model> -s <path to COLMAP dataset> 
-```
-Commandline arguments you should adjust accordingly for meshing for bounded TSDF fusion, use
-```bash
---depth_ratio # 0 for mean depth and 1 for median depth
---voxel_size # voxel size
---depth_trunc # depth truncation
-```
-If these arguments are not specified, the script will automatically estimate them using the camera information.
-### Unbounded Mesh Extraction
-To export a mesh with an arbitrary size, we devised an unbounded TSDF fusion with space contraction and adaptive truncation.
-```bash
-python render.py -m <path to pre-trained model> -s <path to COLMAP dataset> --mesh_res 1024
+python -m venv om
+source om/bin/activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
 ```
 
-## Quick Examples
-Assuming you have downloaded [MipNeRF360](https://jonbarron.info/mipnerf360/), simply use
-```bash
-python train.py -s <path to m360>/<garden> -m output/m360/garden
-# use our unbounded mesh extraction!!
-python render.py -s <path to m360>/<garden> -m output/m360/garden --unbounded --skip_test --skip_train --mesh_res 1024
-# or use the bounded mesh extraction if you focus on foreground
-python render.py -s <path to m360>/<garden> -m output/m360/garden --skip_test --skip_train --mesh_res 1024
-```
-If you have downloaded the [DTU dataset](https://drive.google.com/drive/folders/1SJFgt8qhQomHX55Q4xSvYE2C6-8tFll9), you can use
-```bash
-python train.py -s <path to dtu>/<scan105> -m output/date/scan105 -r 2 --depth_ratio 1
-python render.py -r 2 --depth_ratio 1 --skip_test --skip_train
-```
-**Custom Dataset**: We use the same COLMAP loader as 3DGS, you can prepare your data following [here](https://github.com/graphdeco-inria/gaussian-splatting?tab=readme-ov-file#processing-your-own-scenes). 
+### Inputs
 
-> [!WARNING] 
-> In our **preprocessed DTU dataset**, we store the mask in the alpha channel. When using the **DTU dataset** in the [gaussian-splatting repository](https://github.com/graphdeco-inria/gaussian-splatting), please note that the background may be masked. To train DTU with background, we have commented [these lines](https://github.com/hbb1/2d-gaussian-splatting/blob/df1f6c684cc4e41a34937fd45a7847260e9c6cd7/scene/cameras.py#L43C1-L48C38) out.
+**Dataset (`-s`)**
 
-## Full evaluation
-We provide scripts to evaluate our method of novel view synthesis and geometric reconstruction.
-<details>
-<summary><span style="font-weight: bold;">Explanation of Performance Differences to the Paper</span></summary>
+Supported dataset layouts:
 
-We have re-implemented the repository for improved efficiency, which has slightly impacted performance compared to the original paper. Two factors have influenced this change:
+- COLMAP: dataset root contains `sparse/`
+- Blender/NeRF-synthetic: dataset root contains `transforms_train.json`
 
-- 📈 We fixed some minor bugs, such as a half-pixel shift in TSDF fusion, resulting in improved geometry reconstruction.
+**Foreground mask (optional)**
 
-- 📉 We removed the gradient of the low-pass filter used for densification, which reduces the number of Gaussians. As a result, the PSNR has slightly dropped, but we believe this trade-off is worthwhile for real-world applications.
+Mask is stored as `Camera.gt_alpha_mask`:
 
-You can report either the numbers from the paper or from this implementation, as long as they are discussed in a comparable setting.
-</details>
+- If images are RGBA/LA, the alpha channel is used.
+- For Blender-style datasets, `mask/xxx.png` is supported (preferred over image alpha) for `images/xxx.png`.
 
-#### Novel View Synthesis
-For novel view synthesis on [MipNeRF360](https://jonbarron.info/mipnerf360/) (which also works for other colmap datasets), use
-```bash
-python scripts/m360_eval.py -m60 <path to the MipNeRF360 dataset>
-```
+Mask convention: foreground/object = `1`.
 
-#### Geometry reconstruction
-For geometry reconstruction on DTU dataset, please download the preprocessed data from [Drive](https://drive.google.com/drive/folders/1SJFgt8qhQomHX55Q4xSvYE2C6-8tFll9) or [Hugging Face](https://huggingface.co/datasets/dylanebert/2DGS). You also need to download the ground truth [DTU point cloud](https://roboimagedata.compute.dtu.dk/?page_id=36). 
-```bash
-python scripts/dtu_eval.py --dtu <path to the preprocessed DTU dataset>   \
-     --DTU_Official <path to the official DTU dataset>
-```
-We provide <a> Evaluation Results (Pretrained, Meshes)</a>. 
-<details>
-<summary><span style="font-weight: bold;">Table Results</span></summary>
+**Dense geometry (`--gt_ply`)**
 
-Chamfer distance on DTU dataset (lower is better)
+`--gt_ply` is a dense point cloud (normals recommended):
 
-|   | 24   | 37   | 40   | 55   | 63   | 65   | 69   | 83   | 97   | 105  | 106  | 110  | 114  | 118  | 122  | Mean |
-|----------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
-| Paper    | 0.48 | 0.91 | 0.39 | 0.39 | 1.01 | 0.83 | 0.81 | 1.36 | 1.27 | 0.76 | 0.70 | 1.40 | 0.40 | 0.76 | 0.52 | 0.80 |
-| Reproduce | 0.46 | 0.80 | 0.33 | 0.37 | 0.95 | 0.86 | 0.80 | 1.25 | 1.24 | 0.67 | 0.67 | 1.24 | 0.39 | 0.64 | 0.47 | 0.74 |
-</details>
+- required: `x,y,z`
+- recommended: `nx,ny,nz`
+- optional: `red,green,blue` (used to initialize albedo)
 
-For geometry reconstruction on TnT dataset, please download the preprocessed [TnT_data](https://huggingface.co/datasets/ZehaoYu/gaussian-opacity-fields/tree/main). You also need to download the ground truth [TnT_GT](https://www.tanksandtemples.org/download/), including ground truth point cloud, alignments and cropfiles.
-
-> [!IMPORTANT]  
-> Due to historical issue, you should use open3d==0.10.0 for evaluating TNT.
+If you start from a mesh, sample it into a dense PLY:
 
 ```bash
-# use open3d 0.18.0, skip metrics
-python scripts/tnt_eval.py --TNT_data <path to the preprocessed TNT dataset>   \
-     --TNT_GT <path to the official TNT evaluation dataset> --skip_metrics
-
-# use open3d 0.10.0, skip traing and rendering
-python scripts/tnt_eval.py --TNT_data <path to the preprocessed TNT dataset>   \
-     --TNT_GT <path to the official TNT evaluation dataset> --skip_training --skip_rendering
+python scripts/sample_mesh_to_ply.py \
+  --input_mesh <path_to_mesh.(obj|glb|ply|stl)> \
+  --output_ply <path_to_dense_point_cloud.ply> \
+  --num_points 1000000
 ```
-<details>
-<summary><span style="font-weight: bold;">Table Results</span></summary>
 
-F1 scores on TnT dataset (higher is better)
+### Train (static-geometry PBR)
 
-|    | Barn   | Caterpillar | Ignatius | Truck  | Meetingroom | Courthouse | Mean | 
-|--------|--------|-------------|----------|--------|-------------|------------|------------|
-| Reproduce | 0.41  | 0.23      | 0.51   | 0.45 | 0.17      | 0.15      | 0.32 |
-</details>
+Example (replace placeholders):
 
-
-## FAQ
-- **Training does not converge.**  If your camera's principal point does not lie at the image center, you may experience convergence issues. Our code only supports the ideal pinhole camera format, so you may need to make some modifications. Please follow the instructions provided [here](https://github.com/graphdeco-inria/gaussian-splatting/issues/144#issuecomment-1938504456) to make the necessary changes. We have also modified the rasterizer in the latest [commit](https://github.com/hbb1/diff-surfel-rasterization/pull/6) to support data accepted by 3DGS. To avoid further issues, please update to the latest commit.
-
-- **No mesh / Broken mesh.** When using the *Bounded mesh extraction* mode, it is necessary to adjust the `depth_trunc` parameter to perform TSDF fusion to extract meshes. On the other hand, *Unbounded mesh extraction* does not require tuning the parameters but is less efficient.  
-
-- **Can 3DGS's viewer be used to visualize 2DGS?** Technically, you can export 2DGS to 3DGS's ply file by appending an additional zero scale. However, due to the inaccurate affine projection of 3DGS's viewer, you may see some distorted artefacts. We are currently working on a viewer for 2DGS, so stay tuned for updates.
-
-## Acknowledgements
-This project is built upon [3DGS](https://github.com/graphdeco-inria/gaussian-splatting). The TSDF fusion for extracting mesh is based on [Open3D](https://github.com/isl-org/Open3D). The rendering script for MipNeRF360 is adopted from [Multinerf](https://github.com/google-research/multinerf/), while the evaluation scripts for DTU and Tanks and Temples dataset are taken from [DTUeval-python](https://github.com/jzhangbs/DTUeval-python) and [TanksAndTemples](https://github.com/isl-org/TanksAndTemples/tree/master/python_toolbox/evaluation), respectively. The fusing operation for accelerating the renderer is inspired by [Han's repodcue](https://github.com/Han230104/2D-Gaussian-Splatting-Reproduce). We thank all the authors for their great repos. 
-
-
-## Citation
-If you find our code or paper helps, please consider citing:
-```bibtex
-@inproceedings{Huang2DGS2024,
-    title={2D Gaussian Splatting for Geometrically Accurate Radiance Fields},
-    author={Huang, Binbin and Yu, Zehao and Chen, Anpei and Geiger, Andreas and Gao, Shenghua},
-    publisher = {Association for Computing Machinery},
-    booktitle = {SIGGRAPH 2024 Conference Papers},
-    year      = {2024},
-    doi       = {10.1145/3641519.3657428}
-}
+```bash
+python train_pbr.py \
+  -s <DATASET_ROOT>/<hash>/<scene_name> \
+  -m output/<scene_name>_pbr_geo_static/1/ \
+  --gt_ply <GT_ROOT>/<hash>/dense_sampled.ply \
+  --eval \
+  --test_interval 1000 \
+  --scaling_lr 0.001 \
+  --roughness_lr 0.01 \
+  --supervise_background
 ```
+
+#### `train_pbr.py` argument reference
+
+**Core paths**
+
+- `-s/--source_path`: dataset path
+- `-m/--model_path`: output path
+- `--gt_ply`: dense point cloud path
+
+**Run control**
+
+- `--iterations`: total iterations
+- `--save_iterations <i1 i2 ...>`: save checkpoints at these iterations
+- `--test_iterations <i1 i2 ...>`: run evaluation at these iterations
+- `--test_interval <N>`: run evaluation every `N` iterations (overrides `--test_iterations`)
+- `--eval`: enable train/test split for supported datasets
+- `--eval_first`: run evaluation once at iteration `0` (before any optimizer steps)
+
+**Learning rates (gaussians / materials / env)**
+
+- `--opacity_lr`: opacity LR
+- `--scaling_lr`: scaling LR
+- `--albedo_lr`: albedo LR
+- `--roughness_lr`: roughness LR
+- `--metallic_lr`: metallic LR
+- `--env_light_lr`: environment map LR
+
+**Initialization**
+
+- `--roughness_init`: initial roughness value in `[0,1]` (applied to all points before training)
+
+**Environment light**
+
+- `--env_map`: initial environment map (`.hdr/.exr/.png`); if omitted, starts from a learnable gray map
+- `--env_map_res`: env_map resolution height (width is `2*H`)
+- `--lambda_env_tv`: solid-angle weighted TV regularization weight
+- `--lambda_env_smooth`: solid-angle weighted Laplacian regularization weight
+- `--env_clamp_min`, `--env_clamp_max`: clamp env_map values after each step
+- `--no_env_gradient_scaling`: disable solid-angle gradient scaling hook
+- `--env_warmup_iters`: warmup iterations where only env_map is optimized
+
+**Reconstruction supervision (composite image)**
+
+- `--lambda_rgb`: weight for composite reconstruction loss
+- `--lambda_dssim`: SSIM mixing weight (reconstruction is `(1-lambda_dssim)*L1 + lambda_dssim*(1-SSIM)`)
+- `--supervise_background`: supervise full composite even when `gt_alpha_mask` exists
+- `--lambda_pbr`: extra reconstruction weight on object region (mask if available, else alpha)
+- `--lambda_alpha`: supervise `rend_alpha` toward `gt_alpha_mask`
+
+**Material regularization**
+
+- `--lambda_pbr_reg`: global scale on material regularization
+- `--lambda_albedo_smooth`
+- `--lambda_roughness_smooth`
+- `--lambda_metallic_smooth`
+- `--lambda_metallic_prior`
+- `--lambda_roughness_prior`
+- `--lambda_albedo_chroma`
+
+**Parameter bounds / stability**
+
+- `--roughness_min`, `--roughness_max`: clamp range for roughness
+- `--lambda_scale_reg`: soft penalty for oversized gaussians
+- `--scale_reg_max_ratio`: scale threshold ratio (relative to scene extent) used by `lambda_scale_reg`
+- `--scale_clamp_max_ratio`: hard clamp on gaussian scales (ratio * scene extent)
+
+**Early stopping**
+
+- `--enable_early_stopping`
+- `--early_stopping_patience`
+- `--early_stopping_min_delta`
+- `--early_stopping_interval`
+
+**Logging / debug**
+
+- `--log_interval`: print detailed breakdown every N iterations (`0` disables)
+- `--quiet`: reduce console output
+
+#### Loss function reference (what is optimized)
+
+`train_pbr.py` optimizes a weighted sum of reconstruction + regularization terms:
+
+**1) Composite reconstruction loss**
+
+- `pred = shaded_obj * alpha + bg_env * (1 - alpha)`
+- `recon_loss = (1 - lambda_dssim) * L1(pred, gt; weight=recon_weight) + lambda_dssim * (1 - SSIM(pred, gt; weight=recon_weight))`
+- `recon_weight`:
+  - warmup (`iter <= env_warmup_iters`): full image (`ones`)
+  - otherwise: if `gt_alpha_mask` exists and `--supervise_background` is NOT set, use GT mask (foreground-only)
+  - otherwise: full image; optionally increased on object region by `--lambda_pbr`
+
+**2) Alpha supervision (optional)**
+
+- `alpha_sup_loss = lambda_alpha * mean(|rend_alpha - gt_alpha_mask|)` (when GT mask exists and enabled)
+
+**3) Environment map regularization**
+
+- `env_tv_loss = lambda_env_tv * tv_loss_weighted(env_map)`
+- `env_smooth_loss = lambda_env_smooth * smoothness_loss_weighted(env_map)`
+
+**4) Material regularization (masked)**
+
+- `reg_mask = gt_alpha_mask if available else rend_alpha.detach()`
+- `compute_pbr_losses(...)` returns: `albedo_smooth`, `roughness_smooth`, `metallic_smooth`, `metallic_prior`, `roughness_prior`, `albedo_chroma`, `total_pbr_reg`
+- `pbr_reg_loss = lambda_pbr_reg * total_pbr_reg`
+
+**5) Scale blow-up prevention (optional)**
+
+- threshold is `scale_reg_max_ratio * scene_extent`
+- `scale_reg_loss = lambda_scale_reg * mean(relu(log_scale_max - log_thresh)^2)`
+
+**Total loss**
+
+`total_loss = lambda_rgb * recon_loss + env_tv_loss + env_smooth_loss + scale_reg_loss + alpha_sup_loss + pbr_reg_loss`
+
+Outputs (under `-m`):
+
+- `point_cloud/iteration_<iter>/point_cloud.ply`
+- `env_light_<iter>.pth`
+
+### Render (PBR outputs)
+
+```bash
+python render_pbr.py -m <output_path> --compute_metrics
+```
+
+#### `render_pbr.py` argument reference
+
+- `-m/--model_path`: output path to render from
+- `--iteration`: which iteration to render (`-1` selects latest)
+- `--env_map`: override env map path (used when no saved `env_light_*.pth` is found)
+- `--compute_metrics`: compute PSNR/SSIM (and LPIPS if available)
+- `--skip_train`, `--skip_test`: skip rendering those splits
+
+Outputs are written under:
+
+- `<output_path>/train/ours_<iter>/...`
+- `<output_path>/test/ours_<iter>/...`
+
+including `pbr_shaded/`, `albedo/`, `roughness/`, `metallic/`, `normal/`, `depth/`.
+
+---
+
+## 中文
+
+本目录包含一个“静态几何”的 PBR 训练/渲染流程：
+
+- 从 dense 点云 `--gt_ply` 初始化几何，并在训练中 **锁定** `xyz/rotation`（不做 densification）。
+- 只优化：`opacity/scale`、PBR 材质（`albedo/roughness/metallic`）与可学习环境贴图（`env_light`）。
+- 监督的是合成图：`PBR(object) * alpha + skybox(env_map) * (1-alpha)`。
+
+### 安装（pip venv）
+
+```bash
+python -m venv om
+source om/bin/activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
+```
+
+### 输入
+
+**数据集（`-s`）**
+
+支持的数据目录结构：
+
+- COLMAP：数据集根目录包含 `sparse/`
+- Blender/NeRF Synthetic：数据集根目录包含 `transforms_train.json`
+
+**前景 mask（可选）**
+
+mask 会存到 `Camera.gt_alpha_mask`：
+
+- 如果图片是 RGBA/LA，使用 alpha 通道作为 mask。
+- 对 Blender 风格数据，支持 `images/xxx.png` 对应 `mask/xxx.png`（优先级高于图片 alpha）。
+
+mask 约定：前景/物体 = `1`。
+
+**稠密几何（`--gt_ply`）**
+
+`--gt_ply` 是稠密点云（强烈建议带法线）：
+
+- 必需：`x,y,z`
+- 建议：`nx,ny,nz`
+- 可选：`red,green,blue`（用于初始化 albedo）
+
+如果你的输入是 mesh，可采样成 dense PLY：
+
+```bash
+python scripts/sample_mesh_to_ply.py \
+  --input_mesh <path_to_mesh.(obj|glb|ply|stl)> \
+  --output_ply <path_to_dense_point_cloud.ply> \
+  --num_points 1000000
+```
+
+### 训练（静态几何 PBR）
+
+运行示例（替换占位符）：
+
+```bash
+python train_pbr.py \
+  -s <DATASET_ROOT>/<hash>/<scene_name> \
+  -m output/<scene_name>_pbr_geo_static/1/ \
+  --gt_ply <GT_ROOT>/<hash>/dense_sampled.ply \
+  --eval \
+  --test_interval 1000 \
+  --scaling_lr 0.001 \
+  --roughness_lr 0.01 \
+  --supervise_background
+```
+
+#### `train_pbr.py` 参数说明
+
+**核心路径参数**
+
+- `-s/--source_path`：数据集路径
+- `-m/--model_path`：输出目录
+- `--gt_ply`：稠密点云路径
+
+**运行控制**
+
+- `--iterations`：总迭代步数
+- `--save_iterations <i1 i2 ...>`：在指定步保存
+- `--test_iterations <i1 i2 ...>`：在指定步评测
+- `--test_interval <N>`：每 `N` 步评测一次（覆盖 `--test_iterations`）
+- `--eval`：启用 train/test 切分（依赖数据集 loader）
+
+**学习率（gaussians/材质/env）**
+
+- `--opacity_lr`：opacity 学习率
+- `--scaling_lr`：scaling 学习率
+- `--albedo_lr`：albedo 学习率
+- `--roughness_lr`：roughness 学习率
+- `--metallic_lr`：metallic 学习率
+- `--env_light_lr`：环境贴图学习率
+
+**环境贴图（env light）**
+
+- `--env_map`：环境贴图初始化文件（`.hdr/.exr/.png`）；不提供则从可学习的灰色 env 开始
+- `--env_map_res`：环境贴图高度分辨率（宽度为 `2*H`）
+- `--lambda_env_tv`：TV 正则权重（solid-angle 加权，适配经纬投影）
+- `--lambda_env_smooth`：Laplacian 平滑正则权重（solid-angle 加权）
+- `--env_clamp_min`, `--env_clamp_max`：每步更新后对 env_map 值做 clamp
+- `--no_env_gradient_scaling`：关闭 solid-angle 梯度缩放 hook
+- `--env_warmup_iters`：warmup 步数（warmup 期只优化 env_map）
+
+**重建监督（合成图）**
+
+- `--lambda_rgb`：合成图重建损失权重
+- `--lambda_dssim`：SSIM 混合系数（重建为 `(1-lambda_dssim)*L1 + lambda_dssim*(1-SSIM)`）
+- `--supervise_background`：即使有 `gt_alpha_mask` 也监督全图
+- `--lambda_pbr`：对物体区域额外加权（优先 GT mask，否则用 alpha）
+- `--lambda_alpha`：alpha 监督：让 `rend_alpha` 逼近 `gt_alpha_mask`
+
+**材质正则**
+
+- `--lambda_pbr_reg`：材质正则的总缩放权重
+- `--lambda_albedo_smooth`
+- `--lambda_roughness_smooth`
+- `--lambda_metallic_smooth`
+- `--lambda_metallic_prior`
+- `--lambda_roughness_prior`
+- `--lambda_albedo_chroma`
+
+**参数范围与稳定性**
+
+- `--roughness_min`, `--roughness_max`：roughness clamp 范围
+- `--lambda_scale_reg`：防止 gaussian 过大的 soft penalty
+- `--scale_reg_max_ratio`：尺度阈值比例（相对 scene extent），配合 `lambda_scale_reg`
+- `--scale_clamp_max_ratio`：对 scale 做 hard clamp（比例 * scene extent）
+
+**早停**
+
+- `--enable_early_stopping`
+- `--early_stopping_patience`
+- `--early_stopping_min_delta`
+- `--early_stopping_interval`
+
+**日志与调试**
+
+- `--log_interval`：每 N 步打印一次详细 loss 分解（`0` 关闭）
+- `--quiet`：减少控制台输出
+
+#### 损失函数说明（训练到底在优化什么）
+
+`train_pbr.py` 的总损失是“重建项 + 正则项”的加权和：
+
+**1）合成图重建损失**
+
+- `pred = shaded_obj * alpha + bg_env * (1 - alpha)`
+- `recon_loss = (1 - lambda_dssim) * L1(pred, gt; weight=recon_weight) + lambda_dssim * (1 - SSIM(pred, gt; weight=recon_weight))`
+- `recon_weight`：
+  - warmup（`iter <= env_warmup_iters`）：全图（全 1）
+  - 否则：若存在 `gt_alpha_mask` 且未开 `--supervise_background`，仅在 GT mask（前景）区域监督
+  - 否则：全图；并可用 `--lambda_pbr` 对物体区域额外加权
+
+**2）Alpha 监督（可选）**
+
+- `alpha_sup_loss = lambda_alpha * mean(|rend_alpha - gt_alpha_mask|)`（存在 GT mask 且启用时）
+
+**3）环境贴图正则**
+
+- `env_tv_loss = lambda_env_tv * tv_loss_weighted(env_map)`
+- `env_smooth_loss = lambda_env_smooth * smoothness_loss_weighted(env_map)`
+
+**4）材质正则（带 mask）**
+
+- `reg_mask = gt_alpha_mask (若存在)；否则使用 rend_alpha.detach()`
+- `compute_pbr_losses(...)` 分项：`albedo_smooth`, `roughness_smooth`, `metallic_smooth`, `metallic_prior`, `roughness_prior`, `albedo_chroma`, `total_pbr_reg`
+- `pbr_reg_loss = lambda_pbr_reg * total_pbr_reg`
+
+**5）scale 爆炸抑制（可选）**
+
+- 阈值为 `scale_reg_max_ratio * scene_extent`
+- `scale_reg_loss = lambda_scale_reg * mean(relu(log_scale_max - log_thresh)^2)`
+
+**总损失**
+
+`total_loss = lambda_rgb * recon_loss + env_tv_loss + env_smooth_loss + scale_reg_loss + alpha_sup_loss + pbr_reg_loss`
+
+输出（在 `-m` 目录下）：
+
+- `point_cloud/iteration_<iter>/point_cloud.ply`
+- `env_light_<iter>.pth`
+
+### 渲染（PBR 输出）
+
+```bash
+python render_pbr.py -m <output_path> --compute_metrics
+```
+
+#### `render_pbr.py` 参数说明
+
+- `-m/--model_path`：渲染输入目录
+- `--iteration`：指定迭代（`-1` 自动选择最新）
+- `--env_map`：找不到保存的 `env_light_*.pth` 时用外部 env_map
+- `--compute_metrics`：计算 PSNR/SSIM（可选 LPIPS）
+- `--skip_train`, `--skip_test`：跳过对应 split
+
+输出目录：
+
+- `<output_path>/train/ours_<iter>/...`
+- `<output_path>/test/ours_<iter>/...`
+
+包含：`pbr_shaded/`, `albedo/`, `roughness/`, `metallic/`, `normal/`, `depth/`。

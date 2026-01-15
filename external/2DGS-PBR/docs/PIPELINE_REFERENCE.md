@@ -86,6 +86,8 @@
   - `l1_loss()` 支持 mask（实现为加权平均）。
   - `ssim()` 支持 mask（当 mask 是单通道时会扩展到多通道避免 SSIM>1 的异常归一化）。
   - `compute_pbr_losses()`：材质图 TV + prior + chroma consistency，返回字典（含 `total_pbr_reg`）。
+- `utils/image_utils.py`：
+  - `psnr()` 支持 mask（会把单通道 mask 扩展到 RGB 通道，确保 masked PSNR 的归一化与 unmasked 一致）。
 
 ---
 
@@ -177,6 +179,10 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
   - `xyz` 来自点云点
   - `rotation` 从 normals 构造局部坐标系并转四元数
   - `scale` 通过 `simple_knn` 的 `distCUDA2` 估计邻域密度（注意代码对 NaN/inf 做了 `nan_to_num` 防护）
+
+如果你的上游是 mesh（而不是现成的 dense 点云），本仓库提供了转换/采样脚本：
+
+- `scripts/sample_mesh_to_ply.py`：使用 Open3D 对 mesh 做 Poisson-disk 采样，输出带法线的 dense PLY（可直接用作 `--gt_ply`）。
 
 ---
 
@@ -347,6 +353,7 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
    - `scale_clamp_max_ratio`：对 `gaussians._scaling` 做上界 clamp（以 `cameras_extent` 比例定义）
 13. 评估与保存：
    - 在 `test_iterations/save_iterations` 进行 render-eval、写 TensorBoard、保存 `point_cloud` 与 `env_light_*.pth`
+   - 若设置了 `--test_interval`，脚本会自动生成 `test_iterations = [N, 2N, ...]`（并确保包含最后一次迭代），用于周期性评测
 
 ### 7.3 早停（Early Stopping）
 
@@ -429,6 +436,11 @@ PBR 训练还会额外写：
 <a id="sec-11-deps"></a>
 ## 11. 依赖与可运行性（environment.yml）
 
+本目录同时提供了 conda 版本的 `environment.yml` 与 pip 版本的 `requirements.txt`：
+
+- `requirements.txt`：推荐用于“服务器已有可用 PyTorch/CUDA 轮子”的场景，包含两个本地 CUDA 扩展的 editable 安装（`submodules/diff-surfel-rasterization`、`submodules/simple-knn`）。
+- `environment.yml`：适合希望用 conda 一键创建环境的场景，但需要注意它对 PyTorch/CUDA/Open3D 的版本组合在某些机器上可能不可解，需要按实际服务器情况调整。
+
 `environment.yml` 定义了一个 conda env（`surfel_splatting`），关键点：
 
 - PyTorch + CUDA（`pytorch-cuda=13.0`，`pytorch=2.9.0`，`python=3.12`）
@@ -455,6 +467,15 @@ PBR 训练还会额外写：
 
 <a id="sec-13-troubleshooting"></a>
 ## 13. 常见坑与排查清单
+
+### 13.0 masked 指标的 mask 通道归一化
+
+本仓库的图像张量通常是 `[3,H,W]`，而 `gt_alpha_mask` 通常是 `[1,H,W]`。如果在计算 masked L1/PSNR 时不把 mask 扩展到 3 通道，会导致分母少一个通道因子，从而让 masked PSNR 系统性偏低（约 `10*log10(3) ≈ 4.77dB`）。
+
+对应修复位置：
+
+- `utils/loss_utils.py:l1_loss`：会把单通道 mask 扩展到与图像通道数一致
+- `utils/image_utils.py:psnr` / `utils/image_utils.py:mse`：同样会扩展 mask 再做归一化
 
 ### 13.1 `run_single_scene.sh` 与 `train_pbr.py` 参数不匹配
 

@@ -1,0 +1,34 @@
+# 2DGS-PBR pip requirements (server-aligned)
+#
+# Notes:
+# - Your server uses NVIDIA PyTorch wheels (e.g. torch==2.9.0a0+...nv25.10, CUDA 13.0).
+#   Those builds may NOT be available from PyPI. If torch/torchvision are already present
+#   (e.g. via system site-packages), you can keep them and skip re-installing.
+# - The two local CUDA extensions must be installed from source (editable installs below).
+
+# Core runtime
+numpy
+Pillow
+tqdm
+plyfile
+opencv-python
+open3d
+trimesh
+scikit-image
+mediapy
+lpips
+matplotlib
+imageio
+
+# Optional: silence torch/cuda FutureWarning about deprecated pynvml
+nvidia-ml-py
+
+# PyTorch stack (pin to the versions detected on your server; may require a custom index)
+torch==2.9.0a0+145a3a7bda.nv25.10
+torchvision==0.24.0a0+094e7af5
+# torchaudio is optional for this repo; install if you need it
+# torchaudio==2.9.0a0+...
+
+# Local CUDA extensions (must be installed from this repo)
+-e ./submodules/diff-surfel-rasterization
+-e ./submodules/simple-knn

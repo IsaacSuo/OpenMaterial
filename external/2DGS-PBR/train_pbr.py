@@ -29,7 +29,7 @@ from utils.pbr_utils import (
     compute_ray_directions_world_from_fov,
 )
 from utils.profiler import SimpleProfiler
-from utils.general_utils import safe_state, colormap
+from utils.general_utils import safe_state, colormap, inverse_sigmoid
 from utils.image_utils import psnr, render_net_image
 from scene import Scene, GaussianModel
 from scene.dataset_readers import fetchPly
@@ -72,6 +72,106 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
+@torch.no_grad()
+def _run_pbr_eval(
+    tb_writer,
+    iteration: int,
+    scene: Scene,
+    gaussians: GaussianModel,
+    pipe,
+    background: torch.Tensor,
+    dummy_color: torch.Tensor,
+    env_light,
+):
+    print(f"\n[ITER {iteration}] Running Evaluation...")
+    torch.cuda.empty_cache()
+
+    validation_configs = (
+        {'name': 'test', 'cameras': scene.getTestCameras()},
+        {'name': 'train', 'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, 20, 5)]},
+    )
+
+    for config in validation_configs:
+        cameras = config['cameras']
+        if not cameras:
+            continue
+
+        l1_test = 0.0
+        psnr_test = 0.0
+        l1_test_masked = 0.0
+        psnr_test_masked = 0.0
+        masked_count = 0
+
+        for cam_idx, viewpoint in enumerate(cameras):
+            render_pkg = render(viewpoint, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
+
+            ray_dirs = _get_ray_dirs_world(viewpoint)
+            bg_env = env_light.sample(ray_dirs).permute(2, 0, 1)
+
+            alpha_map = render_pkg["rend_alpha"]
+            denom = alpha_map + 1e-6
+
+            albedo = torch.clamp(render_pkg["gbuffer_albedo"] / denom, 0.0, 1.0)
+            rough = torch.clamp(render_pkg["gbuffer_roughness"] / denom, 0.1, 0.999)
+            metal = torch.clamp(render_pkg["gbuffer_metallic"] / denom, 0.0, 1.0)
+            normal = render_pkg["rend_normal"] / denom
+            depth_map = render_pkg.get("surf_depth")
+
+            shaded = screen_space_pbr_shading(
+                albedo, rough, metal,
+                normal, depth_map,
+                viewpoint.camera_center, viewpoint.world_view_transform,
+                env_light=env_light,
+                ray_dirs_world=ray_dirs,
+            )
+
+            pred = shaded * alpha_map + bg_env * (1.0 - alpha_map)
+            pred = torch.clamp(pred, 0.0, 1.0)
+            gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+            gt_mask = viewpoint.gt_alpha_mask.to("cuda") if viewpoint.gt_alpha_mask is not None else None
+
+            l1_test += l1_loss(pred, gt_image).item()
+            psnr_test += psnr(pred, gt_image).mean().item()
+            if gt_mask is not None:
+                l1_test_masked += l1_loss(pred, gt_image, mask=gt_mask).item()
+                psnr_test_masked += psnr(pred, gt_image, mask=gt_mask).mean().item()
+                masked_count += 1
+
+            if tb_writer and (cam_idx < 4):
+                prefix = f"{config['name']}_view_{viewpoint.image_name}"
+                tb_writer.add_image(f"{prefix}/0_render_composite", pred, iteration)
+                if iteration == 0:
+                    tb_writer.add_image(f"{prefix}/0_gt", gt_image, iteration)
+                tb_writer.add_image(f"{prefix}/1_albedo", albedo, iteration)
+                tb_writer.add_image(f"{prefix}/2_roughness", rough.repeat(3, 1, 1), iteration)
+                tb_writer.add_image(f"{prefix}/3_metallic", metal.repeat(3, 1, 1), iteration)
+                tb_writer.add_image(f"{prefix}/4_pbr_shaded_obj", shaded, iteration)
+                tb_writer.add_image(f"{prefix}/7_alpha", alpha_map.repeat(3, 1, 1), iteration)
+                if viewpoint.gt_alpha_mask is not None:
+                    tb_writer.add_image(
+                        f"{prefix}/8_gt_alpha_mask",
+                        viewpoint.gt_alpha_mask.to("cuda").repeat(3, 1, 1),
+                        iteration,
+                    )
+
+        l1_test /= len(cameras)
+        psnr_test /= len(cameras)
+        msg = f"  [ITER {iteration}] {config['name']} PSNR: {psnr_test:.4f}"
+        if masked_count > 0:
+            l1_test_masked /= masked_count
+            psnr_test_masked /= masked_count
+            msg += f" | PSNR(mask): {psnr_test_masked:.4f}"
+        print(msg)
+
+        if tb_writer:
+            tb_writer.add_scalar(f"{config['name']}/l1_loss", l1_test, iteration)
+            tb_writer.add_scalar(f"{config['name']}/psnr", psnr_test, iteration)
+            if masked_count > 0:
+                tb_writer.add_scalar(f"{config['name']}/l1_loss_masked", l1_test_masked, iteration)
+                tb_writer.add_scalar(f"{config['name']}/psnr_masked", psnr_test_masked, iteration)
+
+    torch.cuda.empty_cache()
+
 def training_pbr_static(dataset, opt, pipe, args):
     if args.gt_ply is None:
         raise ValueError("Error: --gt_ply argument is required for static geometry training.")
@@ -89,6 +189,16 @@ def training_pbr_static(dataset, opt, pipe, args):
     # Note: We use a placeholder spatial_lr_scale=1.0 initially.
     # It will be updated after Scene creation when we know the true extent.
     gaussians.create_from_dense_pcd(pcd, spatial_lr_scale=1.0)
+
+    # Optional: override initial roughness to a chosen physical value in [0, 1].
+    # Internally, _roughness is passed through sigmoid and then clamped.
+    roughness_init = getattr(args, "roughness_init", None)
+    if roughness_init is not None:
+        r = float(roughness_init)
+        r = max(1e-6, min(1.0 - 1e-6, r))
+        with torch.no_grad():
+            gaussians._roughness.data.fill_(float(inverse_sigmoid(torch.tensor(r)).item()))
+        print(f"Initialized roughness to {r} (pre-sigmoid={gaussians._roughness.data.mean().item():.4f})")
     
     # 2. Initialize Scene
     # Since gaussians._xyz is now populated, Scene will NOT re-initialize them from COLMAP.
@@ -132,7 +242,19 @@ def training_pbr_static(dataset, opt, pipe, args):
     check_interval = args.early_stopping_interval  # Check every N steps
 
     progress_bar = tqdm(range(1, opt.iterations + 1), desc="Training Static PBR")
-    
+
+    if getattr(args, "eval_first", False):
+        _run_pbr_eval(
+            tb_writer=tb_writer,
+            iteration=0,
+            scene=scene,
+            gaussians=gaussians,
+            pipe=pipe,
+            background=background,
+            dummy_color=dummy_color,
+            env_light=env_light,
+        )
+
     first_iter = 1
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
@@ -431,109 +553,18 @@ def training_pbr_static(dataset, opt, pipe, args):
                     with torch.no_grad():
                         gaussians._scaling.data.clamp_(max=float(torch.log(torch.tensor(max_scale)).item()))
 
-            # --- Refined Evaluation and Image Logging ---
+            # --- Evaluation and Image Logging ---
             if iteration in args.test_iterations:
-                print(f"\n[ITER {iteration}] Running Evaluation...")
-                torch.cuda.empty_cache()
-
-                # We test all test cameras, and a few train cameras for consistency check
-                validation_configs = (
-                    {'name': 'test', 'cameras': scene.getTestCameras()},
-                    {'name': 'train', 'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, 20, 5)]},
+                _run_pbr_eval(
+                    tb_writer=tb_writer,
+                    iteration=iteration,
+                    scene=scene,
+                    gaussians=gaussians,
+                    pipe=pipe,
+                    background=background,
+                    dummy_color=dummy_color,
+                    env_light=env_light,
                 )
-
-                for config in validation_configs:
-                    cameras = config['cameras']
-                    if not cameras:
-                        continue
-
-                    l1_test = 0.0
-                    psnr_test = 0.0
-                    l1_test_masked = 0.0
-                    psnr_test_masked = 0.0
-                    masked_count = 0
-
-                    for cam_idx, viewpoint in enumerate(cameras):
-                        render_pkg = render(viewpoint, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
-
-                        H, W = viewpoint.image_height, viewpoint.image_width
-                        ray_dirs = _get_ray_dirs_world(viewpoint)
-                        bg_env = env_light.sample(ray_dirs).permute(2, 0, 1)
-
-                        alpha_map = render_pkg["rend_alpha"]
-                        denom = alpha_map + 1e-6
-
-                        albedo = torch.clamp(render_pkg["gbuffer_albedo"] / denom, 0.0, 1.0)
-                        rough = torch.clamp(render_pkg["gbuffer_roughness"] / denom, 0.1, 0.999)
-                        metal = torch.clamp(render_pkg["gbuffer_metallic"] / denom, 0.0, 1.0)
-                        normal = render_pkg["rend_normal"] / denom
-                        depth_map = render_pkg.get("surf_depth")
-
-                        shaded = screen_space_pbr_shading(
-                            albedo, rough, metal,
-                            normal, depth_map,
-                            viewpoint.camera_center, viewpoint.world_view_transform,
-                            env_light=env_light,
-                            ray_dirs_world=ray_dirs,
-                        )
-
-                        pred = shaded * alpha_map + bg_env * (1.0 - alpha_map)
-                        pred = torch.clamp(pred, 0.0, 1.0)
-                        gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
-                        gt_mask = viewpoint.gt_alpha_mask.to("cuda") if viewpoint.gt_alpha_mask is not None else None
-
-                        if tb_writer and (cam_idx < 4):
-                            prefix = f"{config['name']}_view_{viewpoint.image_name}"
-                            tb_writer.add_image(f"{prefix}/0_render_composite", pred, iteration)
-                            if iteration == args.test_iterations[0]:
-                                tb_writer.add_image(f"{prefix}/0_gt", gt_image, iteration)
-                            tb_writer.add_image(f"{prefix}/1_albedo", albedo, iteration)
-                            tb_writer.add_image(f"{prefix}/2_roughness", rough.repeat(3, 1, 1), iteration)
-                            tb_writer.add_image(f"{prefix}/3_metallic", metal.repeat(3, 1, 1), iteration)
-                            tb_writer.add_image(f"{prefix}/4_pbr_shaded_obj", shaded, iteration)
-                            tb_writer.add_image(f"{prefix}/7_alpha", alpha_map.repeat(3, 1, 1), iteration)
-                            if viewpoint.gt_alpha_mask is not None:
-                                tb_writer.add_image(
-                                    f"{prefix}/8_gt_alpha_mask",
-                                    viewpoint.gt_alpha_mask.to("cuda").repeat(3, 1, 1),
-                                    iteration,
-                                )
-
-                            rend_normal = render_pkg.get("rend_normal")
-                            if rend_normal is not None:
-                                norm_vis = torch.clamp(rend_normal * 0.5 + 0.5, 0, 1)
-                                tb_writer.add_image(f"{prefix}/5_normal", norm_vis, iteration)
-
-                            if depth_map is not None:
-                                d_max = depth_map.max()
-                                depth_norm = depth_map / d_max if d_max > 0 else depth_map
-                                depth_vis = colormap(depth_norm.cpu().numpy()[0], cmap='turbo')
-                                tb_writer.add_image(f"{prefix}/6_depth", depth_vis, iteration)
-
-                        l1_test += l1_loss(pred, gt_image).item()
-                        psnr_test += psnr(pred, gt_image).mean().item()
-                        if gt_mask is not None:
-                            l1_test_masked += l1_loss(pred, gt_image, mask=gt_mask).item()
-                            psnr_test_masked += psnr(pred, gt_image, mask=gt_mask).mean().item()
-                            masked_count += 1
-
-                    l1_test /= len(cameras)
-                    psnr_test /= len(cameras)
-                    msg = f"  [ITER {iteration}] {config['name']} PSNR: {psnr_test:.4f}"
-                    if masked_count > 0:
-                        l1_test_masked /= masked_count
-                        psnr_test_masked /= masked_count
-                        msg += f" | PSNR(mask): {psnr_test_masked:.4f}"
-                    print(msg)
-
-                    if tb_writer:
-                        tb_writer.add_scalar(f"{config['name']}/l1_loss", l1_test, iteration)
-                        tb_writer.add_scalar(f"{config['name']}/psnr", psnr_test, iteration)
-                        if masked_count > 0:
-                            tb_writer.add_scalar(f"{config['name']}/l1_loss_masked", l1_test_masked, iteration)
-                            tb_writer.add_scalar(f"{config['name']}/psnr_masked", psnr_test_masked, iteration)
-
-                torch.cuda.empty_cache()
 
             # NO Densification!
             
@@ -679,6 +710,17 @@ if __name__ == "__main__":
         type=int,
         default=500,
         help="Print a detailed console loss breakdown every N iterations (0 disables)",
+    )
+    parser.add_argument(
+        "--roughness_init",
+        type=float,
+        default=None,
+        help="Optional initial roughness value in [0,1] for all points (before training).",
+    )
+    parser.add_argument(
+        "--eval_first",
+        action="store_true",
+        help="If set, run evaluation once at iteration 0 (before any optimizer steps).",
     )
 
     args = parser.parse_args(sys.argv[1:])

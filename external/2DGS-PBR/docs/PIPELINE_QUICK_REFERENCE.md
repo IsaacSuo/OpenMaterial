@@ -36,7 +36,7 @@
 
 ## Environment & Build
 
-- 依赖/环境（`environment.yml`、CUDA 扩展 submodules）→ [PIPELINE_REFERENCE.md#sec-11-deps](PIPELINE_REFERENCE.md#sec-11-deps)
+- 依赖/环境（`requirements.txt` / `environment.yml`、CUDA 扩展 submodules）→ [PIPELINE_REFERENCE.md#sec-11-deps](PIPELINE_REFERENCE.md#sec-11-deps)
 
 ## Lookup Tables
 
