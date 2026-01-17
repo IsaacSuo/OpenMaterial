@@ -195,6 +195,24 @@ def _maybe_dump_env_map(args, model_path: str, iteration: int, env_light) -> Non
     )
 
 @torch.no_grad()
+def _maybe_tb_log_env_map(args, tb_writer, iteration: int, env_light) -> None:
+    if tb_writer is None or not getattr(args, "tb_log_env_map", False):
+        return
+
+    env = env_light.env_map.detach()  # [3, H, 2H]
+    env = torch.nan_to_num(env, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Raw visualization (clamped) + log visualization (more stable for HDR).
+    env_vis = torch.clamp(env, 0.0, 1.0)
+    env_log = torch.log1p(torch.clamp(env, min=0.0))
+    env_log = env_log / (env_log.max() + 1e-8)
+
+    tb_writer.add_image("debug/env_map_rgb", env_vis, iteration)
+    tb_writer.add_image("debug/env_map_log_rgb", env_log, iteration)
+    tb_writer.add_scalar("debug/env_map_mean", env.mean().item(), iteration)
+    tb_writer.add_scalar("debug/env_map_max", env.max().item(), iteration)
+
+@torch.no_grad()
 def _run_pbr_eval(
     tb_writer,
     iteration: int,
@@ -392,6 +410,7 @@ def training_pbr_static(dataset, opt, pipe, args):
 
     if getattr(args, "eval_first", False):
         _maybe_dump_env_map(args=args, model_path=scene.model_path, iteration=0, env_light=env_light)
+        _maybe_tb_log_env_map(args=args, tb_writer=tb_writer, iteration=0, env_light=env_light)
         _run_pbr_eval(
             tb_writer=tb_writer,
             iteration=0,
@@ -706,6 +725,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             # --- Evaluation and Image Logging ---
             if iteration in args.test_iterations:
                 _maybe_dump_env_map(args=args, model_path=scene.model_path, iteration=iteration, env_light=env_light)
+                _maybe_tb_log_env_map(args=args, tb_writer=tb_writer, iteration=iteration, env_light=env_light)
                 _run_pbr_eval(
                     tb_writer=tb_writer,
                     iteration=iteration,
@@ -894,6 +914,11 @@ if __name__ == "__main__":
         "--dump_env_map_on_eval",
         action="store_true",
         help="If set, save env_map tensors to <model_path>/debug_env_map at each evaluation iteration.",
+    )
+    parser.add_argument(
+        "--tb_log_env_map",
+        action="store_true",
+        help="If set, log env_map images/scalars to TensorBoard at each evaluation iteration.",
     )
 
     args = parser.parse_args(sys.argv[1:])

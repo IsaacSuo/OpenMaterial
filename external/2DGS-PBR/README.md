@@ -148,6 +148,7 @@ python train_pbr.py \
 - `--debug_nonfinite_dump_full`: include full-resolution tensors in the dump (can be very large)
 - `--debug_nonfinite_raise`: raise after writing the dump
 - `--dump_env_map_on_eval`: save `env_light.env_map` to `debug_env_map/` at each evaluation iteration
+- `--tb_log_env_map`: log `env_light.env_map` images/scalars to TensorBoard at each evaluation iteration
 
 #### Loss function reference (what is optimized)
 
