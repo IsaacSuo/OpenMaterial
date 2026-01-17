@@ -484,7 +484,15 @@ def training_pbr_static(dataset, opt, pipe, args):
             ray_dirs_world=ray_dirs,
         )
 
-        pred = shaded_obj * alpha_map + bg_env * (1.0 - alpha_map)
+        # Composite for reconstruction.
+        # By default, we composite with the rendered alpha. Optionally, if a GT mask exists,
+        # you can force compositing to use the GT mask to decouple background supervision
+        # from opacity/alpha artifacts.
+        alpha_for_comp = alpha_map
+        if getattr(args, "composite_use_gt_mask", False) and (mask is not None):
+            alpha_for_comp = mask
+
+        pred = shaded_obj * alpha_for_comp + bg_env * (1.0 - alpha_for_comp)
 
         alpha_sup_loss = torch.tensor(0.0, device="cuda")
         if mask is not None:
@@ -493,16 +501,26 @@ def training_pbr_static(dataset, opt, pipe, args):
                 alpha_sup_loss = lambda_alpha * torch.abs(alpha_map - mask).mean()
 
         # Composite supervision weights:
-        # - Default: if gt_alpha_mask exists, supervise reconstruction only on the object region
-        #   to avoid forcing env_light to match matted/black GT backgrounds.
-        # - Opt-in: --supervise_background to supervise full composite (object + skybox).
+        # - Warmup: full-image supervision to let EnvMap see the background.
+        # - If gt_alpha_mask exists: weight foreground and (optionally) background separately.
+        #   This avoids an all-or-nothing switch while still allowing background supervision.
+        # - If no mask: full-image supervision.
         obj_mask = mask if mask is not None else alpha_map.detach()
 
         if is_env_warmup:
-            # Warmup Phase: Force full-image supervision to let EnvMap see the background
             recon_weight = torch.ones_like(alpha_map)
-        elif (not getattr(args, "supervise_background", False)) and (mask is not None):
-            recon_weight = mask
+        elif mask is not None:
+            # Background weight:
+            # - If --supervise_background is set, default bg weight is 1.0.
+            # - Otherwise, default bg weight is 0.0 (foreground-only), unless --lambda_bg is provided.
+            if getattr(args, "lambda_bg", None) is None:
+                bg_w = 1.0 if getattr(args, "supervise_background", False) else 0.0
+            else:
+                bg_w = float(args.lambda_bg)
+            bg_w = max(0.0, bg_w)
+            recon_weight = mask + bg_w * (1.0 - mask)
+            if getattr(opt, "lambda_pbr", 0.0) > 0:
+                recon_weight = recon_weight + opt.lambda_pbr * obj_mask
         else:
             recon_weight = torch.ones_like(alpha_map)
             if getattr(opt, "lambda_pbr", 0.0) > 0:
@@ -848,6 +866,19 @@ if __name__ == "__main__":
         "--supervise_background",
         action="store_true",
         help="Supervise full composite (object + background). If unset and gt_alpha_mask exists, L1/SSIM is computed only on the mask region to avoid black-background supervision.",
+    )
+    parser.add_argument(
+        "--lambda_bg",
+        type=float,
+        default=None,
+        help="Optional background reconstruction weight when gt_alpha_mask exists (weight for (1-mask)). "
+             "If unset, defaults to 1.0 when --supervise_background is set, otherwise 0.0.",
+    )
+    parser.add_argument(
+        "--composite_use_gt_mask",
+        action="store_true",
+        help="If set and gt_alpha_mask exists, composite pred with gt_alpha_mask instead of rendered alpha "
+             "for reconstruction/evaluation (decouples background supervision from opacity artifacts).",
     )
 
     # Material regularization term weights (inside compute_pbr_losses, before global lambda_pbr_reg)

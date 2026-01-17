@@ -113,8 +113,10 @@ python train_pbr.py \
 - `--lambda_rgb`: weight for composite reconstruction loss
 - `--lambda_dssim`: SSIM mixing weight (reconstruction is `(1-lambda_dssim)*L1 + lambda_dssim*(1-SSIM)`)
 - `--supervise_background`: supervise full composite even when `gt_alpha_mask` exists
+- `--lambda_bg`: background reconstruction weight when `gt_alpha_mask` exists (weight for `1-mask`)
 - `--lambda_pbr`: extra reconstruction weight on object region (mask if available, else alpha)
 - `--lambda_alpha`: supervise `rend_alpha` toward `gt_alpha_mask`
+- `--composite_use_gt_mask`: composite with `gt_alpha_mask` (if available) instead of rendered alpha
 
 **Material regularization**
 
