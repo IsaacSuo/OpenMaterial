@@ -167,6 +167,34 @@ def _maybe_dump_nonfinite(
         raise FloatingPointError(f"Non-finite values detected during eval; dump saved to {out_path}")
 
 @torch.no_grad()
+def _maybe_dump_env_map(args, model_path: str, iteration: int, env_light) -> None:
+    if not getattr(args, "dump_env_map_on_eval", False):
+        return
+    out_dir = os.path.join(model_path, "debug_env_map")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"env_map_iter_{iteration:06d}.pt")
+    payload = {
+        "iteration": int(iteration),
+        "env_map_res": int(getattr(env_light, "resolution", -1)),
+        "env_map_shape": tuple(env_light.env_map.shape),
+        "env_map": env_light.env_map.detach().cpu(),
+        "solid_angle_weight": getattr(env_light, "solid_angle_weight", None).detach().cpu()
+        if hasattr(env_light, "solid_angle_weight")
+        else None,
+    }
+    torch.save(payload, out_path)
+    env = env_light.env_map.detach()
+    finite = torch.isfinite(env)
+    finite_ratio = float(finite.float().mean().item())
+    env_min = float(env[finite].min().item()) if finite_ratio > 0 else float("nan")
+    env_max = float(env[finite].max().item()) if finite_ratio > 0 else float("nan")
+    env_mean = float(env[finite].mean().item()) if finite_ratio > 0 else float("nan")
+    print(
+        f"[Debug] Saved env_map dump: {out_path} "
+        f"(finite={finite_ratio:.6f}, min={env_min:.4f}, mean={env_mean:.4f}, max={env_max:.4f})"
+    )
+
+@torch.no_grad()
 def _run_pbr_eval(
     tb_writer,
     iteration: int,
@@ -363,6 +391,7 @@ def training_pbr_static(dataset, opt, pipe, args):
     first_eval_iter = min(args.test_iterations) if getattr(args, "test_iterations", None) else None
 
     if getattr(args, "eval_first", False):
+        _maybe_dump_env_map(args=args, model_path=scene.model_path, iteration=0, env_light=env_light)
         _run_pbr_eval(
             tb_writer=tb_writer,
             iteration=0,
@@ -676,6 +705,7 @@ def training_pbr_static(dataset, opt, pipe, args):
 
             # --- Evaluation and Image Logging ---
             if iteration in args.test_iterations:
+                _maybe_dump_env_map(args=args, model_path=scene.model_path, iteration=iteration, env_light=env_light)
                 _run_pbr_eval(
                     tb_writer=tb_writer,
                     iteration=iteration,
@@ -859,6 +889,11 @@ if __name__ == "__main__":
         "--debug_nonfinite_raise",
         action="store_true",
         help="If set, raise an exception after writing a non-finite debug dump.",
+    )
+    parser.add_argument(
+        "--dump_env_map_on_eval",
+        action="store_true",
+        help="If set, save env_map tensors to <model_path>/debug_env_map at each evaluation iteration.",
     )
 
     args = parser.parse_args(sys.argv[1:])
