@@ -18,6 +18,7 @@ import torch
 import sys
 import uuid
 import numpy as np
+import re
 from argparse import ArgumentParser, Namespace
 from random import randint
 from tqdm import tqdm
@@ -72,6 +73,99 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
+def _safe_slug(s: str) -> str:
+    s = s.strip().replace(" ", "_")
+    s = re.sub(r"[^A-Za-z0-9_.-]+", "_", s)
+    return s[:200] if len(s) > 200 else s
+
+@torch.no_grad()
+def _downsample_chw(x: torch.Tensor, max_hw: int = 256) -> torch.Tensor:
+    """
+    Downsample a [C,H,W] tensor to keep debugging dumps lightweight.
+    """
+    if x is None:
+        return None
+    if x.dim() != 3:
+        return x
+    c, h, w = x.shape
+    if max(h, w) <= max_hw:
+        return x
+    scale = max_hw / float(max(h, w))
+    nh, nw = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
+    y = torch.nn.functional.interpolate(
+        x.unsqueeze(0),
+        size=(nh, nw),
+        mode="bilinear" if c != 1 else "bilinear",
+        align_corners=False,
+    ).squeeze(0)
+    return y
+
+@torch.no_grad()
+def _maybe_dump_nonfinite(
+    args,
+    model_path: str,
+    iteration: int,
+    split_name: str,
+    view_name: str,
+    tensors: dict,
+):
+    """
+    If enabled and any tensor contains NaN/Inf, write a debug dump to disk.
+    """
+    if not getattr(args, "debug_nonfinite_dump", False):
+        return
+
+    offending = {}
+    for k, v in tensors.items():
+        if v is None or not isinstance(v, torch.Tensor):
+            continue
+        if not torch.isfinite(v).all():
+            offending[k] = v
+
+    if not offending:
+        return
+
+    os.makedirs(os.path.join(model_path, "debug_nonfinite"), exist_ok=True)
+    fname = (
+        f"iter_{iteration:06d}_{_safe_slug(split_name)}_{_safe_slug(view_name)}.pt"
+    )
+    out_path = os.path.join(model_path, "debug_nonfinite", fname)
+
+    payload = {
+        "iteration": int(iteration),
+        "split": split_name,
+        "view_name": view_name,
+        "tensor_keys": list(tensors.keys()),
+        "offending_keys": list(offending.keys()),
+        "stats": {},
+    }
+
+    for k, v in offending.items():
+        finite = torch.isfinite(v)
+        payload["stats"][k] = {
+            "shape": tuple(v.shape),
+            "dtype": str(v.dtype),
+            "device": str(v.device),
+            "finite_ratio": float(finite.float().mean().item()),
+            "nan_ratio": float(torch.isnan(v).float().mean().item()),
+            "posinf_ratio": float(torch.isposinf(v).float().mean().item()),
+            "neginf_ratio": float(torch.isneginf(v).float().mean().item()),
+        }
+
+    if getattr(args, "debug_nonfinite_dump_full", False):
+        # Full tensors can be huge; still move to CPU for portability.
+        payload["tensors_full"] = {k: v.detach().cpu() for k, v in tensors.items() if isinstance(v, torch.Tensor)}
+    else:
+        payload["tensors_downsampled"] = {
+            k: _downsample_chw(v.detach()).cpu() if isinstance(v, torch.Tensor) and v.dim() == 3 else (v.detach().cpu() if isinstance(v, torch.Tensor) else v)
+            for k, v in tensors.items()
+        }
+
+    torch.save(payload, out_path)
+    print(f"[Debug] Non-finite detected; wrote dump: {out_path}")
+    if getattr(args, "debug_nonfinite_raise", False):
+        raise FloatingPointError(f"Non-finite values detected during eval; dump saved to {out_path}")
+
 @torch.no_grad()
 def _run_pbr_eval(
     tb_writer,
@@ -83,6 +177,7 @@ def _run_pbr_eval(
     dummy_color: torch.Tensor,
     env_light,
     log_gt: bool = False,
+    args=None,
 ):
     print(f"\n[ITER {iteration}] Running Evaluation...")
     torch.cuda.empty_cache()
@@ -130,6 +225,27 @@ def _run_pbr_eval(
             pred = torch.clamp(pred, 0.0, 1.0)
             gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
             gt_mask = viewpoint.gt_alpha_mask.to("cuda") if viewpoint.gt_alpha_mask is not None else None
+
+            if args is not None:
+                _maybe_dump_nonfinite(
+                    args=args,
+                    model_path=scene.model_path,
+                    iteration=iteration,
+                    split_name=config["name"],
+                    view_name=viewpoint.image_name,
+                    tensors={
+                        "pred": pred,
+                        "gt_image": gt_image,
+                        "alpha_map": alpha_map,
+                        "bg_env": bg_env,
+                        "shaded_obj": shaded,
+                        "albedo": albedo,
+                        "roughness": rough,
+                        "metallic": metal,
+                        "normal": normal,
+                        "depth": depth_map,
+                    },
+                )
 
             l1_test += l1_loss(pred, gt_image).item()
             psnr_test += psnr(pred, gt_image).mean().item()
@@ -257,6 +373,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             dummy_color=dummy_color,
             env_light=env_light,
             log_gt=True,
+            args=args,
         )
 
     first_iter = 1
@@ -569,6 +686,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                     dummy_color=dummy_color,
                     env_light=env_light,
                     log_gt=(first_eval_iter is not None and iteration == first_eval_iter),
+                    args=args,
                 )
 
             # NO Densification!
@@ -726,6 +844,21 @@ if __name__ == "__main__":
         "--eval_first",
         action="store_true",
         help="If set, run evaluation once at iteration 0 (before any optimizer steps).",
+    )
+    parser.add_argument(
+        "--debug_nonfinite_dump",
+        action="store_true",
+        help="If set, dump a debug .pt when NaN/Inf appears during evaluation.",
+    )
+    parser.add_argument(
+        "--debug_nonfinite_dump_full",
+        action="store_true",
+        help="If set, include full-resolution tensors in the non-finite debug dump (can be very large).",
+    )
+    parser.add_argument(
+        "--debug_nonfinite_raise",
+        action="store_true",
+        help="If set, raise an exception after writing a non-finite debug dump.",
     )
 
     args = parser.parse_args(sys.argv[1:])

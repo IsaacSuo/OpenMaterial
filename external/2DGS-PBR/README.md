@@ -144,6 +144,9 @@ python train_pbr.py \
 
 - `--log_interval`: print detailed breakdown every N iterations (`0` disables)
 - `--quiet`: reduce console output
+- `--debug_nonfinite_dump`: write a debug dump when NaN/Inf appears during evaluation
+- `--debug_nonfinite_dump_full`: include full-resolution tensors in the dump (can be very large)
+- `--debug_nonfinite_raise`: raise after writing the dump
 
 #### Loss function reference (what is optimized)
 
