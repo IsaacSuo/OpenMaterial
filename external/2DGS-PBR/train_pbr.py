@@ -382,9 +382,24 @@ def training_pbr_static(dataset, opt, pipe, args):
 
     # 4. Environment Light
     env_light = EnvironmentLight(args.env_map, resolution=args.env_map_res).cuda()
-    env_light_optimizer = torch.optim.Adam(env_light.parameters(), lr=opt.env_light_lr)
-    if not args.no_env_gradient_scaling:
-        env_light.register_gradient_scaling_hook()
+    if getattr(args, "env_light_pth", None):
+        ckpt_path = str(args.env_light_pth)
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"--env_light_pth not found: {ckpt_path}")
+        env_light.load_state_dict(torch.load(ckpt_path, map_location="cpu"))
+        env_light = env_light.cuda()
+        print(f"Loaded env_light checkpoint: {ckpt_path}")
+
+    freeze_env_light = bool(getattr(args, "freeze_env_light", False))
+    if freeze_env_light:
+        for p in env_light.parameters():
+            p.requires_grad_(False)
+        env_light_optimizer = None
+        print("Environment light is frozen (no optimization).")
+    else:
+        env_light_optimizer = torch.optim.Adam(env_light.parameters(), lr=opt.env_light_lr)
+        if not args.no_env_gradient_scaling:
+            env_light.register_gradient_scaling_hook()
 
     scene_extent = float(scene.cameras_extent)
 
@@ -452,8 +467,8 @@ def training_pbr_static(dataset, opt, pipe, args):
         
         gt_image = viewpoint_cam.original_image.cuda()
 
-        # [New] EnvMap Warmup Logic
-        is_env_warmup = iteration <= args.env_warmup_iters
+        # EnvMap Warmup Logic (disabled when env_light is frozen)
+        is_env_warmup = (not freeze_env_light) and (iteration <= args.env_warmup_iters)
 
         # --- PBR + Skybox Composite Supervision (no SH render loss) ---
         alpha_map = render_pkg.get("rend_alpha")
@@ -526,8 +541,12 @@ def training_pbr_static(dataset, opt, pipe, args):
             if getattr(opt, "lambda_pbr", 0.0) > 0:
                 recon_weight = recon_weight + opt.lambda_pbr * obj_mask
 
-        env_tv_loss = opt.lambda_env_tv * env_light.tv_loss_weighted()
-        env_smooth_loss = getattr(args, "lambda_env_smooth", 0.0) * env_light.smoothness_loss_weighted()
+        if freeze_env_light:
+            env_tv_loss = torch.tensor(0.0, device="cuda")
+            env_smooth_loss = torch.tensor(0.0, device="cuda")
+        else:
+            env_tv_loss = opt.lambda_env_tv * env_light.tv_loss_weighted()
+            env_smooth_loss = getattr(args, "lambda_env_smooth", 0.0) * env_light.smoothness_loss_weighted()
 
         scale_reg_loss = torch.tensor(0.0, device="cuda")
         lambda_scale_reg = float(getattr(args, "lambda_scale_reg", 0.0) or 0.0)
@@ -711,7 +730,8 @@ def training_pbr_static(dataset, opt, pipe, args):
             if iteration in args.save_iterations:
                 print(f"\n[ITER {iteration}] Saving Model...")
                 scene.save(iteration)
-                torch.save(env_light.state_dict(), os.path.join(scene.model_path, f"env_light_{iteration}.pth"))
+                if not freeze_env_light:
+                    torch.save(env_light.state_dict(), os.path.join(scene.model_path, f"env_light_{iteration}.pth"))
 
             # Step
             # [EnvMap Warmup] Only step Gaussians if NOT in warmup phase
@@ -721,13 +741,14 @@ def training_pbr_static(dataset, opt, pipe, args):
             # ALWAYS zero grad for Gaussians to prevent accumulation during warmup
             gaussians.optimizer.zero_grad(set_to_none=True)
             
-            # Always step EnvMap
-            env_light_optimizer.step()
-            env_light_optimizer.zero_grad(set_to_none=True)
+            # Step EnvMap (unless frozen)
+            if not freeze_env_light:
+                env_light_optimizer.step()
+                env_light_optimizer.zero_grad(set_to_none=True)
 
             env_clamp_min = getattr(args, "env_clamp_min", None)
             env_clamp_max = getattr(args, "env_clamp_max", None)
-            if (env_clamp_min is not None) or (env_clamp_max is not None):
+            if (not freeze_env_light) and ((env_clamp_min is not None) or (env_clamp_max is not None)):
                 with torch.no_grad():
                     min_v = float(env_clamp_min) if env_clamp_min is not None else -float("inf")
                     max_v = float(env_clamp_max) if env_clamp_max is not None else float("inf")
@@ -772,6 +793,17 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument("--gt_ply", type=str, required=True, help="Path to dense GT .ply file")
     parser.add_argument("--env_map", type=str, default=None, help="Initial HDR environment map")
+    parser.add_argument(
+        "--env_light_pth",
+        type=str,
+        default=None,
+        help="Optional pretrained EnvironmentLight state_dict (.pth) to load before training (e.g., output of train_env_light.py).",
+    )
+    parser.add_argument(
+        "--freeze_env_light",
+        action="store_true",
+        help="If set, do not optimize env_light (treat as fixed input); env warmup/regularization/checkpoint saving are disabled.",
+    )
     
     # PBR params
     parser.add_argument(
