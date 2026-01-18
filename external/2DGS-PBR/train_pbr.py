@@ -401,6 +401,14 @@ def training_pbr_static(dataset, opt, pipe, args):
         if not args.no_env_gradient_scaling:
             env_light.register_gradient_scaling_hook()
 
+    # Optional: anchor env_map to the pretrained initialization to reduce lighting/material ambiguity.
+    env_map_ref = None
+    env_prior_weight = float(getattr(args, "env_light_prior_weight", 0.0) or 0.0)
+    if (not freeze_env_light) and (env_prior_weight > 0) and getattr(args, "env_light_pth", None):
+        with torch.no_grad():
+            env_map_ref = torch.nan_to_num(env_light.env_map.detach().clone(), nan=0.0, posinf=0.0, neginf=0.0)
+        print(f"Enabled env_light prior: weight={env_prior_weight}")
+
     scene_extent = float(scene.cameras_extent)
 
     # 5. Training Loop
@@ -548,6 +556,16 @@ def training_pbr_static(dataset, opt, pipe, args):
             env_tv_loss = opt.lambda_env_tv * env_light.tv_loss_weighted()
             env_smooth_loss = getattr(args, "lambda_env_smooth", 0.0) * env_light.smoothness_loss_weighted()
 
+        env_prior_loss = torch.tensor(0.0, device="cuda")
+        if (not freeze_env_light) and (env_map_ref is not None) and (env_prior_weight > 0) and (not is_env_warmup):
+            w = env_light.solid_angle_weight  # [1,H,W]
+            diff = env_light.env_map - env_map_ref
+            if getattr(args, "env_light_prior_log_space", False):
+                a = torch.log1p(torch.clamp(env_light.env_map, min=0.0))
+                b = torch.log1p(torch.clamp(env_map_ref, min=0.0))
+                diff = a - b
+            env_prior_loss = env_prior_weight * ((diff * diff) * w).sum() / (w.sum() * 3.0 + 1e-8)
+
         scale_reg_loss = torch.tensor(0.0, device="cuda")
         lambda_scale_reg = float(getattr(args, "lambda_scale_reg", 0.0) or 0.0)
         if lambda_scale_reg > 0 and (not is_env_warmup):
@@ -590,7 +608,15 @@ def training_pbr_static(dataset, opt, pipe, args):
         )
         recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
 
-        total_loss = opt.lambda_rgb * recon_loss + env_tv_loss + env_smooth_loss + scale_reg_loss + alpha_sup_loss + pbr_reg_loss
+        total_loss = (
+            opt.lambda_rgb * recon_loss
+            + env_tv_loss
+            + env_smooth_loss
+            + env_prior_loss
+            + scale_reg_loss
+            + alpha_sup_loss
+            + pbr_reg_loss
+        )
 
         if not torch.isfinite(total_loss):
             raise FloatingPointError(
@@ -741,9 +767,18 @@ def training_pbr_static(dataset, opt, pipe, args):
             # ALWAYS zero grad for Gaussians to prevent accumulation during warmup
             gaussians.optimizer.zero_grad(set_to_none=True)
             
-            # Step EnvMap (unless frozen)
+            # Step EnvMap (unless frozen), optionally only after a certain iteration / periodically.
             if not freeze_env_light:
-                env_light_optimizer.step()
+                env_update_after = int(getattr(args, "env_update_after", 0) or 0)
+                env_update_interval = int(getattr(args, "env_update_interval", 1) or 1)
+                env_update_interval = max(1, env_update_interval)
+                do_env_step = True
+                if env_update_after > 0 and iteration < env_update_after:
+                    do_env_step = False
+                if (not is_env_warmup) and env_update_interval > 1 and (iteration % env_update_interval != 0):
+                    do_env_step = False
+                if do_env_step:
+                    env_light_optimizer.step()
                 env_light_optimizer.zero_grad(set_to_none=True)
 
             env_clamp_min = getattr(args, "env_clamp_min", None)
@@ -803,6 +838,29 @@ if __name__ == "__main__":
         "--freeze_env_light",
         action="store_true",
         help="If set, do not optimize env_light (treat as fixed input); env warmup/regularization/checkpoint saving are disabled.",
+    )
+    parser.add_argument(
+        "--env_light_prior_weight",
+        type=float,
+        default=0.0,
+        help="If >0 and --env_light_pth is provided, add an L2 prior anchoring env_map to the pretrained initialization (reduces lighting/material ambiguity).",
+    )
+    parser.add_argument(
+        "--env_light_prior_log_space",
+        action="store_true",
+        help="Compute env_light prior in log1p space (more stable when env_map is HDR-like).",
+    )
+    parser.add_argument(
+        "--env_update_after",
+        type=int,
+        default=0,
+        help="If >0, only start updating env_light at this iteration (still uses it for rendering before).",
+    )
+    parser.add_argument(
+        "--env_update_interval",
+        type=int,
+        default=1,
+        help="Update env_light every N iterations after env_update_after (warmup always updates).",
     )
     
     # PBR params
