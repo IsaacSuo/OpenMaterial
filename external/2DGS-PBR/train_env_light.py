@@ -177,7 +177,8 @@ def train_env_light(dataset, opt, pipe, args) -> None:
     alt_mat_steps = int(getattr(args, "alt_mat_steps", 1))
     cycle = max(1, alt_env_steps + alt_mat_steps)
 
-    progress = tqdm(range(1, int(args.iterations) + 1), desc="Pretraining EnvLight (object-only)")
+    total_iters = int(opt.iterations)
+    progress = tqdm(range(1, total_iters + 1), desc="Pretraining EnvLight (object-only)")
     viewpoint_stack = None
 
     for it in progress:
@@ -237,7 +238,7 @@ def train_env_light(dataset, opt, pipe, args) -> None:
 
         Ll1 = l1_loss(shaded_obj, gt, mask=weight)
         ssim_val = ssim(shaded_obj.unsqueeze(0), gt.unsqueeze(0), mask=weight.unsqueeze(0))
-        recon = (1.0 - float(args.lambda_dssim)) * Ll1 + float(args.lambda_dssim) * (1.0 - ssim_val)
+        recon = (1.0 - float(opt.lambda_dssim)) * Ll1 + float(opt.lambda_dssim) * (1.0 - ssim_val)
 
         # Strong material regularization (screen-space) to keep materials from absorbing lighting.
         pbr_reg = torch.tensor(0.0, device="cuda")
@@ -326,9 +327,7 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_env_smooth", type=float, default=0.0)
 
     # Reconstruction
-    parser.add_argument("--iterations", type=int, default=10_000)
     parser.add_argument("--lambda_rgb", type=float, default=1.0)
-    parser.add_argument("--lambda_dssim", type=float, default=0.2)
     parser.add_argument("--mask_binarize", action="store_true")
     parser.add_argument("--mask_threshold", type=float, default=0.5)
 
