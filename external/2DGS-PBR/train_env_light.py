@@ -311,7 +311,6 @@ if __name__ == "__main__":
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
 
-    parser.add_argument("-m", "--model_path", type=str, default="", help="Output folder")
     parser.add_argument("--gt_ply", type=str, required=True, help="Dense GT point cloud PLY (with normals recommended)")
 
     # Env light
