@@ -624,6 +624,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                 f"recon={float(recon_loss.detach().cpu()):.6f}, "
                 f"env_tv={float(env_tv_loss.detach().cpu()):.6f}, "
                 f"env_smooth={float(env_smooth_loss.detach().cpu()):.6f}, "
+                f"env_prior={float(env_prior_loss.detach().cpu()):.6f}, "
                 f"scale_reg={float(scale_reg_loss.detach().cpu()):.6f}, "
                 f"pbr_reg={float(pbr_reg_loss.detach().cpu()):.6f}"
             )
@@ -740,6 +741,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                     tb_writer.add_scalar("train_diag/metallic_mean_obj", gbuffer_metallic[obj_mask > 0.5].mean().item(), iteration)
                 tb_writer.add_scalar('train_loss_patches/recon_loss', recon_loss.item(), iteration)
                 tb_writer.add_scalar('train_loss_patches/env_tv_loss', env_tv_loss.item(), iteration)
+                tb_writer.add_scalar('train_loss_patches/env_prior_loss', env_prior_loss.item(), iteration)
                 tb_writer.add_scalar('train_loss_patches/pbr_reg_pre_scale', pbr_losses["total_pbr_reg"].item(), iteration)
                 tb_writer.add_scalar('train_stats/alpha_mean', alpha_map.mean().item(), iteration)
                 tb_writer.add_scalar('train_stats/obj_weight_mean', recon_weight.mean().item(), iteration)
@@ -772,11 +774,15 @@ def training_pbr_static(dataset, opt, pipe, args):
                 env_update_after = int(getattr(args, "env_update_after", 0) or 0)
                 env_update_interval = int(getattr(args, "env_update_interval", 1) or 1)
                 env_update_interval = max(1, env_update_interval)
-                do_env_step = True
-                if env_update_after > 0 and iteration < env_update_after:
-                    do_env_step = False
-                if (not is_env_warmup) and env_update_interval > 1 and (iteration % env_update_interval != 0):
-                    do_env_step = False
+                # Warmup is explicitly designed to update env_light every iteration.
+                if is_env_warmup:
+                    do_env_step = True
+                else:
+                    do_env_step = True
+                    if env_update_after > 0 and iteration < env_update_after:
+                        do_env_step = False
+                    if env_update_interval > 1 and (iteration % env_update_interval != 0):
+                        do_env_step = False
                 if do_env_step:
                     env_light_optimizer.step()
                 env_light_optimizer.zero_grad(set_to_none=True)
