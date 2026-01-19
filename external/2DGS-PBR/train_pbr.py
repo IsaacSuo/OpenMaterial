@@ -53,6 +53,29 @@ def _get_ray_dirs_world(viewpoint_cam) -> torch.Tensor:
         device="cuda",
     )
 
+@torch.no_grad()
+def _process_gt_mask(args, mask: torch.Tensor | None) -> torch.Tensor | None:
+    """
+    Normalize/binarize/dilate the GT mask for consistent training semantics.
+    Expects mask in [0,1] with shape [1,H,W].
+    """
+    if mask is None:
+        return None
+
+    out = mask
+    if getattr(args, "mask_binarize", False):
+        thr = float(getattr(args, "mask_threshold", 0.5))
+        out = (out > thr).to(out.dtype)
+
+    dilate_px = int(getattr(args, "mask_dilate_px", 0) or 0)
+    if dilate_px > 0:
+        k = 2 * dilate_px + 1
+        out = torch.nn.functional.max_pool2d(
+            out.unsqueeze(0), kernel_size=k, stride=1, padding=dilate_px
+        ).squeeze(0)
+
+    return torch.clamp(out, 0.0, 1.0)
+
 def prepare_output_and_logger(args):
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
