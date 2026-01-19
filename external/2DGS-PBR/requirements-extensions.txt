@@ -1,6 +1,7 @@
 # 2DGS-PBR CUDA extensions
 # MUST be installed AFTER PyTorch is installed
-# Run: pip install -r requirements-extensions.txt
+# Run: pip install --no-build-isolation -r requirements-extensions.txt
+# Note: Use --no-build-isolation if torch is not found during build
 
 -e ./submodules/diff-surfel-rasterization
 -e ./submodules/simple-knn
