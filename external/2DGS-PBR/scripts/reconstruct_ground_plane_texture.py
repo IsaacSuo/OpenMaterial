@@ -145,6 +145,16 @@ def _project_points_to_image(cam, points_w: torch.Tensor) -> tuple[torch.Tensor,
     return xy, z
 
 
+def _compute_view_dirs_to_points(cam, points_w: torch.Tensor) -> torch.Tensor:
+    """
+    Compute normalized view directions from camera center to world points.
+    Returns: [N,3] normalized directions
+    """
+    cam_center = cam.camera_center.view(1, 3).to(points_w.device)
+    dirs = points_w - cam_center
+    return F.normalize(dirs, dim=-1)
+
+
 def _dilate_mask(mask: torch.Tensor, radius: int) -> torch.Tensor:
     if radius <= 0:
         return mask
@@ -214,6 +224,7 @@ def _collect_consistent_plane_samples(
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Collect (u,v) plane coords and RGB colors from pixels that are consistent across views.
+
     Returns:
       uv:  [M,2] float32 plane coordinates
       rgb: [M,3] float32 colors in [0,1]
@@ -242,11 +253,14 @@ def _collect_consistent_plane_samples(
         if fg is not None:
             fg = (fg.squeeze(0) > float(exclude_mask_threshold))
             bg = ~fg
+            print(f"[Cam {cam_idx}] Mask stats: FG pixels={fg.sum().item()}, BG pixels={bg.sum().item()}")
         else:
             bg = torch.ones((H, W), device=device, dtype=torch.bool)
+            print(f"[Cam {cam_idx}] No mask, using full image")
 
         ys, xs = torch.nonzero(bg, as_tuple=True)
         if ys.numel() == 0:
+            print(f"[Cam {cam_idx}] WARNING: No background pixels found!")
             continue
 
         if per_view_samples > 0 and ys.numel() > per_view_samples:
@@ -281,10 +295,14 @@ def _collect_consistent_plane_samples(
         xs = xs[valid_t]
         ys = ys[valid_t]
 
+        print(f"[Cam {cam_idx}] Ray-plane intersections: {t.shape[0]} valid hits")
+
         p = o + t * dirs_w  # [N,3]
         rel = p - p0_t
         pu = (rel @ u_t).squeeze(1)
         pv = (rel @ v_t).squeeze(1)
+
+        print(f"[Cam {cam_idx}] Plane coords range: u=[{pu.min().item():.2f}, {pu.max().item():.2f}], v=[{pv.min().item():.2f}, {pv.max().item():.2f}]")
 
         src_rgb = _sample_image_nn(img, xs.long(), ys.long())  # [N,3]
 
@@ -328,6 +346,8 @@ def _collect_consistent_plane_samples(
             agree[agree_idx[ok]] += 1
 
         keep = agree >= int(consistency_min_agree)
+        print(f"[Cam {cam_idx}] Consistency check: {keep.sum().item()}/{len(keep)} samples passed (min_agree={consistency_min_agree})")
+
         if keep.sum() == 0:
             continue
 
@@ -337,6 +357,8 @@ def _collect_consistent_plane_samples(
 
         uv_all.append(np.stack([pu_k, pv_k], axis=1))
         rgb_all.append(rgb_k)
+
+        print(f"[Cam {cam_idx}] Total collected: {len(pu_k)} samples")
 
         if (cam_idx + 1) % 10 == 0:
             print(f"[{cam_idx+1}/{num_cams}] collected consistent samples")
@@ -436,6 +458,7 @@ def main():
         rgb_s = None
     else:
         plane = _plane_from_ymin(pts, up_axis=str(args.up_axis), offset=float(args.ymin_offset))
+
         uv_s, rgb_s = _collect_consistent_plane_samples(
             cams,
             plane,
@@ -469,28 +492,40 @@ def main():
     tex_wsum = np.zeros((tex_h, tex_w, 1), dtype=np.float32)
 
     if args.plane_mode == "ymin":
+        print(f"\n=== Texture accumulation (ymin mode) ===")
+        print(f"Collected samples: {len(uv_s)}")
+        print(f"UV bounds for texture: min={uv_min}, max={uv_max}")
+        print(f"Span: {span}")
+        print(f"Texture size: {tex_w} x {tex_h}")
+
         uu = (uv_s[:, 0] - float(uv_min[0])) / float(span[0] + 1e-12)
         vv = (uv_s[:, 1] - float(uv_min[1])) / float(span[1] + 1e-12)
         inside = (uu >= 0) & (uu <= 1) & (vv >= 0) & (vv <= 1)
+        print(f"Samples inside texture bounds: {inside.sum()}/{len(inside)}")
+
         uu = uu[inside]
         vv = vv[inside]
         rgb = rgb_s[inside]
 
-        tx = uu * (tex_w - 1)
-        ty = (1.0 - vv) * (tex_h - 1)
-        x0 = np.floor(tx).astype(np.int64)
-        y0 = np.floor(ty).astype(np.int64)
-        x1 = np.clip(x0 + 1, 0, tex_w - 1)
-        y1 = np.clip(y0 + 1, 0, tex_h - 1)
-        wx = np.clip(tx - x0.astype(np.float32), 0.0, 1.0)
-        wy = np.clip(ty - y0.astype(np.float32), 0.0, 1.0)
-        w00 = ((1 - wx) * (1 - wy))[:, None]
-        w10 = (wx * (1 - wy))[:, None]
-        w01 = ((1 - wx) * wy)[:, None]
-        w11 = (wx * wy)[:, None]
-        for (xi, yi, wi) in ((x0, y0, w00), (x1, y0, w10), (x0, y1, w01), (x1, y1, w11)):
-            np.add.at(tex_sum, (yi, xi), rgb * wi)
-            np.add.at(tex_wsum, (yi, xi), wi)
+        if len(uu) == 0:
+            print("WARNING: No samples inside texture bounds!")
+        else:
+            tx = uu * (tex_w - 1)
+            ty = (1.0 - vv) * (tex_h - 1)
+            x0 = np.floor(tx).astype(np.int64)
+            y0 = np.floor(ty).astype(np.int64)
+            x1 = np.clip(x0 + 1, 0, tex_w - 1)
+            y1 = np.clip(y0 + 1, 0, tex_h - 1)
+            wx = np.clip(tx - x0.astype(np.float32), 0.0, 1.0)
+            wy = np.clip(ty - y0.astype(np.float32), 0.0, 1.0)
+            w00 = ((1 - wx) * (1 - wy))[:, None]
+            w10 = (wx * (1 - wy))[:, None]
+            w01 = ((1 - wx) * wy)[:, None]
+            w11 = (wx * wy)[:, None]
+            for (xi, yi, wi) in ((x0, y0, w00), (x1, y0, w10), (x0, y1, w01), (x1, y1, w11)):
+                np.add.at(tex_sum, (yi, xi), rgb * wi)
+                np.add.at(tex_wsum, (yi, xi), wi)
+            print(f"Accumulated {len(uu)} samples into texture")
     else:
         inlier_pts_t = torch.from_numpy(inlier_pts).to(device="cuda", dtype=torch.float32)
         for cam_idx, cam in enumerate(cams):
