@@ -456,99 +456,13 @@ def training_pbr_static(dataset, opt, pipe, args):
 
         # No SH training in PBR-only mode.
 
-        # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
-
-        # Render
-        # PBR is enabled from the start!
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
-        
-        # Get Mask for loss calculation
-        mask = viewpoint_cam.gt_alpha_mask.cuda() if viewpoint_cam.gt_alpha_mask is not None else None
-        
-        # --- Skybox / Background Rendering ---
-        H, W = viewpoint_cam.image_height, viewpoint_cam.image_width
-        ray_dirs = _get_ray_dirs_world(viewpoint_cam)
-        bg_env = env_light.sample(ray_dirs).permute(2, 0, 1)
-        
-        gt_image = viewpoint_cam.original_image.cuda()
-
         # EnvMap Warmup Logic (disabled when env_light is frozen)
         is_env_warmup = (not freeze_env_light) and (iteration <= args.env_warmup_iters)
 
-        # --- PBR + Skybox Composite Supervision (no SH render loss) ---
-        alpha_map = render_pkg.get("rend_alpha")
-        if alpha_map is None:
-            raise RuntimeError("render_pkg missing 'rend_alpha'")
+        batch_cams = int(getattr(args, "batch_cams", 1) or 1)
+        batch_cams = max(1, batch_cams)
 
-        gbuffer_albedo_pm = render_pkg.get("gbuffer_albedo")
-        gbuffer_roughness_pm = render_pkg.get("gbuffer_roughness")
-        gbuffer_metallic_pm = render_pkg.get("gbuffer_metallic")
-        gbuffer_normal_pm = render_pkg.get("rend_normal")
-        gbuffer_depth = render_pkg.get("surf_depth")
-        if gbuffer_albedo_pm is None:
-            raise RuntimeError("render_pbr=True but missing G-buffer outputs")
-
-        # Unpremultiply (physical correctness requirement).
-        eps = 1e-6
-        denom = alpha_map + eps
-        gbuffer_albedo = torch.clamp(gbuffer_albedo_pm / denom, 0.0, 1.0)
-        gbuffer_roughness = torch.clamp(gbuffer_roughness_pm / denom, 0.1, 0.999)
-        gbuffer_metallic = torch.clamp(gbuffer_metallic_pm / denom, 0.0, 1.0)
-        gbuffer_normal = gbuffer_normal_pm / denom
-
-        shaded_obj = screen_space_pbr_shading(
-            gbuffer_albedo, gbuffer_roughness, gbuffer_metallic,
-            gbuffer_normal, gbuffer_depth,
-            viewpoint_cam.camera_center, viewpoint_cam.world_view_transform,
-            env_light=env_light,
-            ray_dirs_world=ray_dirs,
-        )
-
-        # Composite for reconstruction.
-        # By default, we composite with the rendered alpha. Optionally, if a GT mask exists,
-        # you can force compositing to use the GT mask to decouple background supervision
-        # from opacity/alpha artifacts.
-        alpha_for_comp = alpha_map
-        if getattr(args, "composite_use_gt_mask", False) and (mask is not None):
-            alpha_for_comp = mask
-
-        pred = shaded_obj * alpha_for_comp + bg_env * (1.0 - alpha_for_comp)
-
-        alpha_sup_loss = torch.tensor(0.0, device="cuda")
-        if mask is not None:
-            lambda_alpha = float(getattr(args, "lambda_alpha", 0.0) or 0.0)
-            if lambda_alpha > 0 and (not is_env_warmup):
-                alpha_sup_loss = lambda_alpha * torch.abs(alpha_map - mask).mean()
-
-        # Composite supervision weights:
-        # - Warmup: full-image supervision to let EnvMap see the background.
-        # - If gt_alpha_mask exists: weight foreground and (optionally) background separately.
-        #   This avoids an all-or-nothing switch while still allowing background supervision.
-        # - If no mask: full-image supervision.
-        obj_mask = mask if mask is not None else alpha_map.detach()
-
-        if is_env_warmup:
-            recon_weight = torch.ones_like(alpha_map)
-        elif mask is not None:
-            # Background weight:
-            # - If --supervise_background is set, default bg weight is 1.0.
-            # - Otherwise, default bg weight is 0.0 (foreground-only), unless --lambda_bg is provided.
-            if getattr(args, "lambda_bg", None) is None:
-                bg_w = 1.0 if getattr(args, "supervise_background", False) else 0.0
-            else:
-                bg_w = float(args.lambda_bg)
-            bg_w = max(0.0, bg_w)
-            recon_weight = mask + bg_w * (1.0 - mask)
-            if getattr(opt, "lambda_pbr", 0.0) > 0:
-                recon_weight = recon_weight + opt.lambda_pbr * obj_mask
-        else:
-            recon_weight = torch.ones_like(alpha_map)
-            if getattr(opt, "lambda_pbr", 0.0) > 0:
-                recon_weight = recon_weight + opt.lambda_pbr * obj_mask
-
+        # Global regularizers (apply once per iteration, not per camera).
         if freeze_env_light:
             env_tv_loss = torch.tensor(0.0, device="cuda")
             env_smooth_loss = torch.tensor(0.0, device="cuda")
@@ -569,8 +483,6 @@ def training_pbr_static(dataset, opt, pipe, args):
         scale_reg_loss = torch.tensor(0.0, device="cuda")
         lambda_scale_reg = float(getattr(args, "lambda_scale_reg", 0.0) or 0.0)
         if lambda_scale_reg > 0 and (not is_env_warmup):
-            # Regularize in log-scale space to avoid exp overflow / NaN propagation.
-            # _scaling stores log(scale); get_scaling = exp(_scaling).
             log_scale_max = gaussians._scaling.max(dim=1).values
             scale_thresh = float(getattr(args, "scale_reg_max_ratio", 0.1)) * scene_extent
             log_thresh = float(np.log(max(scale_thresh, 1e-12)))
@@ -578,35 +490,153 @@ def training_pbr_static(dataset, opt, pipe, args):
             scale_over_log = torch.relu(log_scale_max - log_thresh)
             scale_reg_loss = lambda_scale_reg * (scale_over_log ** 2).mean()
 
-        reg_mask = mask if mask is not None else alpha_map.detach()
-        
-        if is_env_warmup:
-            # Warmup Phase: Skip material regularization
-            pbr_losses = {"total_pbr_reg": torch.tensor(0.0, device="cuda")}
-            pbr_reg_loss = torch.tensor(0.0, device="cuda")
-        else:
-            pbr_losses = compute_pbr_losses(
+        # Gradient accumulation over multiple cameras reduces variance for non-Lambertian cues.
+        gaussians.optimizer.zero_grad(set_to_none=True)
+        if env_light_optimizer is not None:
+            env_light_optimizer.zero_grad(set_to_none=True)
+
+        recon_loss_sum = 0.0
+        l1_sum = 0.0
+        ssim_term_sum = 0.0
+        alpha_sup_sum = 0.0
+        pbr_reg_sum = 0.0
+        pbr_reg_unscaled_sum = 0.0
+        obj_cov_sum = 0.0
+        alpha_mean_sum = 0.0
+        weight_mean_sum = 0.0
+
+        # Keep last-camera tensors for logging images/diagnostics.
+        viewpoint_cam = None
+        alpha_map = None
+        obj_mask = None
+        recon_weight = None
+        pbr_losses = {"total_pbr_reg": torch.tensor(0.0, device="cuda")}
+        pbr_reg_loss = torch.tensor(0.0, device="cuda")
+        alpha_sup_loss = torch.tensor(0.0, device="cuda")
+        gbuffer_albedo = None
+        gbuffer_roughness = None
+        gbuffer_metallic = None
+
+        for _ in range(batch_cams):
+            if not viewpoint_stack:
+                viewpoint_stack = scene.getTrainCameras().copy()
+            viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
+
+            render_pkg = render(viewpoint_cam, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
+            alpha_map = render_pkg.get("rend_alpha")
+            if alpha_map is None:
+                raise RuntimeError("render_pkg missing 'rend_alpha'")
+
+            mask = viewpoint_cam.gt_alpha_mask.cuda() if viewpoint_cam.gt_alpha_mask is not None else None
+            mask = _process_gt_mask(args, mask)
+
+            ray_dirs = _get_ray_dirs_world(viewpoint_cam)
+            bg_env = env_light.sample(ray_dirs).permute(2, 0, 1)
+            gt_image = viewpoint_cam.original_image.cuda()
+
+            gbuffer_albedo_pm = render_pkg.get("gbuffer_albedo")
+            gbuffer_roughness_pm = render_pkg.get("gbuffer_roughness")
+            gbuffer_metallic_pm = render_pkg.get("gbuffer_metallic")
+            gbuffer_normal_pm = render_pkg.get("rend_normal")
+            gbuffer_depth = render_pkg.get("surf_depth")
+            if gbuffer_albedo_pm is None:
+                raise RuntimeError("render_pbr=True but missing G-buffer outputs")
+
+            eps = 1e-6
+            denom = alpha_map + eps
+            gbuffer_albedo = torch.clamp(gbuffer_albedo_pm / denom, 0.0, 1.0)
+            gbuffer_roughness = torch.clamp(gbuffer_roughness_pm / denom, 0.1, 0.999)
+            gbuffer_metallic = torch.clamp(gbuffer_metallic_pm / denom, 0.0, 1.0)
+            gbuffer_normal = gbuffer_normal_pm / denom
+
+            shaded_obj = screen_space_pbr_shading(
                 gbuffer_albedo,
                 gbuffer_roughness,
                 gbuffer_metallic,
-                alpha_map=reg_mask,
-                lambda_albedo_smooth=args.lambda_albedo_smooth,
-                lambda_roughness_smooth=args.lambda_roughness_smooth,
-                lambda_metallic_smooth=args.lambda_metallic_smooth,
-                lambda_metallic_prior=args.lambda_metallic_prior,
-                lambda_roughness_prior=args.lambda_roughness_prior,
-                lambda_albedo_chroma=args.lambda_albedo_chroma,
+                gbuffer_normal,
+                gbuffer_depth,
+                viewpoint_cam.camera_center,
+                viewpoint_cam.world_view_transform,
+                env_light=env_light,
+                ray_dirs_world=ray_dirs,
             )
-            pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses["total_pbr_reg"]
 
-        # Full-image reconstruction loss (PBR object + skybox), with extra object-region weighting.
-        Ll1 = l1_loss(pred, gt_image, mask=recon_weight)
-        ssim_val = ssim(
-            pred.unsqueeze(0),
-            gt_image.unsqueeze(0),
-            mask=recon_weight.unsqueeze(0),
-        )
-        recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
+            alpha_for_comp = alpha_map
+            if getattr(args, "composite_use_gt_mask", False) and (mask is not None):
+                alpha_for_comp = mask
+            pred = shaded_obj * alpha_for_comp + bg_env * (1.0 - alpha_for_comp)
+
+            alpha_sup_loss = torch.tensor(0.0, device="cuda")
+            if mask is not None:
+                lambda_alpha = float(getattr(args, "lambda_alpha", 0.0) or 0.0)
+                if lambda_alpha > 0 and (not is_env_warmup):
+                    alpha_sup_loss = lambda_alpha * torch.abs(alpha_map - mask).mean()
+
+            obj_mask = mask if mask is not None else alpha_map.detach()
+            if is_env_warmup:
+                recon_weight = torch.ones_like(alpha_map)
+            elif mask is not None:
+                if getattr(args, "lambda_bg", None) is None:
+                    bg_w = 1.0 if getattr(args, "supervise_background", False) else 0.0
+                else:
+                    bg_w = float(args.lambda_bg)
+                bg_w = max(0.0, bg_w)
+                recon_weight = mask + bg_w * (1.0 - mask)
+                if getattr(opt, "lambda_pbr", 0.0) > 0:
+                    recon_weight = recon_weight + opt.lambda_pbr * obj_mask
+            else:
+                recon_weight = torch.ones_like(alpha_map)
+                if getattr(opt, "lambda_pbr", 0.0) > 0:
+                    recon_weight = recon_weight + opt.lambda_pbr * obj_mask
+
+            reg_mask = mask if mask is not None else alpha_map.detach()
+            if is_env_warmup:
+                pbr_losses = {"total_pbr_reg": torch.tensor(0.0, device="cuda")}
+                pbr_reg_loss = torch.tensor(0.0, device="cuda")
+            else:
+                pbr_losses = compute_pbr_losses(
+                    gbuffer_albedo,
+                    gbuffer_roughness,
+                    gbuffer_metallic,
+                    alpha_map=reg_mask,
+                    lambda_albedo_smooth=args.lambda_albedo_smooth,
+                    lambda_roughness_smooth=args.lambda_roughness_smooth,
+                    lambda_metallic_smooth=args.lambda_metallic_smooth,
+                    lambda_metallic_prior=args.lambda_metallic_prior,
+                    lambda_roughness_prior=args.lambda_roughness_prior,
+                    lambda_albedo_chroma=args.lambda_albedo_chroma,
+                )
+                pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses["total_pbr_reg"]
+
+            Ll1 = l1_loss(pred, gt_image, mask=recon_weight)
+            ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=recon_weight.unsqueeze(0))
+            recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
+
+            cam_loss = opt.lambda_rgb * recon_loss + alpha_sup_loss + pbr_reg_loss
+            if not torch.isfinite(cam_loss):
+                raise FloatingPointError("Non-finite cam_loss detected during minibatch accumulation.")
+            (cam_loss / float(batch_cams)).backward()
+
+            recon_loss_sum += float(recon_loss.detach().cpu().item())
+            l1_sum += float(Ll1.detach().cpu().item())
+            ssim_term_sum += float((1.0 - ssim_val.detach()).cpu().item())
+            alpha_sup_sum += float(alpha_sup_loss.detach().cpu().item())
+            pbr_reg_sum += float(pbr_reg_loss.detach().cpu().item())
+            pbr_reg_unscaled_sum += float(pbr_losses["total_pbr_reg"].detach().cpu().item())
+            obj_cov_sum += float((obj_mask > 0.5).float().mean().detach().cpu().item())
+            alpha_mean_sum += float(alpha_map.mean().detach().cpu().item())
+            weight_mean_sum += float(recon_weight.mean().detach().cpu().item())
+
+        global_loss = env_tv_loss + env_smooth_loss + env_prior_loss + scale_reg_loss
+        if not torch.isfinite(global_loss):
+            raise FloatingPointError("Non-finite global regularizer loss detected.")
+        global_loss.backward()
+
+        recon_loss = torch.tensor(recon_loss_sum / float(batch_cams), device="cuda")
+        Ll1 = torch.tensor(l1_sum / float(batch_cams), device="cuda")
+        ssim_val = torch.tensor(1.0 - (ssim_term_sum / float(batch_cams)), device="cuda")
+        alpha_sup_loss = torch.tensor(alpha_sup_sum / float(batch_cams), device="cuda")
+        pbr_reg_loss = torch.tensor(pbr_reg_sum / float(batch_cams), device="cuda")
 
         total_loss = (
             opt.lambda_rgb * recon_loss
@@ -619,18 +649,8 @@ def training_pbr_static(dataset, opt, pipe, args):
         )
 
         if not torch.isfinite(total_loss):
-            raise FloatingPointError(
-                "Non-finite total_loss detected: "
-                f"recon={float(recon_loss.detach().cpu()):.6f}, "
-                f"env_tv={float(env_tv_loss.detach().cpu()):.6f}, "
-                f"env_smooth={float(env_smooth_loss.detach().cpu()):.6f}, "
-                f"env_prior={float(env_prior_loss.detach().cpu()):.6f}, "
-                f"scale_reg={float(scale_reg_loss.detach().cpu()):.6f}, "
-                f"pbr_reg={float(pbr_reg_loss.detach().cpu()):.6f}"
-            )
+            raise FloatingPointError("Non-finite total_loss detected after minibatch accumulation.")
 
-        # Backward
-        total_loss.backward()
         iter_end.record()
 
         # Optimize
@@ -654,12 +674,14 @@ def training_pbr_static(dataset, opt, pipe, args):
 
             if args.log_interval > 0 and (iteration % args.log_interval == 0):
                 env_tv_unscaled = env_light.tv_loss_weighted().item()
-                pbr_reg_unscaled = pbr_losses["total_pbr_reg"].item()
-                obj_cov = (obj_mask > 0.5).float().mean().item()
+                pbr_reg_unscaled = pbr_reg_unscaled_sum / float(batch_cams)
+                obj_cov = obj_cov_sum / float(batch_cams)
                 scale_max_all = gaussians.get_scaling.max(dim=1).values
                 scale_max_val = torch.nan_to_num(scale_max_all, nan=0.0, posinf=1e9, neginf=0.0).max().item()
                 env_mean = env_light.env_map.mean().item()
                 env_max = env_light.env_map.max().item()
+                alpha_mean = alpha_mean_sum / float(batch_cams)
+                w_mean = weight_mean_sum / float(batch_cams)
                 print(
                     f"\n[ITER {iteration}] total={total_loss.item():.6f} "
                     f"(lambda_rgb*recon={opt.lambda_rgb * recon_loss.item():.6f}, "
@@ -672,7 +694,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                     f"tv_unscaled={env_tv_unscaled:.6e} reg_unscaled={pbr_reg_unscaled:.6e} | "
                     f"env_mean={env_mean:.3f} env_max={env_max:.3f} | "
                     f"scale_max={scale_max_val:.3f} | "
-                    f"obj_cov={obj_cov:.3f} alpha_mean={alpha_map.mean().item():.3f} w_mean={recon_weight.mean().item():.3f}"
+                    f"obj_cov={obj_cov:.3f} alpha_mean={alpha_mean:.3f} w_mean={w_mean:.3f}"
                 )
 
             # Early Stopping Check (Relative Percentage Strategy)
@@ -867,6 +889,12 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Update env_light every N iterations after env_update_after (warmup always updates).",
+    )
+    parser.add_argument(
+        "--batch_cams",
+        type=int,
+        default=1,
+        help="Number of random training cameras per iteration (gradient accumulation); improves stability for non-Lambertian cues.",
     )
     
     # PBR params
