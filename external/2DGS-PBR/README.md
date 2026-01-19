@@ -14,7 +14,15 @@ This directory contains a static-geometry PBR training/rendering pipeline:
 python -m venv om
 source om/bin/activate
 python -m pip install -U pip
-python -m pip install -r requirements.txt
+
+# 1. Install PyTorch with CUDA (required)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+
+# 2. Install core dependencies
+pip install -r requirements.txt
+
+# 3. Install CUDA extensions (must be after PyTorch)
+pip install -r requirements-extensions.txt
 ```
 
 ### Inputs
@@ -231,7 +239,15 @@ including `pbr_shaded/`, `albedo/`, `roughness/`, `metallic/`, `normal/`, `depth
 python -m venv om
 source om/bin/activate
 python -m pip install -U pip
-python -m pip install -r requirements.txt
+
+# 1. 安装 PyTorch + CUDA（必需）
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+
+# 2. 安装核心依赖
+pip install -r requirements.txt
+
+# 3. 安装 CUDA 扩展（必须在 PyTorch 之后）
+pip install -r requirements-extensions.txt
 ```
 
 ### 输入
