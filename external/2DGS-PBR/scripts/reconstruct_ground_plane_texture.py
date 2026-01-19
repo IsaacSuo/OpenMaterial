@@ -209,6 +209,8 @@ def _collect_consistent_plane_samples(
     consistency_min_agree: int,
     consistency_color_l1: float,
     seed: int,
+    min_abs_n_dot_dir: float,
+    max_t: float | None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Collect (u,v) plane coords and RGB colors from pixels that are consistent across views.
@@ -257,9 +259,20 @@ def _collect_consistent_plane_samples(
         o = cam.camera_center.view(1, 3).to(device)  # [1,3]
 
         denom = (dirs_w * n_t).sum(dim=1)  # [N]
+        if float(min_abs_n_dot_dir) > 0:
+            ang_ok = torch.abs(denom) >= float(min_abs_n_dot_dir)
+            denom = denom[ang_ok]
+            dirs_w = dirs_w[ang_ok]
+            xs = xs[ang_ok]
+            ys = ys[ang_ok]
+            xy = xy[ang_ok]
+            if denom.numel() == 0:
+                continue
         numer = (o * n_t).sum(dim=1).squeeze(0) + d_t  # scalar
         t = -numer / (denom + 1e-8)
         valid_t = t > 0
+        if max_t is not None and float(max_t) > 0:
+            valid_t = valid_t & (t < float(max_t))
         if valid_t.sum() == 0:
             continue
 
@@ -361,6 +374,24 @@ def main():
     parser.add_argument("--consistency_min_agree", type=int, default=2, help="Min agreeing views to accept a sample")
     parser.add_argument("--consistency_color_l1", type=float, default=0.12, help="Mean absolute RGB threshold for agreement (LDR in [0,1])")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--min_abs_n_dot_dir",
+        type=float,
+        default=0.15,
+        help="Reject rays nearly parallel to the plane: require |n·dir| >= this value (helps avoid huge t/uv outliers).",
+    )
+    parser.add_argument(
+        "--max_t",
+        type=float,
+        default=None,
+        help="Optional max ray-plane intersection distance (in world units). If set, rejects very far intersections.",
+    )
+    parser.add_argument(
+        "--uv_quantile",
+        type=float,
+        default=0.01,
+        help="Use quantiles [q, 1-q] to compute uv bounds in ymin mode (robust to outliers).",
+    )
 
     args = parser.parse_args()
     dataset = model.extract(args)
@@ -414,9 +445,13 @@ def main():
             consistency_min_agree=int(args.consistency_min_agree),
             consistency_color_l1=float(args.consistency_color_l1),
             seed=int(args.seed),
+            min_abs_n_dot_dir=float(args.min_abs_n_dot_dir),
+            max_t=float(args.max_t) if args.max_t is not None else None,
         )
-        uv_min = uv_s.min(axis=0)
-        uv_max = uv_s.max(axis=0)
+        q = float(args.uv_quantile)
+        q = max(0.0, min(0.49, q))
+        uv_min = np.quantile(uv_s, q, axis=0)
+        uv_max = np.quantile(uv_s, 1.0 - q, axis=0)
 
     margin = float(args.plane_margin)
     span = uv_max - uv_min
