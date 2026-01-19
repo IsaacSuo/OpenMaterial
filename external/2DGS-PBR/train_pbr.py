@@ -26,6 +26,7 @@ from tqdm import tqdm
 from utils.loss_utils import l1_loss, ssim, compute_pbr_losses
 from utils.pbr_utils import (
     EnvironmentLight,
+    GroundPlane,
     screen_space_pbr_shading,
     compute_ray_directions_world_from_fov,
 )
@@ -52,6 +53,46 @@ def _get_ray_dirs_world(viewpoint_cam) -> torch.Tensor:
         world_view_transform=viewpoint_cam.world_view_transform,
         device="cuda",
     )
+
+def _compute_background(
+    ray_dirs: torch.Tensor,
+    camera_center: torch.Tensor,
+    env_light,
+    ground_plane=None,
+) -> torch.Tensor:
+    """
+    Compute background color for each pixel.
+
+    If ground_plane is provided:
+      - Rays hitting the ground plane → sample ground texture
+      - Rays missing the ground → sample environment map (sky)
+    Otherwise:
+      - All rays sample environment map
+
+    Args:
+        ray_dirs: [H, W, 3] normalized ray directions (world space)
+        camera_center: [3] camera position in world space
+        env_light: EnvironmentLight module
+        ground_plane: Optional GroundPlane module
+
+    Returns:
+        bg: [3, H, W] background color (ground + sky composite)
+    """
+    # Sample environment map for all rays (sky fallback)
+    sky_color = env_light.sample(ray_dirs).permute(2, 0, 1)  # [3, H, W]
+
+    if ground_plane is None:
+        return sky_color
+
+    # Sample ground plane
+    ground_color, ground_mask = ground_plane.sample(ray_dirs, camera_center)
+    ground_color = ground_color.permute(2, 0, 1)  # [3, H, W]
+    ground_mask = ground_mask.unsqueeze(0).float()  # [1, H, W]
+
+    # Composite: ground where hit, sky elsewhere
+    bg = ground_color * ground_mask + sky_color * (1.0 - ground_mask)
+
+    return bg
 
 @torch.no_grad()
 def _process_gt_mask(args, mask: torch.Tensor | None) -> torch.Tensor | None:
@@ -245,6 +286,7 @@ def _run_pbr_eval(
     background: torch.Tensor,
     dummy_color: torch.Tensor,
     env_light,
+    ground_plane=None,
     log_gt: bool = False,
     args=None,
 ):
@@ -271,7 +313,7 @@ def _run_pbr_eval(
             render_pkg = render(viewpoint, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
 
             ray_dirs = _get_ray_dirs_world(viewpoint)
-            bg_env = env_light.sample(ray_dirs).permute(2, 0, 1)
+            bg_env = _compute_background(ray_dirs, viewpoint.camera_center, env_light, ground_plane)
 
             alpha_map = render_pkg["rend_alpha"]
             denom = alpha_map + 1e-6
@@ -434,6 +476,24 @@ def training_pbr_static(dataset, opt, pipe, args):
 
     scene_extent = float(scene.cameras_extent)
 
+    # 4.5 Ground Plane (optional, for finite-depth backgrounds)
+    ground_plane = None
+    if getattr(args, "ground_plane_json", None):
+        json_path = str(args.ground_plane_json)
+        if not os.path.exists(json_path):
+            raise FileNotFoundError(f"--ground_plane_json not found: {json_path}")
+
+        # Determine texture path
+        tex_path = getattr(args, "ground_texture", None)
+        if tex_path is None:
+            # Default: look for ground_texture.png in the same directory
+            tex_path = os.path.join(os.path.dirname(json_path), "ground_texture.png")
+        if not os.path.exists(tex_path):
+            raise FileNotFoundError(f"Ground texture not found: {tex_path}")
+
+        ground_plane = GroundPlane(json_path=json_path, texture_path=tex_path).cuda()
+        print(f"[GroundPlane] Initialized with plane from {json_path}")
+
     # 5. Training Loop
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
@@ -466,6 +526,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             background=background,
             dummy_color=dummy_color,
             env_light=env_light,
+            ground_plane=ground_plane,
             log_gt=True,
             args=args,
         )
@@ -554,7 +615,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             mask = _process_gt_mask(args, mask)
 
             ray_dirs = _get_ray_dirs_world(viewpoint_cam)
-            bg_env = env_light.sample(ray_dirs).permute(2, 0, 1)
+            bg_env = _compute_background(ray_dirs, viewpoint_cam.camera_center, env_light, ground_plane)
             gt_image = viewpoint_cam.original_image.cuda()
 
             gbuffer_albedo_pm = render_pkg.get("gbuffer_albedo")
@@ -860,6 +921,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                     background=background,
                     dummy_color=dummy_color,
                     env_light=env_light,
+                    ground_plane=ground_plane,
                     log_gt=(first_eval_iter is not None and iteration == first_eval_iter),
                     args=args,
                 )
@@ -1043,7 +1105,23 @@ if __name__ == "__main__":
     parser.add_argument("--early_stopping_interval", type=int, default=500, help="Interval (iterations) to check for improvement")
     parser.add_argument("--env_warmup_iters", type=int, default=1000, help="Number of iterations to optimize ONLY the environment map at the beginning.")
     parser.add_argument("--env_map_res", type=int, default=1024, help="Resolution of the environment map (height). Width will be 2x height.")
-    
+
+    # Ground Plane (for finite-depth backgrounds like checkerboard floor)
+    parser.add_argument(
+        "--ground_plane_json",
+        type=str,
+        default=None,
+        help="Path to ground_plane.json (output of reconstruct_ground_plane_texture.py). "
+             "If provided, ground texture will be used for background pixels that hit the plane.",
+    )
+    parser.add_argument(
+        "--ground_texture",
+        type=str,
+        default=None,
+        help="Path to ground_texture.png. If not specified, will look for ground_texture.png "
+             "in the same directory as ground_plane_json.",
+    )
+
     # Save/Test
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])

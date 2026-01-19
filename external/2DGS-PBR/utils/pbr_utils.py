@@ -3,6 +3,7 @@ PBR (Physically Based Rendering) utilities for 2DGS-PBR
 
 Implements:
 - Environment lighting (HDR environment maps)
+- Ground plane with texture (for finite-depth backgrounds)
 - Cook-Torrance BRDF
 - Screen-space PBR shading
 """
@@ -12,7 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import os
-from typing import Optional, Union
+import json
+from typing import Optional, Union, Tuple
 
 
 class EnvironmentLight(nn.Module):
@@ -428,6 +430,275 @@ class EnvironmentLight(nn.Module):
     def forward(self, directions: torch.Tensor) -> torch.Tensor:
         """Alias for sample()"""
         return self.sample(directions)
+
+
+class GroundPlane(nn.Module):
+    """
+    Ground plane with texture for finite-depth background rendering.
+
+    This complements EnvironmentLight by providing a way to render finite-geometry
+    backgrounds (like a checkerboard floor) that have correct parallax.
+
+    For each pixel:
+    - If the camera ray intersects the ground plane → sample ground texture
+    - Otherwise → fall back to environment map (sky)
+
+    The ground plane is defined by:
+    - Plane equation: n·x + d = 0
+    - Basis vectors: u, v (tangent directions on the plane)
+    - Origin: p0 (a point on the plane)
+    - UV bounds: the texture covers [uv_min, uv_max] in plane coordinates
+    """
+
+    def __init__(
+        self,
+        json_path: Optional[str] = None,
+        texture_path: Optional[str] = None,
+    ):
+        """
+        Args:
+            json_path: Path to ground_plane.json (plane parameters)
+            texture_path: Path to ground_texture.png
+        """
+        super().__init__()
+
+        # Default: horizontal plane at y=0, facing up
+        self.register_buffer('plane_normal', torch.tensor([0.0, 1.0, 0.0]))
+        self.register_buffer('plane_d', torch.tensor(0.0))
+        self.register_buffer('plane_origin', torch.tensor([0.0, 0.0, 0.0]))
+        self.register_buffer('plane_u', torch.tensor([1.0, 0.0, 0.0]))
+        self.register_buffer('plane_v', torch.tensor([0.0, 0.0, 1.0]))
+        self.register_buffer('uv_min', torch.tensor([0.0, 0.0]))
+        self.register_buffer('uv_max', torch.tensor([1.0, 1.0]))
+
+        # Default texture: gray
+        self.ground_texture = nn.Parameter(
+            torch.ones(3, 64, 64) * 0.5,
+            requires_grad=False  # Typically frozen
+        )
+
+        if json_path is not None and os.path.exists(json_path):
+            self._load_plane_params(json_path)
+
+        if texture_path is not None and os.path.exists(texture_path):
+            self._load_texture(texture_path)
+
+    def _load_plane_params(self, json_path: str):
+        """Load plane parameters from ground_plane.json"""
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+
+        plane = data['plane']
+        basis = data['basis']
+        uv_bounds = data['uv_bounds']
+
+        # Plane equation: n·x + d = 0
+        self.plane_normal.data = torch.tensor(plane['n'], dtype=torch.float32)
+        self.plane_d.data = torch.tensor(plane['d'], dtype=torch.float32)
+
+        # Plane basis
+        self.plane_origin.data = torch.tensor(basis['p0'], dtype=torch.float32)
+        self.plane_u.data = torch.tensor(basis['u'], dtype=torch.float32)
+        self.plane_v.data = torch.tensor(basis['v'], dtype=torch.float32)
+
+        # UV bounds
+        self.uv_min.data = torch.tensor(uv_bounds['min'], dtype=torch.float32)
+        self.uv_max.data = torch.tensor(uv_bounds['max'], dtype=torch.float32)
+
+        print(f"[GroundPlane] Loaded plane params from {json_path}")
+        print(f"  normal={self.plane_normal.tolist()}, d={self.plane_d.item():.4f}")
+        print(f"  UV bounds: [{self.uv_min.tolist()}] to [{self.uv_max.tolist()}]")
+
+    def _load_texture(self, texture_path: str):
+        """Load ground texture from image file"""
+        import imageio
+
+        img = imageio.imread(texture_path)
+        if img.dtype == np.uint8:
+            img = img.astype(np.float32) / 255.0
+
+        # Handle grayscale
+        if img.ndim == 2:
+            img = np.stack([img, img, img], axis=-1)
+        elif img.shape[-1] == 4:
+            img = img[..., :3]  # Drop alpha
+
+        # Convert to [C, H, W]
+        tex = torch.from_numpy(img).permute(2, 0, 1).float()
+
+        # Note: texture in the file has V flipped (top = +v_max)
+        # We flip it so that V increases downward in texture space
+        tex = torch.flip(tex, dims=[1])
+
+        self.ground_texture = nn.Parameter(tex, requires_grad=False)
+        print(f"[GroundPlane] Loaded texture from {texture_path}, shape={tuple(tex.shape)}")
+
+    def ray_plane_intersect(
+        self,
+        ray_origins: torch.Tensor,
+        ray_dirs: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute ray-plane intersection.
+
+        Plane equation: n·x + d = 0
+        Ray: o + t*dir
+        Intersection: n·(o + t*dir) + d = 0
+                      t = -(n·o + d) / (n·dir)
+
+        Args:
+            ray_origins: [..., 3] ray origins (camera position)
+            ray_dirs: [..., 3] normalized ray directions
+
+        Returns:
+            t: [...] intersection distance (negative = behind camera)
+            hit_mask: [...] bool, True if ray hits plane (t > 0, valid intersection)
+            hit_points: [..., 3] intersection points in world space
+        """
+        # n·dir
+        n_dot_dir = (ray_dirs * self.plane_normal).sum(dim=-1)  # [...]
+
+        # Avoid division by zero (ray parallel to plane)
+        parallel_mask = torch.abs(n_dot_dir) < 1e-6
+        n_dot_dir_safe = torch.where(parallel_mask, torch.ones_like(n_dot_dir), n_dot_dir)
+
+        # n·o + d
+        n_dot_o = (ray_origins * self.plane_normal).sum(dim=-1) + self.plane_d  # [...]
+
+        # t = -(n·o + d) / (n·dir)
+        t = -n_dot_o / n_dot_dir_safe
+
+        # Hit if t > 0 (in front of camera) and ray not parallel to plane
+        hit_mask = (t > 0) & (~parallel_mask)
+
+        # Compute hit points
+        hit_points = ray_origins + t.unsqueeze(-1) * ray_dirs  # [..., 3]
+
+        return t, hit_mask, hit_points
+
+    def world_to_uv(self, points: torch.Tensor) -> torch.Tensor:
+        """
+        Convert world-space points (on the plane) to UV coordinates.
+
+        Args:
+            points: [..., 3] world-space points
+
+        Returns:
+            uv: [..., 2] UV coordinates
+        """
+        # Relative to plane origin
+        rel = points - self.plane_origin  # [..., 3]
+
+        # Project onto plane basis
+        u = (rel * self.plane_u).sum(dim=-1)  # [...]
+        v = (rel * self.plane_v).sum(dim=-1)  # [...]
+
+        return torch.stack([u, v], dim=-1)  # [..., 2]
+
+    def sample_texture(self, uv: torch.Tensor) -> torch.Tensor:
+        """
+        Sample ground texture at UV coordinates.
+
+        Args:
+            uv: [..., 2] UV coordinates in world units
+
+        Returns:
+            colors: [..., 3] RGB colors
+        """
+        original_shape = uv.shape[:-1]
+        uv_flat = uv.reshape(-1, 2)  # [N, 2]
+
+        # Normalize UV to [0, 1] based on bounds
+        uv_range = self.uv_max - self.uv_min
+        uv_normalized = (uv_flat - self.uv_min) / (uv_range + 1e-8)
+
+        # Convert to grid_sample coordinates [-1, 1]
+        grid = uv_normalized * 2.0 - 1.0  # [N, 2]
+
+        # grid_sample expects [B, C, H, W] and grid [B, H_out, W_out, 2]
+        grid = grid.unsqueeze(0).unsqueeze(0)  # [1, 1, N, 2]
+        tex = self.ground_texture.unsqueeze(0)  # [1, 3, H, W]
+
+        sampled = F.grid_sample(
+            tex, grid,
+            mode='bilinear',
+            padding_mode='border',
+            align_corners=True,
+        )  # [1, 3, 1, N]
+
+        colors = sampled.squeeze(0).squeeze(1).permute(1, 0)  # [N, 3]
+        return colors.reshape(*original_shape, 3)
+
+    def is_within_bounds(self, uv: torch.Tensor) -> torch.Tensor:
+        """
+        Check if UV coordinates are within texture bounds.
+
+        Args:
+            uv: [..., 2] UV coordinates
+
+        Returns:
+            in_bounds: [...] bool mask
+        """
+        in_u = (uv[..., 0] >= self.uv_min[0]) & (uv[..., 0] <= self.uv_max[0])
+        in_v = (uv[..., 1] >= self.uv_min[1]) & (uv[..., 1] <= self.uv_max[1])
+        return in_u & in_v
+
+    def sample(
+        self,
+        ray_dirs: torch.Tensor,
+        camera_center: torch.Tensor,
+        return_mask: bool = True,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Sample ground plane color for given ray directions.
+
+        Args:
+            ray_dirs: [H, W, 3] or [N, 3] normalized ray directions (world space)
+            camera_center: [3] camera position in world space
+            return_mask: if True, also return hit mask
+
+        Returns:
+            colors: same shape as ray_dirs with 3 channels, RGB colors
+            hit_mask: (if return_mask=True) [...] bool, True where ray hits ground
+        """
+        original_shape = ray_dirs.shape[:-1]
+        ray_dirs_flat = ray_dirs.reshape(-1, 3)  # [N, 3]
+
+        # Expand camera center to match rays
+        ray_origins = camera_center.expand(ray_dirs_flat.shape[0], 3)  # [N, 3]
+
+        # Ray-plane intersection
+        t, hit_mask, hit_points = self.ray_plane_intersect(ray_origins, ray_dirs_flat)
+
+        # World to UV
+        uv = self.world_to_uv(hit_points)  # [N, 2]
+
+        # Check bounds
+        in_bounds = self.is_within_bounds(uv)  # [N]
+
+        # Final hit mask: intersection + within bounds
+        final_hit = hit_mask & in_bounds  # [N]
+
+        # Sample texture
+        colors = self.sample_texture(uv)  # [N, 3]
+
+        # Zero out colors for non-hits (will be replaced by env_light)
+        colors = colors * final_hit.unsqueeze(-1).float()
+
+        colors = colors.reshape(*original_shape, 3)
+        final_hit = final_hit.reshape(*original_shape)
+
+        if return_mask:
+            return colors, final_hit
+        return colors
+
+    def forward(
+        self,
+        ray_dirs: torch.Tensor,
+        camera_center: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Alias for sample() with return_mask=True"""
+        return self.sample(ray_dirs, camera_center, return_mask=True)
 
 
 def compute_ray_directions_world_from_fov(

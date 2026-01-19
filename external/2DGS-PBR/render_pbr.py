@@ -24,6 +24,7 @@ from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
 from utils.pbr_utils import (
     EnvironmentLight,
+    GroundPlane,
     screen_space_pbr_shading,
     compute_ray_directions_world_from_fov,
 )
@@ -51,7 +52,32 @@ def save_single_channel(tensor, path, colormap=None):
     Image.fromarray(img).save(path)
 
 
-def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_name):
+def _compute_background(ray_dirs, camera_center, env_light, ground_plane=None):
+    """
+    Compute background color (ground + sky composite).
+
+    Args:
+        ray_dirs: [H, W, 3] ray directions in world space
+        camera_center: [3] camera position
+        env_light: EnvironmentLight module
+        ground_plane: Optional GroundPlane module
+
+    Returns:
+        bg: [3, H, W] background color
+    """
+    sky_color = env_light.sample(ray_dirs).permute(2, 0, 1)
+
+    if ground_plane is None:
+        return sky_color
+
+    ground_color, ground_mask = ground_plane.sample(ray_dirs, camera_center)
+    ground_color = ground_color.permute(2, 0, 1)
+    ground_mask = ground_mask.unsqueeze(0).float()
+
+    return ground_color * ground_mask + sky_color * (1.0 - ground_mask)
+
+
+def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_name, ground_plane=None):
     """Render a set of views and save outputs"""
 
     makedirs(out_dir, exist_ok=True)
@@ -97,7 +123,7 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
             world_view_transform=view.world_view_transform,
             device="cuda",
         )
-        bg_env = env_light.sample(ray_dirs).permute(2, 0, 1)
+        bg_env = _compute_background(ray_dirs, view.camera_center, env_light, ground_plane)
         alpha_map = render_pkg["rend_alpha"]
 
         # Standard SH rendering
@@ -209,6 +235,18 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--env_map", type=str, default=None, help="Path to HDR environment map")
     parser.add_argument("--compute_metrics", action="store_true", help="Compute PSNR/SSIM/LPIPS metrics")
+    parser.add_argument(
+        "--ground_plane_json",
+        type=str,
+        default=None,
+        help="Path to ground_plane.json (for finite-depth ground background)",
+    )
+    parser.add_argument(
+        "--ground_texture",
+        type=str,
+        default=None,
+        help="Path to ground_texture.png. If not specified, looks in same dir as ground_plane_json.",
+    )
 
     args = get_combined_args(parser)
     print("Rendering (PBR mode) " + args.model_path)
@@ -258,6 +296,19 @@ if __name__ == "__main__":
     if not env_light_loaded:
         print(f"Using default environment light (no trained env_light found)")
 
+    # Load ground plane (optional, for finite-depth ground backgrounds)
+    ground_plane = None
+    ground_plane_json = getattr(args, 'ground_plane_json', None)
+    if ground_plane_json and os.path.exists(ground_plane_json):
+        tex_path = getattr(args, 'ground_texture', None)
+        if tex_path is None:
+            tex_path = os.path.join(os.path.dirname(ground_plane_json), "ground_texture.png")
+        if os.path.exists(tex_path):
+            ground_plane = GroundPlane(json_path=ground_plane_json, texture_path=tex_path).cuda()
+            print(f"Loaded ground plane from: {ground_plane_json}")
+        else:
+            print(f"Warning: Ground texture not found at {tex_path}, skipping ground plane")
+
     skip_train = getattr(args, 'skip_train', False)
     skip_test = getattr(args, 'skip_test', False)
 
@@ -265,7 +316,7 @@ if __name__ == "__main__":
     if not skip_train:
         train_dir = os.path.join(args.model_path, 'train', f"ours_{iteration}")
         scene = render_set(dataset, iteration, pipe, env_light,
-                          "train", train_dir, "train")
+                          "train", train_dir, "train", ground_plane=ground_plane)
 
         if compute_metrics_flag:
             print("\nComputing train metrics...")
@@ -286,7 +337,7 @@ if __name__ == "__main__":
     if not skip_test:
         test_dir = os.path.join(args.model_path, 'test', f"ours_{iteration}")
         scene = render_set(dataset, iteration, pipe, env_light,
-                          "test", test_dir, "test")
+                          "test", test_dir, "test", ground_plane=ground_plane)
 
         if compute_metrics_flag:
             print("\nComputing test metrics...")
