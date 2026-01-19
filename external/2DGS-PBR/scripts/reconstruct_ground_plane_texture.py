@@ -21,6 +21,11 @@ Outputs (under --out_dir):
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path as _PathForInit
+# Add project root to Python path for imports
+sys.path.insert(0, str(_PathForInit(__file__).parent.parent.resolve()))
+
 import json
 import os
 from argparse import ArgumentParser
