@@ -6,11 +6,11 @@
 #   (e.g. via system site-packages), you can keep them and skip re-installing.
 # - Install PyTorch FIRST, then run: pip install -r requirements-extensions.txt
 
-# PyTorch stack (must be installed BEFORE CUDA extensions)
-torch==2.9.0a0+145a3a7bda.nv25.10
-torchvision==0.24.0a0+094e7af5
-# torchaudio is optional for this repo; install if you need it
-# torchaudio==2.9.0a0+...
+# PyTorch stack (install from PyTorch official index)
+# Run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+# Or use the lines below if your server has these specific wheels available
+# torch==2.9.0a0+145a3a7bda.nv25.10
+# torchvision==0.24.0a0+094e7af5
 
 # Core runtime
 numpy
