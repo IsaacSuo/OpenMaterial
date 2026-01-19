@@ -42,6 +42,7 @@
 
 - `train.py`：基础 2DGS 训练（SH/RGB 重建 + distortion/normal 正则 + densification）。
 - `train_pbr.py`：PBR 静态几何训练（dense 点云初始化、锁 xyz/rotation、禁 densification、学材质+env light、对“物体+skybox 合成”监督）。
+- `train_env_light.py`：可选的环境光预训练/初始化脚本（从多视角监督学习一个 env_light 初值，供 `train_pbr.py` 继续优化并用 prior 锚定）。
 - `render.py`：基础渲染/导出 + TSDF mesh 抽取（依赖 `open3d`、`utils/mesh_utils.py` 等）。
 - `render_pbr.py`：PBR 渲染导出（输出合成图、材质贴图、normal/depth 可视化，并可计算指标）。
 - `view.py` + `gaussian_renderer/network_gui.py`：交互式 viewer（socket 协议传输相机与渲染结果）。
@@ -63,6 +64,8 @@
   - Blender transforms 路径支持可选 `mask`：优先尝试从 `/mask/` 目录读取 mask；否则可从 RGBA alpha 提取（并在 alpha 来自图像通道时对 RGB 做背景填充）。
 - `utils/camera_utils.py`：
   - `loadCam()`：把 `CameraInfo`（PIL 图）转成 `scene.cameras.Camera`（torch tensor），并对 mask 做对齐与下采样。
+- `scripts/reconstruct_ground_plane_texture.py`：
+  - 用“地面平面 + 多视角重投影一致性”从背景像素拼接平面纹理（例如棋盘格地面）。
 
 ### 1.3 可微光栅化与输出缓冲
 
@@ -312,46 +315,50 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
 7. 初始化环境光 `EnvironmentLight(args.env_map, resolution=args.env_map_res)`：
    - 单独 Adam 优化器 `env_light_optimizer`，lr=`opt.env_light_lr`
    - 可选 `register_gradient_scaling_hook()`：用 solid-angle 权重缩放 env_map 梯度
+   - 可选 `--env_light_pth <path>`：加载预训练/初始化的 env_light state_dict（作为初值，不是冻结）
+   - 可选 `--env_light_prior_weight <w>`：启用 env prior，把 env_map 拉回初始化（减少“材质/光照互相吃解释权”的退化）
+   - 可选 `--env_update_after/--env_update_interval`：控制 env_light 的更新时间表（例如后期稀疏更新）
+   - 可选 `--batch_cams <B>`：每个 iteration 随机取 B 个相机做梯度累积（对非朗伯、高光/镜面更稳定；吞吐会近似下降到 1/B）
 
 ### 7.2 每步训练（核心）
 
 每 iteration：
 
 1. `gaussians.update_learning_rate(iter)`（即便锁几何，也会更新相关组的 lr；PBR-only 模式主要影响 opacity/scaling 等组）。
-2. 随机取 `viewpoint_cam`。
-3. `render(viewpoint_cam, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)`：
-   - `override_color` 传全 0，避免 SH 渲染进入监督（PBR-only）
-4. 取 mask：
-   - `mask = viewpoint_cam.gt_alpha_mask`（若数据集提供）
-5. 生成 skybox：
-   - `ray_dirs = compute_ray_directions_world_from_fov(...)`
-   - `bg_env = env_light.sample(ray_dirs)` → `[3,H,W]`
-6. 取 alpha + G-buffer + normal/depth，反预乘：
+2. 随机取 `viewpoint_cam`（若 `--batch_cams>1`，则会取 B 个相机逐个 forward/backward，做梯度累积）。
+3. 对每个相机：
+   - `render(viewpoint_cam, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)`：
+     - `override_color` 传全 0，避免 SH 渲染进入监督（PBR-only）
+   - 取 mask：`mask = viewpoint_cam.gt_alpha_mask`（若数据集提供；可通过 `--mask_binarize/--mask_dilate_px` 预处理）
+   - 生成 skybox：
+     - `ray_dirs = compute_ray_directions_world_from_fov(...)`
+     - `bg_env = env_light.sample(ray_dirs)` → `[3,H,W]`
+   - 取 alpha + G-buffer + normal/depth，反预乘：
    - `denom = alpha + eps`
    - `albedo = gbuffer_albedo_pm / denom`（clamp 到 `[0,1]`）
    - `roughness = gbuffer_roughness_pm / denom`（clamp 到 `[0.1,0.999]`）
    - `metallic = gbuffer_metallic_pm / denom`（clamp 到 `[0,1]`）
    - `normal = rend_normal_pm / denom`
-7. 计算物体着色：
-   - `shaded_obj = screen_space_pbr_shading(..., env_light=env_light, ray_dirs_world=ray_dirs)`
-8. 合成图监督：
-   - `pred = shaded_obj * alpha + bg_env * (1-alpha)`
-9. 重建损失的权重策略：
+   - 计算物体着色：`shaded_obj = screen_space_pbr_shading(..., env_light=env_light, ray_dirs_world=ray_dirs)`
+   - 合成图监督：`pred = shaded_obj * alpha + bg_env * (1-alpha)`
+4. 重建损失的权重策略：
    - warmup：`iteration <= env_warmup_iters` 时强制 full-image supervision（让 env_map 看到背景）
    - 非 warmup：若存在 `gt_alpha_mask` 且未设置 `--supervise_background`，则重建只在 mask 内做（避免 GT 背景是黑/抠图导致 env_map 被错误监督）
    - 可选：`--lambda_pbr` 为物体区域加额外权重
-10. 正则：
+5. 正则：
    - env 正则：`lambda_env_tv * env_light.tv_loss_weighted()` + 可选 `lambda_env_smooth * env_light.smoothness_loss_weighted()`
+   - env prior（可选）：`--env_light_prior_weight` 让 `env_map` 贴近初始化（可选 `--env_light_prior_log_space` 在 log 空间做）
    - scale 正则：`lambda_scale_reg` 约束 gaussian 过大（在 log-scale 空间做，阈值为 `scale_reg_max_ratio * cameras_extent`）
    - alpha 监督：可选 `--lambda_alpha` 让 `rend_alpha` 接近 `gt_alpha_mask`（防止 opacity 作弊）
    - 材质正则：`opt.lambda_pbr_reg * compute_pbr_losses(...)`（warmup 阶段跳过）
-11. 反传与 step：
-   - warmup：只 step `env_light_optimizer`，gaussians 不 step（但仍会 `zero_grad` 避免累积）
-   - 非 warmup：step gaussians + env_light
-12. clamp（可选）：
+6. 反传与 step：
+   - 若 `--batch_cams>1`：对每个相机的 `recon/alpha/pbr_reg` 做 `backward(loss/B)`，再把 env_tv/env_prior/scale_reg 这类“与相机无关”的正则单独 backward 一次。
+   - warmup：gaussians 不 step，只优化 env_light（注意 warmup 仍会尊重 `--env_update_interval` 的“每步更新”语义）
+   - 非 warmup：step gaussians；env_light 按 `--env_update_after/--env_update_interval` 更新（可做后期稀疏更新）
+7. clamp（可选）：
    - `env_clamp_min/max`：对 env_map 参数做硬 clamp
    - `scale_clamp_max_ratio`：对 `gaussians._scaling` 做上界 clamp（以 `cameras_extent` 比例定义）
-13. 评估与保存：
+8. 评估与保存：
    - 在 `test_iterations/save_iterations` 进行 render-eval、写 TensorBoard、保存 `point_cloud` 与 `env_light_*.pth`
    - 若设置了 `--test_interval`，脚本会自动生成 `test_iterations = [N, 2N, ...]`（并确保包含最后一次迭代），用于周期性评测
 
@@ -516,6 +523,16 @@ PBR 训练还会额外写：
 - `Camera.world_view_transform` 是转置存储的；`compute_ray_directions_world_from_fov()` 已处理该约定
 - 任何新写的 transform 计算都要确认你使用的是 w2c 还是 c2w，以及是否需要 `.transpose(0,1)`
 
+### 13.5 为什么“棋盘格地面”不能靠 env_map 复原？（以及怎么做）
+
+env_map 表示的是“无限远方向 → 颜色/辐射度”，无法表达有限深度几何产生的视差（例如地面/墙面纹理）。
+
+如果你要复原地面纹理，应使用“平面/几何 + 拼贴”：
+
+- `scripts/reconstruct_ground_plane_texture.py`
+  - `--plane_mode fit`：点云包含地面点时，RANSAC 拟合主平面并拼贴
+  - `--plane_mode ymin`：点云仅含物体时，用物体最低点 + up 轴推一个地面平面，并用多视角重投影一致性筛选地面像素再拼贴
+
 ---
 
 <a id="sec-14-reading-order"></a>
@@ -538,3 +555,5 @@ PBR 训练还会额外写：
 - “PBR 训练怎么组合 loss？” → `train_pbr.py` + `utils/loss_utils.py:compute_pbr_losses`
 - “mask 怎么来的？” → `scene/dataset_readers.py` + `utils/camera_utils.py`
 - “env_light 怎么存/怎么读？” → `train_pbr.py`（保存） + `render_pbr.py`（加载）
+- “env_light 初始化/先验怎么用？” → `train_env_light.py` + `train_pbr.py`（`--env_light_pth/--env_light_prior_weight`）
+- “棋盘格地面怎么复原？” → `scripts/reconstruct_ground_plane_texture.py`（plane mosaic）

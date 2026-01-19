@@ -11,6 +11,7 @@
 ## Training
 
 - PBR 静态几何训练（`train_pbr.py` 全流程）→ [PIPELINE_REFERENCE.md#sec-7-train-pbr](PIPELINE_REFERENCE.md#sec-7-train-pbr)
+- 环境光预训练/初始化（`train_env_light.py`）→ [PIPELINE_REFERENCE.md#sec-7-train-pbr](PIPELINE_REFERENCE.md#sec-7-train-pbr)
 - 基础 2DGS 训练（`train.py`，与 PBR 的关系）→ [PIPELINE_REFERENCE.md#sec-9-train-2dgs](PIPELINE_REFERENCE.md#sec-9-train-2dgs)
 - 训练/渲染产物（输出目录里有什么）→ [PIPELINE_REFERENCE.md#sec-10-artifacts](PIPELINE_REFERENCE.md#sec-10-artifacts)
 
@@ -32,6 +33,7 @@
 ## Debugging
 
 - 常见坑与排查清单（含 `run_single_scene.sh` 缺 `--gt_ply`）→ [PIPELINE_REFERENCE.md#sec-13-troubleshooting](PIPELINE_REFERENCE.md#sec-13-troubleshooting)
+- 背景/地面纹理复原（棋盘格地面）→ [PIPELINE_REFERENCE.md#sec-13-troubleshooting](PIPELINE_REFERENCE.md#sec-13-troubleshooting)
 - Tests（把测试当成接口契约）→ [PIPELINE_REFERENCE.md#sec-12-tests](PIPELINE_REFERENCE.md#sec-12-tests)
 
 ## Environment & Build

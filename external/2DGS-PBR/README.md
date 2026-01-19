@@ -15,14 +15,15 @@ python -m venv om
 source om/bin/activate
 python -m pip install -U pip
 
-# 1. Install PyTorch with CUDA (required)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+# 1. Install PyTorch with CUDA 12.9 (required for Blackwell/sm_120 GPUs)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
 
 # 2. Install core dependencies
 pip install -r requirements.txt
 
 # 3. Install CUDA extensions (must be after PyTorch)
-pip install -r requirements-extensions.txt
+# Use --no-isolation if torch is not found during build
+pip install --no-build-isolation -r requirements-extensions.txt
 ```
 
 ### Inputs

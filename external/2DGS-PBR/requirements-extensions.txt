@@ -3,5 +3,5 @@
 # Run: pip install --no-build-isolation -r requirements-extensions.txt
 # Note: Use --no-build-isolation if torch is not found during build
 
--e ./submodules/diff-surfel-rasterization
--e ./submodules/simple-knn
+./submodules/diff-surfel-rasterization
+./submodules/simple-knn
