@@ -4,7 +4,7 @@
 # - Your server uses NVIDIA PyTorch wheels (e.g. torch==2.9.0a0+...nv25.10, CUDA 13.0).
 #   Those builds may NOT be available from PyPI. If torch/torchvision are already present
 #   (e.g. via system site-packages), you can keep them and skip re-installing.
-# - The two local CUDA extensions must be installed from source AFTER PyTorch is installed.
+# - Install PyTorch FIRST, then run: pip install -r requirements-extensions.txt
 
 # PyTorch stack (must be installed BEFORE CUDA extensions)
 torch==2.9.0a0+145a3a7bda.nv25.10
@@ -28,7 +28,3 @@ imageio
 
 # Optional: silence torch/cuda FutureWarning about deprecated pynvml
 nvidia-ml-py
-
-# Local CUDA extensions (must be installed AFTER PyTorch)
--e ./submodules/diff-surfel-rasterization
--e ./submodules/simple-knn
