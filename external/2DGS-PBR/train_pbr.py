@@ -122,6 +122,78 @@ def _generate_ground_pcd_from_plane(
 
     return BasicPointCloud(points=points, colors=colors, normals=normals)
 
+class _GroundPlaneMeta:
+    def __init__(
+        self,
+        plane_normal: torch.Tensor,
+        plane_d: torch.Tensor,
+        plane_origin: torch.Tensor,
+        plane_u: torch.Tensor,
+        plane_v: torch.Tensor,
+        uv_min: torch.Tensor,
+        uv_max: torch.Tensor,
+    ):
+        self.plane_normal = plane_normal
+        self.plane_d = plane_d
+        self.plane_origin = plane_origin
+        self.plane_u = plane_u
+        self.plane_v = plane_v
+        self.uv_min = uv_min
+        self.uv_max = uv_max
+
+def _load_ground_plane_meta(json_path: str, device: str = "cuda") -> _GroundPlaneMeta:
+    with open(json_path, "r") as f:
+        meta = json.load(f)
+    n = torch.tensor(meta["plane"]["n"], dtype=torch.float32, device=device)
+    n = n / (torch.norm(n) + 1e-12)
+    d = torch.tensor(float(meta["plane"]["d"]), dtype=torch.float32, device=device)
+    p0 = torch.tensor(meta["basis"]["p0"], dtype=torch.float32, device=device)
+    u = torch.tensor(meta["basis"]["u"], dtype=torch.float32, device=device)
+    v = torch.tensor(meta["basis"]["v"], dtype=torch.float32, device=device)
+    uv_min = torch.tensor(meta["uv_bounds"]["min"], dtype=torch.float32, device=device)
+    uv_max = torch.tensor(meta["uv_bounds"]["max"], dtype=torch.float32, device=device)
+    return _GroundPlaneMeta(
+        plane_normal=n,
+        plane_d=d,
+        plane_origin=p0,
+        plane_u=u,
+        plane_v=v,
+        uv_min=uv_min,
+        uv_max=uv_max,
+    )
+
+def _ground_hit_mask_from_meta(
+    meta: _GroundPlaneMeta,
+    ray_dirs: torch.Tensor,      # [H,W,3]
+    camera_center: torch.Tensor, # [3]
+) -> torch.Tensor:
+    """
+    Compute a binary mask of pixels whose camera rays hit the ground plane and land inside UV bounds.
+    Returns a float mask of shape [1,H,W].
+    """
+    # Plane equation: n·x + d = 0, ray: o + t*dir
+    n = meta.plane_normal  # [3]
+    o = camera_center.view(1, 1, 3)
+    dir = ray_dirs
+
+    n_dot_dir = (dir * n).sum(dim=-1)  # [H,W]
+    parallel = torch.abs(n_dot_dir) < 1e-6
+    n_dot_dir_safe = torch.where(parallel, torch.ones_like(n_dot_dir), n_dot_dir)
+    n_dot_o = (o * n).sum(dim=-1) + meta.plane_d  # [1,1] broadcast
+    t = -n_dot_o / n_dot_dir_safe  # [H,W]
+    hit = (t > 0) & (~parallel)
+
+    hit_points = o + t.unsqueeze(-1) * dir  # [H,W,3]
+    rel = hit_points - meta.plane_origin.view(1, 1, 3)
+    uu = (rel * meta.plane_u.view(1, 1, 3)).sum(dim=-1)
+    vv = (rel * meta.plane_v.view(1, 1, 3)).sum(dim=-1)
+    in_u = (uu >= meta.uv_min[0]) & (uu <= meta.uv_max[0])
+    in_v = (vv >= meta.uv_min[1]) & (vv <= meta.uv_max[1])
+    in_bounds = in_u & in_v
+
+    out = (hit & in_bounds).to(torch.float32)  # [H,W]
+    return out.unsqueeze(0)  # [1,H,W]
+
 def _get_ray_dirs_world(viewpoint_cam) -> torch.Tensor:
     return compute_ray_directions_world_from_fov(
         image_height=viewpoint_cam.image_height,
@@ -611,6 +683,11 @@ def training_pbr_static(dataset, opt, pipe, args):
         ground_plane = GroundPlane(json_path=json_path, texture_path=tex_path).cuda()
         print(f"[GroundPlane] Initialized with plane from {json_path}")
 
+    # Ground plane meta is used for masking even when ground is modeled as Gaussians.
+    ground_meta = None
+    if getattr(args, "ground_plane_json", None) and ground_as_gaussians:
+        ground_meta = _load_ground_plane_meta(str(args.ground_plane_json), device="cuda")
+
     # 5. Training Loop
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
@@ -776,32 +853,69 @@ def training_pbr_static(dataset, opt, pipe, args):
                         warned_gt_mask_comp = True
                 else:
                     alpha_for_comp = mask
-            pred = shaded_obj * alpha_for_comp + bg_env * (1.0 - alpha_for_comp)
+
+            # If ground is modeled as Gaussians, prevent env_light from learning the finite ground:
+            # only allow env gradients on the "sky" region (not object, not ground-hit region).
+            bg_env_used = bg_env
+            ground_mask = None
+            sky_mask = None
+            obj_mask_for_weight = mask
+            if ground_as_gaussians and (ground_meta is not None):
+                if obj_mask_for_weight is None:
+                    # Fallback: use rendered alpha as a soft object mask when no GT mask exists.
+                    obj_mask_for_weight = alpha_map.detach()
+                ground_hit = _ground_hit_mask_from_meta(ground_meta, ray_dirs, viewpoint_cam.camera_center)
+                ground_mask = ground_hit * (1.0 - torch.clamp(obj_mask_for_weight, 0.0, 1.0))
+                sky_mask = torch.clamp(1.0 - torch.clamp(obj_mask_for_weight, 0.0, 1.0) - torch.clamp(ground_mask, 0.0, 1.0), 0.0, 1.0)
+                sky_mask_3 = sky_mask.expand_as(bg_env)
+                bg_env_used = bg_env * sky_mask_3 + bg_env.detach() * (1.0 - sky_mask_3)
+
+            pred = shaded_obj * alpha_for_comp + bg_env_used * (1.0 - alpha_for_comp)
 
             alpha_sup_loss = torch.tensor(0.0, device="cuda")
             if mask is not None:
                 lambda_alpha = float(getattr(args, "lambda_alpha", 0.0) or 0.0)
                 if lambda_alpha > 0 and (not is_env_warmup):
-                    alpha_sup_loss = lambda_alpha * torch.abs(alpha_map - mask).mean()
+                    if ground_as_gaussians:
+                        # Only supervise alpha inside the object mask to avoid suppressing ground Gaussians.
+                        denom = mask.sum().clamp(min=1.0)
+                        alpha_sup_loss = lambda_alpha * (torch.abs(alpha_map - mask) * mask).sum() / denom
+                    else:
+                        alpha_sup_loss = lambda_alpha * torch.abs(alpha_map - mask).mean()
 
             obj_mask = mask if mask is not None else alpha_map.detach()
-            if is_env_warmup:
-                recon_weight = torch.ones_like(alpha_map)
-            elif mask is not None:
+            if ground_as_gaussians and (sky_mask is not None) and (ground_mask is not None):
                 if getattr(args, "lambda_bg", None) is None:
-                    bg_w = 1.0 if getattr(args, "supervise_background", False) else 0.0
+                    sky_w = 1.0 if getattr(args, "supervise_background", False) else 0.0
                 else:
-                    bg_w = float(args.lambda_bg)
-                bg_w = max(0.0, bg_w)
-                recon_weight = mask + bg_w * (1.0 - mask)
+                    sky_w = float(args.lambda_bg)
+                sky_w = max(0.0, sky_w)
+                ground_w = float(getattr(args, "lambda_ground", 1.0) or 1.0)
+                ground_w = max(0.0, ground_w)
+                obj_w_mask = torch.clamp(obj_mask_for_weight, 0.0, 1.0) if obj_mask_for_weight is not None else alpha_map.detach()
+                recon_weight = obj_w_mask + ground_w * torch.clamp(ground_mask, 0.0, 1.0) + sky_w * torch.clamp(sky_mask, 0.0, 1.0)
                 if getattr(opt, "lambda_pbr", 0.0) > 0:
-                    recon_weight = recon_weight + opt.lambda_pbr * obj_mask
+                    recon_weight = recon_weight + opt.lambda_pbr * obj_w_mask
             else:
-                recon_weight = torch.ones_like(alpha_map)
-                if getattr(opt, "lambda_pbr", 0.0) > 0:
-                    recon_weight = recon_weight + opt.lambda_pbr * obj_mask
+                if is_env_warmup:
+                    recon_weight = torch.ones_like(alpha_map)
+                elif mask is not None:
+                    if getattr(args, "lambda_bg", None) is None:
+                        bg_w = 1.0 if getattr(args, "supervise_background", False) else 0.0
+                    else:
+                        bg_w = float(args.lambda_bg)
+                    bg_w = max(0.0, bg_w)
+                    recon_weight = mask + bg_w * (1.0 - mask)
+                    if getattr(opt, "lambda_pbr", 0.0) > 0:
+                        recon_weight = recon_weight + opt.lambda_pbr * obj_mask
+                else:
+                    recon_weight = torch.ones_like(alpha_map)
+                    if getattr(opt, "lambda_pbr", 0.0) > 0:
+                        recon_weight = recon_weight + opt.lambda_pbr * obj_mask
 
             reg_mask = mask if mask is not None else alpha_map.detach()
+            if ground_as_gaussians and (ground_mask is not None) and (obj_mask_for_weight is not None):
+                reg_mask = torch.clamp(torch.clamp(obj_mask_for_weight, 0.0, 1.0) + torch.clamp(ground_mask, 0.0, 1.0), 0.0, 1.0)
             if is_env_warmup:
                 pbr_losses = {"total_pbr_reg": torch.tensor(0.0, device="cuda")}
                 pbr_reg_loss = torch.tensor(0.0, device="cuda")
@@ -998,6 +1112,9 @@ def training_pbr_static(dataset, opt, pipe, args):
             # Step
             # [EnvMap Warmup] Only step Gaussians if NOT in warmup phase
             if not is_env_warmup:
+                gaussians.optimizer.step()
+            elif ground_as_gaussians:
+                # If ground is modeled as Gaussians, allow Gaussians to learn from the start.
                 gaussians.optimizer.step()
             
             # ALWAYS zero grad for Gaussians to prevent accumulation during warmup
@@ -1273,6 +1390,12 @@ if __name__ == "__main__":
         type=float,
         default=0.0,
         help="Optional small jitter along the plane normal when sampling ground points (helps avoid z-fighting).",
+    )
+    parser.add_argument(
+        "--lambda_ground",
+        type=float,
+        default=1.0,
+        help="Reconstruction weight for ground pixels when --ground_as_gaussians is set (sky uses --lambda_bg).",
     )
 
     # Save/Test
