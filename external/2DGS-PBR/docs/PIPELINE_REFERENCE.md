@@ -83,6 +83,9 @@
     - `sample()`：按方向采样 env map
     - `sample_prefiltered()`：粗糙度驱动 mipmap 预滤波采样（用于 IBL specular/ diffuse irradiance 近似）
     - `tv_loss_weighted()` / `smoothness_loss_weighted()` / `register_gradient_scaling_hook()`
+  - `GroundPlane`：可选的“有限深度背景”（例如棋盘格地面），用于替代纯 skybox：
+    - `sample(ray_dirs_world, camera_center)`：返回 `(ground_color, hit_mask)`，其中 `ground_color` 在未命中像素为 0，`hit_mask` 指示哪些像素射线与平面相交且落在 UV bounds 内
+    - `train_pbr.py` / `render_pbr.py` 中会把 ground 与 skybox 按 `hit_mask` 合成背景
   - `screen_space_pbr_shading()`：输入 G-buffer（albedo/roughness/metallic/normal/depth）与视线方向（可传入 `ray_dirs_world`），输出 `[3,H,W]` PBR shaded。
   - `compute_ray_directions_world_from_fov()`：根据 FoV + `Camera.world_view_transform` 计算每像素世界空间射线方向（注意本 repo 的 transform 约定见 §4）。
 - `utils/loss_utils.py`：
@@ -317,8 +320,12 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
    - 可选 `register_gradient_scaling_hook()`：用 solid-angle 权重缩放 env_map 梯度
    - 可选 `--env_light_pth <path>`：加载预训练/初始化的 env_light state_dict（作为初值，不是冻结）
    - 可选 `--env_light_prior_weight <w>`：启用 env prior，把 env_map 拉回初始化（减少“材质/光照互相吃解释权”的退化）
+   - 可选 `--dump_env_map_on_eval`：在每次 eval 时把 `env_map` 以 `.pt` dump 到 `<model_path>/debug_env_map/`（便于定位 NaN/爆亮）
    - 可选 `--env_update_after/--env_update_interval`：控制 env_light 的更新时间表（例如后期稀疏更新）
    - 可选 `--batch_cams <B>`：每个 iteration 随机取 B 个相机做梯度累积（对非朗伯、高光/镜面更稳定；吞吐会近似下降到 1/B）
+8. 可选初始化 GroundPlane（有限深度背景）：
+   - `--ground_plane_json <.../ground_plane.json>`（由 `scripts/reconstruct_ground_plane_texture.py` 生成）
+   - `--ground_texture <.../ground_texture.png>`（不传则默认取 json 同目录下的 `ground_texture.png`）
 
 ### 7.2 每步训练（核心）
 
@@ -330,9 +337,10 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
    - `render(viewpoint_cam, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)`：
      - `override_color` 传全 0，避免 SH 渲染进入监督（PBR-only）
    - 取 mask：`mask = viewpoint_cam.gt_alpha_mask`（若数据集提供；可通过 `--mask_binarize/--mask_dilate_px` 预处理）
-   - 生成 skybox：
+   - 生成背景（skybox 或 ground+sky）：
      - `ray_dirs = compute_ray_directions_world_from_fov(...)`
-     - `bg_env = env_light.sample(ray_dirs)` → `[3,H,W]`
+     - 若未启用 ground plane：`bg = env_light.sample(ray_dirs)` → `[3,H,W]`
+     - 若启用 ground plane：对每像素做 ray-plane intersection，命中则采样 `ground_texture.png`，否则采样 env_map，然后合成得到 `bg`
    - 取 alpha + G-buffer + normal/depth，反预乘：
    - `denom = alpha + eps`
    - `albedo = gbuffer_albedo_pm / denom`（clamp 到 `[0,1]`）
@@ -340,7 +348,8 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
    - `metallic = gbuffer_metallic_pm / denom`（clamp 到 `[0,1]`）
    - `normal = rend_normal_pm / denom`
    - 计算物体着色：`shaded_obj = screen_space_pbr_shading(..., env_light=env_light, ray_dirs_world=ray_dirs)`
-   - 合成图监督：`pred = shaded_obj * alpha + bg_env * (1-alpha)`
+   - 合成图监督：默认用 `rend_alpha` 合成：`pred = shaded_obj * alpha + bg * (1-alpha)`
+     - 可选 `--composite_use_gt_mask`：若存在 `gt_alpha_mask`，则用 GT mask 替代 `rend_alpha` 做合成/重建（减少“opacity 抖动导致的背景监督泄漏”）
 4. 重建损失的权重策略：
    - warmup：`iteration <= env_warmup_iters` 时强制 full-image supervision（让 env_map 看到背景）
    - 非 warmup：若存在 `gt_alpha_mask` 且未设置 `--supervise_background`，则重建只在 mask 内做（避免 GT 背景是黑/抠图导致 env_map 被错误监督）
@@ -360,6 +369,7 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
    - `scale_clamp_max_ratio`：对 `gaussians._scaling` 做上界 clamp（以 `cameras_extent` 比例定义）
 8. 评估与保存：
    - 在 `test_iterations/save_iterations` 进行 render-eval、写 TensorBoard、保存 `point_cloud` 与 `env_light_*.pth`
+   - 可选 `--debug_nonfinite_dump`：当 eval 中出现 NaN/Inf 时，将关键张量与统计信息写到 `<model_path>/debug_nonfinite/*.pt`（`--debug_nonfinite_dump_full` 会包含全分辨率 tensor；`--debug_nonfinite_raise` 会在 dump 后抛异常）
    - 若设置了 `--test_interval`，脚本会自动生成 `test_iterations = [N, 2N, ...]`（并确保包含最后一次迭代），用于周期性评测
 
 ### 7.3 早停（Early Stopping）
@@ -380,13 +390,15 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
 2. 决定 iteration：若 `--iteration=-1` 则扫描 `point_cloud/iteration_*` 取最大。
 3. 加载 `EnvironmentLight`：
    - 若存在 `env_light_{iteration}.pth` 则优先加载；否则尝试加载最新的 `env_light_*.pth`；都没有则用默认灰环境光。
-4. `render_set()`：
+4. （可选）加载 GroundPlane（有限深度背景）：
+   - `--ground_plane_json` + `--ground_texture`（不传 texture 则默认 json 同目录下的 `ground_texture.png`）
+5. `render_set()`：
    - `GaussianModel(use_pbr=True)` + `Scene(load_iteration=iteration)`
    - 对 train/test 相机循环渲染：
      - `render(..., render_pbr=True)` 得到 alpha + G-buffer + normal/depth
-     - skybox：`bg_env = env_light.sample(ray_dirs_world)`
-     - 标准 SH 合成图：`render_pkg["render"] + bg_env*(1-alpha)`
-     - PBR：反预乘 → `screen_space_pbr_shading` → 与 skybox 合成 → 保存
+     - 背景：默认 skybox（env_map），可选 ground+sky（与 `train_pbr.py` 同逻辑）
+     - 标准 SH 合成图：`render_pkg["render"] + bg*(1-alpha)`
+     - PBR：反预乘 → `screen_space_pbr_shading` → 与背景合成 → 保存
    - 额外保存材质贴图（albedo/roughness/metallic）、normal 可视化（normalize 后映射到 [0,1]）、depth colormap
 5. `--compute_metrics`：
    - 对 `renders/` 与 `pbr_shaded/` 分别与 `gt/` 计算 PSNR/SSIM（可选 LPIPS）
@@ -523,7 +535,14 @@ PBR 训练还会额外写：
 - `Camera.world_view_transform` 是转置存储的；`compute_ray_directions_world_from_fov()` 已处理该约定
 - 任何新写的 transform 计算都要确认你使用的是 w2c 还是 c2w，以及是否需要 `.transpose(0,1)`
 
-### 13.5 为什么“棋盘格地面”不能靠 env_map 复原？（以及怎么做）
+### 13.5 eval 中出现 NaN/Inf（快速定位）
+
+建议打开：
+
+- `--debug_nonfinite_dump`：自动把异常 iteration 的关键张量 dump 到 `<model_path>/debug_nonfinite/`
+- `--dump_env_map_on_eval`：每次 eval 额外 dump `env_map` 到 `<model_path>/debug_env_map/`，用于定位 env_map 是否先变成 NaN/Inf 或爆亮
+
+### 13.6 为什么“棋盘格地面”不能靠 env_map 复原？（以及怎么做）
 
 env_map 表示的是“无限远方向 → 颜色/辐射度”，无法表达有限深度几何产生的视差（例如地面/墙面纹理）。
 
@@ -556,4 +575,6 @@ env_map 表示的是“无限远方向 → 颜色/辐射度”，无法表达有
 - “mask 怎么来的？” → `scene/dataset_readers.py` + `utils/camera_utils.py`
 - “env_light 怎么存/怎么读？” → `train_pbr.py`（保存） + `render_pbr.py`（加载）
 - “env_light 初始化/先验怎么用？” → `train_env_light.py` + `train_pbr.py`（`--env_light_pth/--env_light_prior_weight`）
+- “如何启用有限深度地面背景？” → `scripts/reconstruct_ground_plane_texture.py`（生成 `ground_plane.json`/`ground_texture.png`） + `train_pbr.py`/`render_pbr.py`（`--ground_plane_json/--ground_texture`）
+- “eval NaN/Inf 怎么定位？” → `train_pbr.py`（`--debug_nonfinite_dump/--dump_env_map_on_eval`） + `<model_path>/debug_nonfinite/`/`debug_env_map/`
 - “棋盘格地面怎么复原？” → `scripts/reconstruct_ground_plane_texture.py`（plane mosaic）

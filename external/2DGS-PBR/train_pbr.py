@@ -19,6 +19,7 @@ import sys
 import uuid
 import numpy as np
 import re
+import json
 from argparse import ArgumentParser, Namespace
 from random import randint
 from tqdm import tqdm
@@ -43,6 +44,83 @@ try:
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
+
+def _generate_ground_pcd_from_plane(
+    ground_plane_json: str,
+    ground_texture_path: str | None,
+    num_points: int,
+    seed: int = 0,
+    height_jitter: float = 0.0,
+) -> "BasicPointCloud":
+    """
+    Generate a dense point cloud on the ground plane defined by ground_plane.json.
+
+    The generated points can be appended to the object-only --gt_ply to create a single
+    GaussianModel where ground is also PBR-shaded and has learnable materials.
+
+    Notes:
+    - Points are sampled uniformly in the plane UV bounds.
+    - Normals are set to the plane normal.
+    - Colors are optionally initialized from ground_texture.png (same convention as
+      reconstruct_ground_plane_texture.py). If texture is missing, defaults to gray.
+    """
+    from scene.gaussian_model import BasicPointCloud
+
+    with open(ground_plane_json, "r") as f:
+        meta = json.load(f)
+
+    plane_n = np.asarray(meta["plane"]["n"], dtype=np.float32)
+    plane_n = plane_n / (np.linalg.norm(plane_n) + 1e-12)
+    p0 = np.asarray(meta["basis"]["p0"], dtype=np.float32)
+    basis_u = np.asarray(meta["basis"]["u"], dtype=np.float32)
+    basis_v = np.asarray(meta["basis"]["v"], dtype=np.float32)
+
+    uv_min = np.asarray(meta["uv_bounds"]["min"], dtype=np.float32)  # [2]
+    uv_max = np.asarray(meta["uv_bounds"]["max"], dtype=np.float32)  # [2]
+
+    rng = np.random.default_rng(int(seed))
+    uu = rng.uniform(float(uv_min[0]), float(uv_max[0]), size=(int(num_points), 1)).astype(np.float32)
+    vv = rng.uniform(float(uv_min[1]), float(uv_max[1]), size=(int(num_points), 1)).astype(np.float32)
+
+    points = p0[None, :] + uu * basis_u[None, :] + vv * basis_v[None, :]
+    if height_jitter and float(height_jitter) != 0.0:
+        points = points + rng.normal(loc=0.0, scale=float(height_jitter), size=points.shape).astype(np.float32) * plane_n[None, :]
+
+    normals = np.repeat(plane_n[None, :], repeats=points.shape[0], axis=0).astype(np.float32)
+
+    colors = np.ones_like(points, dtype=np.float32) * 0.5
+    if ground_texture_path is not None and os.path.exists(ground_texture_path):
+        try:
+            from PIL import Image
+
+            img = np.asarray(Image.open(ground_texture_path).convert("RGB"), dtype=np.float32) / 255.0
+            tex_h, tex_w = img.shape[0], img.shape[1]
+
+            u01 = (uu.squeeze(1) - uv_min[0]) / max(float(uv_max[0] - uv_min[0]), 1e-8)
+            v01 = (vv.squeeze(1) - uv_min[1]) / max(float(uv_max[1] - uv_min[1]), 1e-8)
+            u01 = np.clip(u01, 0.0, 1.0)
+            v01 = np.clip(v01, 0.0, 1.0)
+
+            # v axis is flipped in the PNG (top = +v_max).
+            x = u01 * (tex_w - 1)
+            y = (1.0 - v01) * (tex_h - 1)
+            x0 = np.floor(x).astype(np.int32)
+            y0 = np.floor(y).astype(np.int32)
+            x1 = np.clip(x0 + 1, 0, tex_w - 1)
+            y1 = np.clip(y0 + 1, 0, tex_h - 1)
+            wx = (x - x0.astype(np.float32))[:, None]
+            wy = (y - y0.astype(np.float32))[:, None]
+
+            c00 = img[y0, x0]
+            c10 = img[y0, x1]
+            c01 = img[y1, x0]
+            c11 = img[y1, x1]
+            colors = (1 - wx) * (1 - wy) * c00 + wx * (1 - wy) * c10 + (1 - wx) * wy * c01 + wx * wy * c11
+            colors = np.clip(colors.astype(np.float32), 0.0, 1.0)
+        except Exception as e:
+            print(f"[Warning] Failed to sample ground texture for init colors: {e}. Using gray.")
+
+    return BasicPointCloud(points=points, colors=colors, normals=normals)
 
 def _get_ray_dirs_world(viewpoint_cam) -> torch.Tensor:
     return compute_ray_directions_world_from_fov(
@@ -409,6 +487,45 @@ def training_pbr_static(dataset, opt, pipe, args):
     # 1. Initialize Gaussians from Dense PLY
     print(f"Loading dense GT point cloud from: {args.gt_ply}")
     pcd = fetchPly(args.gt_ply)
+
+    # Optional: append a generated ground plane point cloud so ground is represented by Gaussians
+    # (and thus PBR-shaded + learnable materials), instead of being a fixed background texture.
+    ground_as_gaussians = bool(getattr(args, "ground_as_gaussians", False))
+    if ground_as_gaussians:
+        json_path = getattr(args, "ground_plane_json", None)
+        if not json_path:
+            raise ValueError("--ground_as_gaussians requires --ground_plane_json")
+        json_path = str(json_path)
+        if not os.path.exists(json_path):
+            raise FileNotFoundError(f"--ground_plane_json not found: {json_path}")
+
+        tex_path = getattr(args, "ground_texture", None)
+        if tex_path is None:
+            tex_path = os.path.join(os.path.dirname(json_path), "ground_texture.png")
+        tex_path = str(tex_path) if tex_path is not None else None
+        if tex_path is not None and (not os.path.exists(tex_path)):
+            print(f"[Warning] Ground texture not found at {tex_path}, initializing ground colors as gray.")
+            tex_path = None
+
+        ground_points = int(getattr(args, "ground_num_points", 200_000) or 200_000)
+        ground_seed = int(getattr(args, "ground_seed", 0) or 0)
+        ground_height_jitter = float(getattr(args, "ground_height_jitter", 0.0) or 0.0)
+
+        print(f"Generating ground point cloud from: {json_path} (N={ground_points})")
+        ground_pcd = _generate_ground_pcd_from_plane(
+            ground_plane_json=json_path,
+            ground_texture_path=tex_path,
+            num_points=ground_points,
+            seed=ground_seed,
+            height_jitter=ground_height_jitter,
+        )
+
+        pcd = type(pcd)(
+            points=np.concatenate([pcd.points, ground_pcd.points], axis=0),
+            colors=np.concatenate([pcd.colors, ground_pcd.colors], axis=0),
+            normals=np.concatenate([pcd.normals, ground_pcd.normals], axis=0),
+        )
+        print(f"Appended ground points. Combined PCD points: {pcd.points.shape[0]}")
     
     gaussians = GaussianModel(dataset.sh_degree, use_pbr=True)
     gaussians.roughness_min = float(getattr(args, "roughness_min", 0.02))
@@ -478,7 +595,7 @@ def training_pbr_static(dataset, opt, pipe, args):
 
     # 4.5 Ground Plane (optional, for finite-depth backgrounds)
     ground_plane = None
-    if getattr(args, "ground_plane_json", None):
+    if getattr(args, "ground_plane_json", None) and (not ground_as_gaussians):
         json_path = str(args.ground_plane_json)
         if not os.path.exists(json_path):
             raise FileNotFoundError(f"--ground_plane_json not found: {json_path}")
@@ -601,6 +718,7 @@ def training_pbr_static(dataset, opt, pipe, args):
         gbuffer_roughness = None
         gbuffer_metallic = None
 
+        warned_gt_mask_comp = False
         for _ in range(batch_cams):
             if not viewpoint_stack:
                 viewpoint_stack = scene.getTrainCameras().copy()
@@ -647,7 +765,17 @@ def training_pbr_static(dataset, opt, pipe, args):
 
             alpha_for_comp = alpha_map
             if getattr(args, "composite_use_gt_mask", False) and (mask is not None):
-                alpha_for_comp = mask
+                if ground_as_gaussians:
+                    # Dataset gt_alpha_mask usually covers only the object (not the ground). If we force GT-mask
+                    # compositing here, ground Gaussians would receive no reconstruction gradient.
+                    if not warned_gt_mask_comp:
+                        print(
+                            "[Warning] --ground_as_gaussians is enabled but --composite_use_gt_mask was set. "
+                            "Ignoring GT-mask compositing so ground can be learned by Gaussians."
+                        )
+                        warned_gt_mask_comp = True
+                else:
+                    alpha_for_comp = mask
             pred = shaded_obj * alpha_for_comp + bg_env * (1.0 - alpha_for_comp)
 
             alpha_sup_loss = torch.tensor(0.0, device="cuda")
@@ -1120,6 +1248,31 @@ if __name__ == "__main__":
         default=None,
         help="Path to ground_texture.png. If not specified, will look for ground_texture.png "
              "in the same directory as ground_plane_json.",
+    )
+    parser.add_argument(
+        "--ground_as_gaussians",
+        action="store_true",
+        help="If set, generate additional ground Gaussians from --ground_plane_json (and optional --ground_texture) "
+             "and append them to --gt_ply, so ground is PBR-shaded and has learnable material. "
+             "In this mode, GroundPlane background compositing is disabled to avoid double-ground.",
+    )
+    parser.add_argument(
+        "--ground_num_points",
+        type=int,
+        default=200_000,
+        help="Number of ground points to sample when --ground_as_gaussians is set.",
+    )
+    parser.add_argument(
+        "--ground_seed",
+        type=int,
+        default=0,
+        help="RNG seed for ground point sampling when --ground_as_gaussians is set.",
+    )
+    parser.add_argument(
+        "--ground_height_jitter",
+        type=float,
+        default=0.0,
+        help="Optional small jitter along the plane normal when sampling ground points (helps avoid z-fighting).",
     )
 
     # Save/Test

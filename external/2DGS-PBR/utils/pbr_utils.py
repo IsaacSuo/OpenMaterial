@@ -665,7 +665,8 @@ class GroundPlane(nn.Module):
         ray_dirs_flat = ray_dirs.reshape(-1, 3)  # [N, 3]
 
         # Expand camera center to match rays
-        ray_origins = camera_center.expand(ray_dirs_flat.shape[0], 3)  # [N, 3]
+        # camera_center is typically [3]; reshape to [1,3] before expanding.
+        ray_origins = camera_center.view(1, 3).expand(ray_dirs_flat.shape[0], 3)  # [N, 3]
 
         # Ray-plane intersection
         t, hit_mask, hit_points = self.ray_plane_intersect(ray_origins, ray_dirs_flat)
