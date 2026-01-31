@@ -89,6 +89,19 @@ sky = env_light.sample(ray_dirs_world)
 bg = ground_color * hit_mask.unsqueeze(-1).float() + sky * (1.0 - hit_mask.unsqueeze(-1).float())
 ```
 
+## Common Training Switches
+
+### Make ground learnable (as Gaussians)
+```bash
+python train_pbr.py \
+  --gt_ply <OBJECT_ONLY_DENSE.ply> \
+  --ground_plane_json <.../ground_plane.json> \
+  --ground_as_gaussians \
+  --ground_num_points 200000 \
+  --lambda_ground 1.0 \
+  --lambda_bg 0.1
+```
+
 ### Camera
 ```python
 # Automatically created by Scene

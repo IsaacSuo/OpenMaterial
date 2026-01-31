@@ -840,20 +840,6 @@ def training_pbr_static(dataset, opt, pipe, args):
                 ray_dirs_world=ray_dirs,
             )
 
-            alpha_for_comp = alpha_map
-            if getattr(args, "composite_use_gt_mask", False) and (mask is not None):
-                if ground_as_gaussians:
-                    # Dataset gt_alpha_mask usually covers only the object (not the ground). If we force GT-mask
-                    # compositing here, ground Gaussians would receive no reconstruction gradient.
-                    if not warned_gt_mask_comp:
-                        print(
-                            "[Warning] --ground_as_gaussians is enabled but --composite_use_gt_mask was set. "
-                            "Ignoring GT-mask compositing so ground can be learned by Gaussians."
-                        )
-                        warned_gt_mask_comp = True
-                else:
-                    alpha_for_comp = mask
-
             # If ground is modeled as Gaussians, prevent env_light from learning the finite ground:
             # only allow env gradients on the "sky" region (not object, not ground-hit region).
             bg_env_used = bg_env
@@ -869,6 +855,17 @@ def training_pbr_static(dataset, opt, pipe, args):
                 sky_mask = torch.clamp(1.0 - torch.clamp(obj_mask_for_weight, 0.0, 1.0) - torch.clamp(ground_mask, 0.0, 1.0), 0.0, 1.0)
                 sky_mask_3 = sky_mask.expand_as(bg_env)
                 bg_env_used = bg_env * sky_mask_3 + bg_env.detach() * (1.0 - sky_mask_3)
+
+            # Composite for reconstruction.
+            # By default, composite with rendered alpha. If requested and GT mask exists, composite with masks:
+            # - object: gt_alpha_mask
+            # - ground: ground_hit_mask (when --ground_as_gaussians)
+            alpha_for_comp = alpha_map
+            if getattr(args, "composite_use_gt_mask", False) and (mask is not None):
+                if ground_as_gaussians and (ground_mask is not None):
+                    alpha_for_comp = torch.clamp(mask + torch.clamp(ground_mask, 0.0, 1.0), 0.0, 1.0)
+                else:
+                    alpha_for_comp = mask
 
             pred = shaded_obj * alpha_for_comp + bg_env_used * (1.0 - alpha_for_comp)
 

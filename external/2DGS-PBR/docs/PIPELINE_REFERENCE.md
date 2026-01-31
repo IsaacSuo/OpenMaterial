@@ -326,6 +326,10 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
 8. 可选初始化 GroundPlane（有限深度背景）：
    - `--ground_plane_json <.../ground_plane.json>`（由 `scripts/reconstruct_ground_plane_texture.py` 生成）
    - `--ground_texture <.../ground_texture.png>`（不传则默认取 json 同目录下的 `ground_texture.png`）
+9. （可选）把地面作为 Gaussians（PBR 可学习材质，而不是固定背景贴图）：
+   - `--ground_as_gaussians`：从 `ground_plane.json` 的 `uv_bounds` 采样点并 append 到 `--gt_ply`，使地面也走 G-buffer → PBR shaded 的路径
+   - `--ground_num_points/--ground_seed/--ground_height_jitter`：控制采样密度与抖动
+   - `--lambda_ground`：地面区域重建权重（与 sky 的 `--lambda_bg` 分开）
 
 ### 7.2 每步训练（核心）
 
@@ -349,7 +353,7 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
    - `normal = rend_normal_pm / denom`
    - 计算物体着色：`shaded_obj = screen_space_pbr_shading(..., env_light=env_light, ray_dirs_world=ray_dirs)`
    - 合成图监督：默认用 `rend_alpha` 合成：`pred = shaded_obj * alpha + bg * (1-alpha)`
-     - 可选 `--composite_use_gt_mask`：若存在 `gt_alpha_mask`，则用 GT mask 替代 `rend_alpha` 做合成/重建（减少“opacity 抖动导致的背景监督泄漏”）
+     - 可选 `--composite_use_gt_mask`：若存在 `gt_alpha_mask`，则用 GT mask 做 object 的合成；若同时启用 `--ground_as_gaussians`，则会把 `ground_hit_mask` 也并入合成 mask（mask = object + ground，背景只在 sky 区域合成）
 4. 重建损失的权重策略：
    - warmup：`iteration <= env_warmup_iters` 时强制 full-image supervision（让 env_map 看到背景）
    - 非 warmup：若存在 `gt_alpha_mask` 且未设置 `--supervise_background`，则重建只在 mask 内做（避免 GT 背景是黑/抠图导致 env_map 被错误监督）
