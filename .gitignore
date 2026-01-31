@@ -17,3 +17,7 @@ build/
 # Local AI assistant artifacts
 GEMINI.md
 OPACITY_ANALYSIS/
+
+# Local workspace artifacts
+/_split_repos/
+*.code-workspace
