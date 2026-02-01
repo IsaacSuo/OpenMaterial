@@ -45,6 +45,140 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+def _sample_basic_pcd(pcd: "BasicPointCloud", num_points: int, seed: int = 0) -> "BasicPointCloud":
+    from scene.gaussian_model import BasicPointCloud
+
+    if num_points <= 0:
+        return pcd
+    n = int(np.asarray(pcd.points).shape[0])
+    if num_points >= n:
+        return pcd
+    rng = np.random.default_rng(int(seed))
+    idx = rng.choice(n, size=int(num_points), replace=False)
+    pts = np.asarray(pcd.points)[idx]
+    cols = np.asarray(pcd.colors)[idx] if np.asarray(pcd.colors).shape[0] == n else np.ones_like(pts) * 0.5
+    nrms = np.asarray(pcd.normals)[idx] if np.asarray(pcd.normals).shape[0] == n else np.zeros_like(pts)
+    return BasicPointCloud(points=pts, colors=cols, normals=nrms)
+
+def _filter_pcd_outside_aabb(
+    pcd: "BasicPointCloud",
+    aabb_min: np.ndarray,
+    aabb_max: np.ndarray,
+    margin: float,
+) -> "BasicPointCloud":
+    """
+    Filter point cloud to keep only points outside an expanded AABB.
+    Useful to avoid initializing background/unfixed points inside the object volume.
+    """
+    from scene.gaussian_model import BasicPointCloud
+
+    pts = np.asarray(pcd.points)
+    if pts.size == 0:
+        return pcd
+
+    aabb_min = np.asarray(aabb_min, dtype=np.float32).reshape(3)
+    aabb_max = np.asarray(aabb_max, dtype=np.float32).reshape(3)
+    m = float(margin)
+    aabb_min_e = aabb_min - m
+    aabb_max_e = aabb_max + m
+
+    inside = np.all((pts >= aabb_min_e[None, :]) & (pts <= aabb_max_e[None, :]), axis=1)
+    keep = ~inside
+    if keep.sum() == 0:
+        return pcd
+
+    cols = np.asarray(pcd.colors) if np.asarray(pcd.colors).shape[0] == pts.shape[0] else np.ones_like(pts) * 0.5
+    nrms = np.asarray(pcd.normals) if np.asarray(pcd.normals).shape[0] == pts.shape[0] else np.zeros_like(pts)
+    return BasicPointCloud(points=pts[keep], colors=cols[keep], normals=nrms[keep])
+
+def _init_unfixed_pcd_from_dataset(
+    source_path: str,
+    num_points: int,
+    extent: float,
+    seed: int = 0,
+    exclude_aabb_min: np.ndarray | None = None,
+    exclude_aabb_max: np.ndarray | None = None,
+    exclude_margin: float = 0.0,
+) -> "BasicPointCloud":
+    """
+    Initialize a point cloud for the unfixed/background Gaussians.
+
+    Priority:
+    1) Blender-style: <source_path>/points3d.ply
+    2) COLMAP-style: <source_path>/sparse/0/points3D.ply
+    3) Fallback: random points in a cube around the scene extent
+    """
+    from scene.gaussian_model import BasicPointCloud
+
+    candidates = [
+        os.path.join(source_path, "points3d.ply"),
+        os.path.join(source_path, "sparse", "0", "points3D.ply"),
+    ]
+    for ply_path in candidates:
+        if os.path.exists(ply_path):
+            print(f"[Unfixed] Initializing from dataset point cloud: {ply_path}")
+            pcd = fetchPly(ply_path)
+            if (exclude_aabb_min is not None) and (exclude_aabb_max is not None) and (exclude_margin > 0):
+                before = int(np.asarray(pcd.points).shape[0])
+                pcd = _filter_pcd_outside_aabb(pcd, exclude_aabb_min, exclude_aabb_max, margin=exclude_margin)
+                after = int(np.asarray(pcd.points).shape[0])
+                print(f"[Unfixed] Excluded object AABB points: {before} -> {after}")
+            return _sample_basic_pcd(pcd, num_points=num_points, seed=seed)
+
+    rng = np.random.default_rng(int(seed))
+    e = float(extent)
+    e = max(e, 1e-4)
+    # Random init; optionally reject samples inside the object AABB.
+    pts = []
+    target = int(num_points)
+    tries = 0
+    max_tries = max(10_000, target * 20)
+    while (len(pts) < target) and (tries < max_tries):
+        tries += 1
+        p = rng.uniform(low=-e, high=e, size=(3,)).astype(np.float32)
+        if (exclude_aabb_min is not None) and (exclude_aabb_max is not None) and (exclude_margin > 0):
+            mn = np.asarray(exclude_aabb_min, dtype=np.float32).reshape(3) - float(exclude_margin)
+            mx = np.asarray(exclude_aabb_max, dtype=np.float32).reshape(3) + float(exclude_margin)
+            if np.all(p >= mn) and np.all(p <= mx):
+                continue
+        pts.append(p)
+    if len(pts) < target:
+        # Fallback: accept remaining points without rejection to avoid empty init.
+        extra = rng.uniform(low=-e, high=e, size=(target - len(pts), 3)).astype(np.float32)
+        pts = np.asarray(pts, dtype=np.float32)
+        pts = np.concatenate([pts, extra], axis=0) if pts.size else extra
+    else:
+        pts = np.asarray(pts, dtype=np.float32)
+    cols = np.ones_like(pts, dtype=np.float32) * 0.5
+    nrms = np.zeros_like(pts, dtype=np.float32)
+    print(f"[Unfixed] Initializing randomly: N={int(num_points)}, extent={e:.4f}")
+    return BasicPointCloud(points=pts, colors=cols, normals=nrms)
+
+def _set_gaussians_trainable(gaussians: GaussianModel, trainable: bool, freeze_geometry: bool):
+    """
+    Toggle gradients for Gaussian parameters in this training loop.
+
+    Args:
+        gaussians: GaussianModel
+        trainable: whether to enable grads for learnable params
+        freeze_geometry: if True, force xyz/rotation to be frozen regardless of trainable
+    """
+    if freeze_geometry:
+        if hasattr(gaussians, "_xyz") and isinstance(gaussians._xyz, torch.nn.Parameter):
+            gaussians._xyz.requires_grad_(False)
+        if hasattr(gaussians, "_rotation") and isinstance(gaussians._rotation, torch.nn.Parameter):
+            gaussians._rotation.requires_grad_(False)
+    else:
+        if hasattr(gaussians, "_xyz") and isinstance(gaussians._xyz, torch.nn.Parameter):
+            gaussians._xyz.requires_grad_(bool(trainable))
+        if hasattr(gaussians, "_rotation") and isinstance(gaussians._rotation, torch.nn.Parameter):
+            gaussians._rotation.requires_grad_(bool(trainable))
+
+    for name in ("_opacity", "_scaling", "_features_dc", "_features_rest", "_albedo", "_roughness", "_metallic"):
+        p = getattr(gaussians, name, None)
+        if isinstance(p, torch.nn.Parameter):
+            p.requires_grad_(bool(trainable))
+
 def _generate_ground_pcd_from_plane(
     ground_plane_json: str,
     ground_texture_path: str | None,
@@ -560,44 +694,12 @@ def training_pbr_static(dataset, opt, pipe, args):
     print(f"Loading dense GT point cloud from: {args.gt_ply}")
     pcd = fetchPly(args.gt_ply)
 
-    # Optional: append a generated ground plane point cloud so ground is represented by Gaussians
-    # (and thus PBR-shaded + learnable materials), instead of being a fixed background texture.
-    ground_as_gaussians = bool(getattr(args, "ground_as_gaussians", False))
-    if ground_as_gaussians:
-        json_path = getattr(args, "ground_plane_json", None)
-        if not json_path:
-            raise ValueError("--ground_as_gaussians requires --ground_plane_json")
-        json_path = str(json_path)
-        if not os.path.exists(json_path):
-            raise FileNotFoundError(f"--ground_plane_json not found: {json_path}")
-
-        tex_path = getattr(args, "ground_texture", None)
-        if tex_path is None:
-            tex_path = os.path.join(os.path.dirname(json_path), "ground_texture.png")
-        tex_path = str(tex_path) if tex_path is not None else None
-        if tex_path is not None and (not os.path.exists(tex_path)):
-            print(f"[Warning] Ground texture not found at {tex_path}, initializing ground colors as gray.")
-            tex_path = None
-
-        ground_points = int(getattr(args, "ground_num_points", 200_000) or 200_000)
-        ground_seed = int(getattr(args, "ground_seed", 0) or 0)
-        ground_height_jitter = float(getattr(args, "ground_height_jitter", 0.0) or 0.0)
-
-        print(f"Generating ground point cloud from: {json_path} (N={ground_points})")
-        ground_pcd = _generate_ground_pcd_from_plane(
-            ground_plane_json=json_path,
-            ground_texture_path=tex_path,
-            num_points=ground_points,
-            seed=ground_seed,
-            height_jitter=ground_height_jitter,
-        )
-
-        pcd = type(pcd)(
-            points=np.concatenate([pcd.points, ground_pcd.points], axis=0),
-            colors=np.concatenate([pcd.colors, ground_pcd.colors], axis=0),
-            normals=np.concatenate([pcd.normals, ground_pcd.normals], axis=0),
-        )
-        print(f"Appended ground points. Combined PCD points: {pcd.points.shape[0]}")
+    # Optional: learn additional "unfixed" Gaussians for finite-depth background geometry (walls/room/etc.).
+    # This replaces the legacy ground-plane-as-gaussians concept.
+    unfixed_gaussians = bool(getattr(args, "unfixed_gaussians", False))
+    if bool(getattr(args, "ground_as_gaussians", False)):
+        print("[Deprecated] --ground_as_gaussians is deprecated; use --unfixed_gaussians instead.")
+        unfixed_gaussians = True
     
     gaussians = GaussianModel(dataset.sh_degree, use_pbr=True)
     gaussians.roughness_min = float(getattr(args, "roughness_min", 0.02))
@@ -629,6 +731,30 @@ def training_pbr_static(dataset, opt, pipe, args):
     # This locks XYZ and Rotation, but allows Scale, Opacity, and PBR to be optimized.
     gaussians.training_setup_fixed_geometry_pbr_only(opt)
 
+    # 3.5 Setup Unfixed (Background) Gaussians (optional, SH-only + densify)
+    gaussians_unfixed = None
+    if unfixed_gaussians:
+        unfixed_num_points = int(getattr(args, "unfixed_num_points", 200_000) or 200_000)
+        unfixed_seed = int(getattr(args, "unfixed_seed", 0) or 0)
+        unfixed_exclude_margin_ratio = float(getattr(args, "unfixed_exclude_object_aabb_margin_ratio", 0.02) or 0.02)
+        obj_pts = np.asarray(pcd.points)
+        obj_aabb_min = obj_pts.min(axis=0)
+        obj_aabb_max = obj_pts.max(axis=0)
+        exclude_margin = float(scene.cameras_extent) * max(0.0, unfixed_exclude_margin_ratio)
+        pcd_unfixed = _init_unfixed_pcd_from_dataset(
+            source_path=dataset.source_path,
+            num_points=unfixed_num_points,
+            extent=float(scene.cameras_extent),
+            seed=unfixed_seed,
+            exclude_aabb_min=obj_aabb_min,
+            exclude_aabb_max=obj_aabb_max,
+            exclude_margin=exclude_margin,
+        )
+        gaussians_unfixed = GaussianModel(dataset.sh_degree, use_pbr=False)
+        gaussians_unfixed.create_from_pcd(pcd_unfixed, spatial_lr_scale=scene.cameras_extent)
+        gaussians_unfixed.training_setup(opt)
+        print(f"[Unfixed] Enabled: N={gaussians_unfixed.get_xyz.shape[0]} (SH-only, densify enabled)")
+
     # PBR-only training does not supervise SH color output; keep background black so
     # G-buffer maps are clean premultiplied attributes (no background offset).
     background = torch.zeros(3, dtype=torch.float32, device="cuda")
@@ -655,6 +781,14 @@ def training_pbr_static(dataset, opt, pipe, args):
         if not args.no_env_gradient_scaling:
             env_light.register_gradient_scaling_hook()
 
+    # EnvMap warmup: freeze ALL Gaussians so only env_map is updated.
+    # We do this for BOTH object Gaussians and unfixed/background Gaussians (if enabled).
+    if (not freeze_env_light) and int(getattr(args, "env_warmup_iters", 0) or 0) > 0:
+        _set_gaussians_trainable(gaussians, False, freeze_geometry=True)
+        if gaussians_unfixed is not None:
+            _set_gaussians_trainable(gaussians_unfixed, False, freeze_geometry=False)
+        print(f"[Warmup] Freezing ALL Gaussians for the first {int(args.env_warmup_iters)} iterations (EnvMap-only).")
+
     # Optional: anchor env_map to the pretrained initialization to reduce lighting/material ambiguity.
     env_map_ref = None
     env_prior_weight = float(getattr(args, "env_light_prior_weight", 0.0) or 0.0)
@@ -665,9 +799,10 @@ def training_pbr_static(dataset, opt, pipe, args):
 
     scene_extent = float(scene.cameras_extent)
 
-    # 4.5 Ground Plane (optional, for finite-depth backgrounds)
+    # 4.5 Ground Plane (optional, for finite-depth backgrounds like checkerboard floor).
+    # Note: If unfixed_gaussians is enabled, the unfixed Gaussians should explain finite-depth backgrounds instead.
     ground_plane = None
-    if getattr(args, "ground_plane_json", None) and (not ground_as_gaussians):
+    if getattr(args, "ground_plane_json", None) and (not unfixed_gaussians):
         json_path = str(args.ground_plane_json)
         if not os.path.exists(json_path):
             raise FileNotFoundError(f"--ground_plane_json not found: {json_path}")
@@ -683,10 +818,7 @@ def training_pbr_static(dataset, opt, pipe, args):
         ground_plane = GroundPlane(json_path=json_path, texture_path=tex_path).cuda()
         print(f"[GroundPlane] Initialized with plane from {json_path}")
 
-    # Ground plane meta is used for masking even when ground is modeled as Gaussians.
     ground_meta = None
-    if getattr(args, "ground_plane_json", None) and ground_as_gaussians:
-        ground_meta = _load_ground_plane_meta(str(args.ground_plane_json), device="cuda")
 
     # 5. Training Loop
     iter_start = torch.cuda.Event(enable_timing=True)
@@ -729,10 +861,22 @@ def training_pbr_static(dataset, opt, pipe, args):
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
 
+        # Transition out of warmup: unfreeze Gaussians.
+        warmup_iters = int(getattr(args, "env_warmup_iters", 0) or 0)
+        if (not freeze_env_light) and warmup_iters > 0 and (iteration == warmup_iters + 1):
+            _set_gaussians_trainable(gaussians, True, freeze_geometry=True)
+            # After warmup, allow the object Gaussians to optimize SH/color too (even if not supervised by default).
+            gaussians.training_setup_fixed_geometry(opt)
+            if gaussians_unfixed is not None:
+                _set_gaussians_trainable(gaussians_unfixed, True, freeze_geometry=False)
+                gaussians_unfixed.training_setup(opt)
+            print(f"[Warmup] Unfroze Gaussians at iter={iteration}; now optimizing Gaussians + EnvMap.")
+
         # Update learning rate (mainly for Opacity/SH, since XYZ is locked)
         gaussians.update_learning_rate(iteration)
 
-        # No SH training in PBR-only mode.
+        if gaussians_unfixed is not None:
+            gaussians_unfixed.update_learning_rate(iteration)
 
         # EnvMap Warmup Logic (disabled when env_light is frozen)
         is_env_warmup = (not freeze_env_light) and (iteration <= args.env_warmup_iters)
@@ -794,6 +938,8 @@ def training_pbr_static(dataset, opt, pipe, args):
         gbuffer_albedo = None
         gbuffer_roughness = None
         gbuffer_metallic = None
+        unfixed_stats = []
+        unfixed_render_pkg = None
 
         warned_gt_mask_comp = False
         for _ in range(batch_cams):
@@ -810,7 +956,23 @@ def training_pbr_static(dataset, opt, pipe, args):
             mask = _process_gt_mask(args, mask)
 
             ray_dirs = _get_ray_dirs_world(viewpoint_cam)
-            bg_env = _compute_background(ray_dirs, viewpoint_cam.camera_center, env_light, ground_plane)
+            sky = env_light.sample(ray_dirs).permute(2, 0, 1)  # [3,H,W]
+            if gaussians_unfixed is not None:
+                unfixed_render_pkg = render(viewpoint_cam, gaussians_unfixed, pipe, background, render_pbr=False)
+                alpha_bg = unfixed_render_pkg.get("rend_alpha")
+                if alpha_bg is None:
+                    raise RuntimeError("unfixed render_pkg missing 'rend_alpha'")
+                bg_render = unfixed_render_pkg["render"]
+                bg_env = bg_render + sky * (1.0 - alpha_bg)
+                unfixed_stats.append(
+                    (
+                        unfixed_render_pkg["viewspace_points"],
+                        unfixed_render_pkg["visibility_filter"],
+                        unfixed_render_pkg["radii"],
+                    )
+                )
+            else:
+                bg_env = _compute_background(ray_dirs, viewpoint_cam.camera_center, env_light, ground_plane)
             gt_image = viewpoint_cam.original_image.cuda()
 
             gbuffer_albedo_pm = render_pkg.get("gbuffer_albedo")
@@ -840,79 +1002,43 @@ def training_pbr_static(dataset, opt, pipe, args):
                 ray_dirs_world=ray_dirs,
             )
 
-            # If ground is modeled as Gaussians, prevent env_light from learning the finite ground:
-            # only allow env gradients on the "sky" region (not object, not ground-hit region).
-            bg_env_used = bg_env
-            ground_mask = None
-            sky_mask = None
-            obj_mask_for_weight = mask
-            if ground_as_gaussians and (ground_meta is not None):
-                if obj_mask_for_weight is None:
-                    # Fallback: use rendered alpha as a soft object mask when no GT mask exists.
-                    obj_mask_for_weight = alpha_map.detach()
-                ground_hit = _ground_hit_mask_from_meta(ground_meta, ray_dirs, viewpoint_cam.camera_center)
-                ground_mask = ground_hit * (1.0 - torch.clamp(obj_mask_for_weight, 0.0, 1.0))
-                sky_mask = torch.clamp(1.0 - torch.clamp(obj_mask_for_weight, 0.0, 1.0) - torch.clamp(ground_mask, 0.0, 1.0), 0.0, 1.0)
-                sky_mask_3 = sky_mask.expand_as(bg_env)
-                bg_env_used = bg_env * sky_mask_3 + bg_env.detach() * (1.0 - sky_mask_3)
-
             # Composite for reconstruction.
             # By default, composite with rendered alpha. If requested and GT mask exists, composite with masks:
             # - object: gt_alpha_mask
-            # - ground: ground_hit_mask (when --ground_as_gaussians)
             alpha_for_comp = alpha_map
             if getattr(args, "composite_use_gt_mask", False) and (mask is not None):
-                if ground_as_gaussians and (ground_mask is not None):
-                    alpha_for_comp = torch.clamp(mask + torch.clamp(ground_mask, 0.0, 1.0), 0.0, 1.0)
-                else:
-                    alpha_for_comp = mask
+                alpha_for_comp = mask
 
-            pred = shaded_obj * alpha_for_comp + bg_env_used * (1.0 - alpha_for_comp)
+            pred = shaded_obj * alpha_for_comp + bg_env * (1.0 - alpha_for_comp)
 
             alpha_sup_loss = torch.tensor(0.0, device="cuda")
             if mask is not None:
                 lambda_alpha = float(getattr(args, "lambda_alpha", 0.0) or 0.0)
                 if lambda_alpha > 0 and (not is_env_warmup):
-                    if ground_as_gaussians:
-                        # Only supervise alpha inside the object mask to avoid suppressing ground Gaussians.
-                        denom = mask.sum().clamp(min=1.0)
-                        alpha_sup_loss = lambda_alpha * (torch.abs(alpha_map - mask) * mask).sum() / denom
-                    else:
-                        alpha_sup_loss = lambda_alpha * torch.abs(alpha_map - mask).mean()
+                    alpha_sup_loss = lambda_alpha * torch.abs(alpha_map - mask).mean()
 
             obj_mask = mask if mask is not None else alpha_map.detach()
-            if ground_as_gaussians and (sky_mask is not None) and (ground_mask is not None):
+            if is_env_warmup:
+                recon_weight = torch.ones_like(alpha_map)
+            elif mask is not None:
                 if getattr(args, "lambda_bg", None) is None:
-                    sky_w = 1.0 if getattr(args, "supervise_background", False) else 0.0
-                else:
-                    sky_w = float(args.lambda_bg)
-                sky_w = max(0.0, sky_w)
-                ground_w = float(getattr(args, "lambda_ground", 1.0) or 1.0)
-                ground_w = max(0.0, ground_w)
-                obj_w_mask = torch.clamp(obj_mask_for_weight, 0.0, 1.0) if obj_mask_for_weight is not None else alpha_map.detach()
-                recon_weight = obj_w_mask + ground_w * torch.clamp(ground_mask, 0.0, 1.0) + sky_w * torch.clamp(sky_mask, 0.0, 1.0)
-                if getattr(opt, "lambda_pbr", 0.0) > 0:
-                    recon_weight = recon_weight + opt.lambda_pbr * obj_w_mask
-            else:
-                if is_env_warmup:
-                    recon_weight = torch.ones_like(alpha_map)
-                elif mask is not None:
-                    if getattr(args, "lambda_bg", None) is None:
-                        bg_w = 1.0 if getattr(args, "supervise_background", False) else 0.0
+                    # If unfixed background Gaussians are enabled, we typically want to supervise background too.
+                    if gaussians_unfixed is not None:
+                        bg_w = 1.0
                     else:
-                        bg_w = float(args.lambda_bg)
-                    bg_w = max(0.0, bg_w)
-                    recon_weight = mask + bg_w * (1.0 - mask)
-                    if getattr(opt, "lambda_pbr", 0.0) > 0:
-                        recon_weight = recon_weight + opt.lambda_pbr * obj_mask
+                        bg_w = 1.0 if getattr(args, "supervise_background", False) else 0.0
                 else:
-                    recon_weight = torch.ones_like(alpha_map)
-                    if getattr(opt, "lambda_pbr", 0.0) > 0:
-                        recon_weight = recon_weight + opt.lambda_pbr * obj_mask
+                    bg_w = float(args.lambda_bg)
+                bg_w = max(0.0, bg_w)
+                recon_weight = mask + bg_w * (1.0 - mask)
+                if getattr(opt, "lambda_pbr", 0.0) > 0:
+                    recon_weight = recon_weight + opt.lambda_pbr * obj_mask
+            else:
+                recon_weight = torch.ones_like(alpha_map)
+                if getattr(opt, "lambda_pbr", 0.0) > 0:
+                    recon_weight = recon_weight + opt.lambda_pbr * obj_mask
 
             reg_mask = mask if mask is not None else alpha_map.detach()
-            if ground_as_gaussians and (ground_mask is not None) and (obj_mask_for_weight is not None):
-                reg_mask = torch.clamp(torch.clamp(obj_mask_for_weight, 0.0, 1.0) + torch.clamp(ground_mask, 0.0, 1.0), 0.0, 1.0)
             if is_env_warmup:
                 pbr_losses = {"total_pbr_reg": torch.tensor(0.0, device="cuda")}
                 pbr_reg_loss = torch.tensor(0.0, device="cuda")
@@ -985,13 +1111,15 @@ def training_pbr_static(dataset, opt, pipe, args):
             ema_reg_for_log = 0.4 * pbr_reg_loss.item() + 0.6 * ema_reg_for_log
             
             if iteration % 10 == 0:
+                bg_pts = int(gaussians_unfixed.get_xyz.shape[0]) if gaussians_unfixed is not None else 0
                 progress_bar.set_postfix({
                     "Status": "Warmup" if is_env_warmup else "Normal",
                     "Tot": f"{ema_total_for_log:.{5}f}",
                     "Recon": f"{ema_recon_for_log:.{5}f}",
                     "Env": f"{ema_env_for_log:.{2}e}",
                     "Reg": f"{ema_reg_for_log:.{2}e}",
-                    "Pts": f"{len(gaussians.get_xyz)}"
+                    "ObjPts": f"{len(gaussians.get_xyz)}",
+                    "BgPts": f"{bg_pts}",
                 })
                 progress_bar.update(10)
 
@@ -1103,19 +1231,48 @@ def training_pbr_static(dataset, opt, pipe, args):
             if iteration in args.save_iterations:
                 print(f"\n[ITER {iteration}] Saving Model...")
                 scene.save(iteration)
+                if gaussians_unfixed is not None:
+                    unfixed_dir = os.path.join(scene.model_path, "unfixed_point_cloud", f"iteration_{iteration}")
+                    os.makedirs(unfixed_dir, exist_ok=True)
+                    gaussians_unfixed.save_ply(os.path.join(unfixed_dir, "point_cloud.ply"))
                 if not freeze_env_light:
                     torch.save(env_light.state_dict(), os.path.join(scene.model_path, f"env_light_{iteration}.pth"))
 
+            # Densification (unfixed/background only)
+            if (gaussians_unfixed is not None) and (not is_env_warmup) and (iteration < opt.densify_until_iter):
+                for viewspace_point_tensor, visibility_filter, radii in unfixed_stats:
+                    gaussians_unfixed.max_radii2D[visibility_filter] = torch.max(
+                        gaussians_unfixed.max_radii2D[visibility_filter],
+                        radii[visibility_filter],
+                    )
+                    gaussians_unfixed.add_densification_stats(viewspace_point_tensor, visibility_filter)
+
+                if (iteration > opt.densify_from_iter) and (iteration % opt.densification_interval == 0):
+                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                    gaussians_unfixed.densify_and_prune(
+                        opt.densify_grad_threshold,
+                        opt.opacity_cull,
+                        scene.cameras_extent,
+                        size_threshold,
+                    )
+
+                if (iteration % opt.opacity_reset_interval == 0) or (
+                    dataset.white_background and iteration == opt.densify_from_iter
+                ):
+                    gaussians_unfixed.reset_opacity()
+
             # Step
-            # [EnvMap Warmup] Only step Gaussians if NOT in warmup phase
+            # [EnvMap Warmup] Freeze ALL Gaussians during warmup (EnvMap-only).
+            # After warmup, train Gaussians + EnvMap together.
             if not is_env_warmup:
                 gaussians.optimizer.step()
-            elif ground_as_gaussians:
-                # If ground is modeled as Gaussians, allow Gaussians to learn from the start.
-                gaussians.optimizer.step()
+                if gaussians_unfixed is not None:
+                    gaussians_unfixed.optimizer.step()
             
             # ALWAYS zero grad for Gaussians to prevent accumulation during warmup
             gaussians.optimizer.zero_grad(set_to_none=True)
+            if gaussians_unfixed is not None:
+                gaussians_unfixed.optimizer.zero_grad(set_to_none=True)
             
             # Step EnvMap (unless frozen), optionally only after a certain iteration / periodically.
             if not freeze_env_light:
@@ -1345,7 +1502,12 @@ if __name__ == "__main__":
     parser.add_argument("--early_stopping_patience", type=int, default=3, help="Number of checks with no improvement before stopping")
     parser.add_argument("--early_stopping_min_delta", type=float, default=1e-4, help="Minimum relative improvement to be considered significant")
     parser.add_argument("--early_stopping_interval", type=int, default=500, help="Interval (iterations) to check for improvement")
-    parser.add_argument("--env_warmup_iters", type=int, default=1000, help="Number of iterations to optimize ONLY the environment map at the beginning.")
+    parser.add_argument(
+        "--env_warmup_iters",
+        type=int,
+        default=1000,
+        help="Warmup iterations: freeze ALL Gaussians and optimize ONLY the environment map (env_map).",
+    )
     parser.add_argument("--env_map_res", type=int, default=1024, help="Resolution of the environment map (height). Width will be 2x height.")
 
     # Ground Plane (for finite-depth backgrounds like checkerboard floor)
@@ -1363,36 +1525,60 @@ if __name__ == "__main__":
         help="Path to ground_texture.png. If not specified, will look for ground_texture.png "
              "in the same directory as ground_plane_json.",
     )
+
+    # Unfixed (learnable) background Gaussians (finite-depth geometry, e.g., walls/room).
+    # These Gaussians are SH-only (use_pbr=False) and can be densified/pruned.
+    parser.add_argument(
+        "--unfixed_gaussians",
+        action="store_true",
+        help="If set, learn an additional unfixed/background Gaussian set (SH-only) to explain finite-depth background geometry.",
+    )
+    parser.add_argument(
+        "--unfixed_num_points",
+        type=int,
+        default=200_000,
+        help="Initial number of unfixed/background points. If dataset point cloud exists (points3d.ply / points3D.ply), it will be sampled; otherwise random initialization is used.",
+    )
+    parser.add_argument(
+        "--unfixed_seed",
+        type=int,
+        default=0,
+        help="RNG seed for unfixed/background initialization.",
+    )
+    parser.add_argument(
+        "--unfixed_exclude_object_aabb_margin_ratio",
+        type=float,
+        default=0.02,
+        help="When initializing unfixed/background points, exclude points that fall inside the object AABB expanded by (ratio * cameras_extent).",
+    )
     parser.add_argument(
         "--ground_as_gaussians",
         action="store_true",
-        help="If set, generate additional ground Gaussians from --ground_plane_json (and optional --ground_texture) "
-             "and append them to --gt_ply, so ground is PBR-shaded and has learnable material. "
-             "In this mode, GroundPlane background compositing is disabled to avoid double-ground.",
+        help="[Deprecated] Use --unfixed_gaussians instead. This flag is kept for backward compatibility and will enable --unfixed_gaussians.",
     )
     parser.add_argument(
         "--ground_num_points",
         type=int,
         default=200_000,
-        help="Number of ground points to sample when --ground_as_gaussians is set.",
+        help="[Deprecated] (unused) kept for backward compatibility.",
     )
     parser.add_argument(
         "--ground_seed",
         type=int,
         default=0,
-        help="RNG seed for ground point sampling when --ground_as_gaussians is set.",
+        help="[Deprecated] (unused) kept for backward compatibility.",
     )
     parser.add_argument(
         "--ground_height_jitter",
         type=float,
         default=0.0,
-        help="Optional small jitter along the plane normal when sampling ground points (helps avoid z-fighting).",
+        help="[Deprecated] (unused) kept for backward compatibility.",
     )
     parser.add_argument(
         "--lambda_ground",
         type=float,
         default=1.0,
-        help="Reconstruction weight for ground pixels when --ground_as_gaussians is set (sky uses --lambda_bg).",
+        help="[Deprecated] (unused) kept for backward compatibility.",
     )
 
     # Save/Test

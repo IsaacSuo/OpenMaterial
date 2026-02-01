@@ -32,6 +32,25 @@ from utils.pbr_utils import (
 import numpy as np
 from PIL import Image
 
+def _search_for_max_iteration_in_dir(root: str):
+    """
+    Find max iteration_* under a directory (e.g., unfixed_point_cloud/iteration_XXXX).
+    Returns None if not found.
+    """
+    if not os.path.isdir(root):
+        return None
+    max_it = None
+    for name in os.listdir(root):
+        if not name.startswith("iteration_"):
+            continue
+        try:
+            it = int(name.split("iteration_")[-1])
+        except Exception:
+            continue
+        if max_it is None or it > max_it:
+            max_it = it
+    return max_it
+
 
 def save_image(tensor, path):
     """Save a [C, H, W] tensor as image"""
@@ -95,9 +114,22 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
     for d in [renders_dir, gt_dir, pbr_dir, albedo_dir, roughness_dir, metallic_dir, normal_dir, depth_dir]:
         makedirs(d, exist_ok=True)
 
-    # Load model
+    # Load object model
     gaussians = GaussianModel(dataset.sh_degree, use_pbr=True)
     scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+
+    # Optional: load unfixed/background Gaussians (SH-only)
+    unfixed_gaussians = None
+    unfixed_root = os.path.join(scene.model_path, "unfixed_point_cloud")
+    unfixed_it = iteration
+    if unfixed_it == -1:
+        unfixed_it = _search_for_max_iteration_in_dir(unfixed_root)
+    if unfixed_it is not None:
+        unfixed_ply = os.path.join(unfixed_root, f"iteration_{unfixed_it}", "point_cloud.ply")
+        if os.path.exists(unfixed_ply):
+            unfixed_gaussians = GaussianModel(dataset.sh_degree, use_pbr=False)
+            unfixed_gaussians.load_ply(unfixed_ply)
+            print(f"[Unfixed] Loaded background Gaussians: {unfixed_ply}")
 
     # Use black background so buffers are premultiplied cleanly; skybox is composited explicitly.
     background = torch.zeros(3, dtype=torch.float32, device="cuda")
@@ -123,7 +155,14 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
             world_view_transform=view.world_view_transform,
             device="cuda",
         )
-        bg_env = _compute_background(ray_dirs, view.camera_center, env_light, ground_plane)
+        # Background: either unfixed SH Gaussians + sky, or ground_plane + sky, or sky only.
+        sky = env_light.sample(ray_dirs).permute(2, 0, 1)
+        if unfixed_gaussians is not None:
+            bg_pkg = render(view, unfixed_gaussians, pipeline, background, render_pbr=False)
+            alpha_bg = bg_pkg["rend_alpha"]
+            bg_env = bg_pkg["render"] + sky * (1.0 - alpha_bg)
+        else:
+            bg_env = _compute_background(ray_dirs, view.camera_center, env_light, ground_plane)
         alpha_map = render_pkg["rend_alpha"]
 
         # Standard SH rendering
