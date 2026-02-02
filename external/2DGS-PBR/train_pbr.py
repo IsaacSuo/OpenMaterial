@@ -598,15 +598,25 @@ def _maybe_tb_log_env_map(args, tb_writer, iteration: int, env_light) -> None:
     env = env_light.env_map.detach()  # [3, H, 2H]
     env = torch.nan_to_num(env, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # Raw visualization (clamped) + log visualization (more stable for HDR).
-    env_vis = torch.clamp(env, 0.0, 1.0)
+    # TB expects images in display space; env_map is a linear HDR parameter.
+    # Provide both:
+    # - a tone-mapped + sRGB visualization (recommended)
+    # - a legacy linear clamp view (may look tinted/misleading)
+    env_tm_srgb = linear_to_srgb(tonemap_reinhard(env)).clamp(0.0, 1.0)
+    env_lin_clamped = torch.clamp(env, 0.0, 1.0)
+
     env_log = torch.log1p(torch.clamp(env, min=0.0))
     env_log = env_log / (env_log.max() + 1e-8)
 
-    tb_writer.add_image("debug/env_map_rgb", env_vis, iteration)
+    tb_writer.add_image("debug/env_map_rgb", env_tm_srgb, iteration)
+    tb_writer.add_image("debug/env_map_rgb_linear_clamped", env_lin_clamped, iteration)
     tb_writer.add_image("debug/env_map_log_rgb", env_log, iteration)
+
     tb_writer.add_scalar("debug/env_map_mean", env.mean().item(), iteration)
     tb_writer.add_scalar("debug/env_map_max", env.max().item(), iteration)
+    tb_writer.add_scalar("debug/env_map_r_mean", env[0].mean().item(), iteration)
+    tb_writer.add_scalar("debug/env_map_g_mean", env[1].mean().item(), iteration)
+    tb_writer.add_scalar("debug/env_map_b_mean", env[2].mean().item(), iteration)
 
 @torch.no_grad()
 def _run_pbr_eval(
