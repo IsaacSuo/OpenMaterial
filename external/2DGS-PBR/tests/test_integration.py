@@ -388,15 +388,15 @@ def test_training_script_structure():
         assert func in functions, f"Function {func} not found"
         print(f"  - {func}: OK")
 
-    # Check for PBR-specific features
+    # Check for key features (PBR path must exist, even if train_pbr.py supports SH baseline too)
     required_features = [
-        'use_pbr=True',
         'render_pbr=True',
         'EnvironmentLight',
         'screen_space_pbr_shading',
         'compute_pbr_losses',
         '--env_map',
         '--lambda_pbr',
+        '--object_render_mode',
     ]
 
     for feature in required_features:

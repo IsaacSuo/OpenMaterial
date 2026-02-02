@@ -116,8 +116,9 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
     for d in [renders_dir, gt_dir, pbr_dir, albedo_dir, roughness_dir, metallic_dir, normal_dir, depth_dir]:
         makedirs(d, exist_ok=True)
 
+    object_render_mode = str(getattr(dataset, "object_render_mode", "pbr")).lower().strip() if hasattr(dataset, "object_render_mode") else "pbr"
     # Load object model
-    gaussians = GaussianModel(dataset.sh_degree, use_pbr=True)
+    gaussians = GaussianModel(dataset.sh_degree, use_pbr=(object_render_mode == "pbr"))
     scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
     # Optional: load unfixed/background Gaussians (SH-only)
@@ -145,8 +146,11 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
     print(f"\nRendering {len(cameras)} {split_name} views...")
 
     for idx, view in enumerate(tqdm(cameras, desc=f"Rendering {split_name}")):
-        # Render with PBR G-Buffer
-        render_pkg = render(view, gaussians, pipeline, background, render_pbr=True)
+        # Render object (PBR or SH)
+        if object_render_mode == "pbr":
+            render_pkg = render(view, gaussians, pipeline, background, render_pbr=True)
+        else:
+            render_pkg = render(view, gaussians, pipeline, background, render_pbr=False)
 
         # Skybox for composite outputs
         ray_dirs = compute_ray_directions_world_from_fov(
@@ -167,7 +171,7 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
             bg_env = _compute_background(ray_dirs, view.camera_center, env_light, ground_plane)
         alpha_map = render_pkg["rend_alpha"]
 
-        # Standard SH rendering
+        # Standard SH rendering (always available); in PBR mode this is just for reference.
         image = render_pkg["render"] + bg_env * (1.0 - alpha_map)
         save_image(image, os.path.join(renders_dir, f"{view.image_name}.png"))
 
@@ -176,7 +180,7 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
         save_image(gt, os.path.join(gt_dir, f"{view.image_name}.png"))
 
         # PBR outputs
-        if gaussians.use_pbr and 'gbuffer_albedo' in render_pkg:
+        if (object_render_mode == "pbr") and gaussians.use_pbr and 'gbuffer_albedo' in render_pkg:
             denom = alpha_map + 1e-6
 
             # Unpremultiply to get physically meaningful material maps.
@@ -215,6 +219,9 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
             )
             shaded = shaded_obj * alpha_map + bg_env * (1.0 - alpha_map)
             save_image(shaded, os.path.join(pbr_dir, f"{view.image_name}.png"))
+        elif object_render_mode == "sh":
+            # Baseline: mirror SH composite into pbr_shaded for convenience/metrics.
+            save_image(image, os.path.join(pbr_dir, f"{view.image_name}.png"))
 
     return scene
 
@@ -277,6 +284,13 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--env_map", type=str, default=None, help="Path to HDR environment map")
     parser.add_argument("--compute_metrics", action="store_true", help="Compute PSNR/SSIM/LPIPS metrics")
+    parser.add_argument(
+        "--object_render_mode",
+        type=str,
+        default="pbr",
+        choices=["pbr", "sh"],
+        help="Object rendering mode: 'pbr' or 'sh' (baseline).",
+    )
     parser.add_argument(
         "--ground_plane_json",
         type=str,
@@ -398,3 +412,5 @@ if __name__ == "__main__":
 
     print("\nRendering complete!")
     print(f"Output saved to: {args.model_path}")
+    # Pass through for render_set (stored on dataset namespace for convenience)
+    setattr(dataset, "object_render_mode", getattr(args, "object_render_mode", "pbr"))

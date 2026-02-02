@@ -653,8 +653,6 @@ def _run_pbr_eval(
         masked_count = 0
 
         for cam_idx, viewpoint in enumerate(cameras):
-            render_pkg = render(viewpoint, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
-
             ray_dirs = _get_ray_dirs_world(viewpoint)
             sky = env_light.sample(ray_dirs).permute(2, 0, 1)
             if gaussians_unfixed is not None:
@@ -664,28 +662,48 @@ def _run_pbr_eval(
             else:
                 bg_env = _compute_background(ray_dirs, viewpoint.camera_center, env_light, ground_plane)
 
+            object_render_mode = str(getattr(args, "object_render_mode", "pbr")).lower().strip() if args is not None else "pbr"
+            if object_render_mode == "pbr":
+                render_pkg = render(viewpoint, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
+            else:
+                render_pkg = render(viewpoint, gaussians, pipe, background, render_pbr=False)
+
             alpha_map = render_pkg["rend_alpha"]
             denom = alpha_map + 1e-6
-
-            albedo = torch.clamp(render_pkg["gbuffer_albedo"] / denom, 0.0, 1.0)
-            rough = torch.clamp(render_pkg["gbuffer_roughness"] / denom, 0.1, 0.999)
-            metal = torch.clamp(render_pkg["gbuffer_metallic"] / denom, 0.0, 1.0)
-            normal = render_pkg["rend_normal"] / denom
-            depth_map = render_pkg.get("surf_depth")
-
-            shaded = screen_space_pbr_shading(
-                albedo, rough, metal,
-                normal, depth_map,
-                viewpoint.camera_center, viewpoint.world_view_transform,
-                env_light=env_light,
-                ray_dirs_world=ray_dirs,
-                clamp_output=False,
-            )
-
-            pred = shaded * alpha_map + bg_env * (1.0 - alpha_map)
-            pred = linear_to_srgb(tonemap_reinhard(pred)).clamp(0.0, 1.0)
             gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
             gt_mask = viewpoint.gt_alpha_mask.to("cuda") if viewpoint.gt_alpha_mask is not None else None
+
+            if object_render_mode == "pbr":
+                albedo = torch.clamp(render_pkg["gbuffer_albedo"] / denom, 0.0, 1.0)
+                rough = torch.clamp(render_pkg["gbuffer_roughness"] / denom, 0.1, 0.999)
+                metal = torch.clamp(render_pkg["gbuffer_metallic"] / denom, 0.0, 1.0)
+                normal = render_pkg["rend_normal"] / denom
+                depth_map = render_pkg.get("surf_depth")
+
+                shaded = screen_space_pbr_shading(
+                    albedo, rough, metal,
+                    normal, depth_map,
+                    viewpoint.camera_center, viewpoint.world_view_transform,
+                    env_light=env_light,
+                    ray_dirs_world=ray_dirs,
+                    clamp_output=False,
+                )
+
+                if getattr(args, "composite_use_gt_mask", False) and (gt_mask is not None):
+                    pred = shaded * gt_mask + bg_env * (1.0 - gt_mask)
+                else:
+                    pred = shaded * alpha_map + bg_env * (1.0 - alpha_map)
+            else:
+                shaded = None
+                albedo = rough = metal = normal = depth_map = None
+                obj_rgb_pm = render_pkg["render"]
+                if getattr(args, "composite_use_gt_mask", False) and (gt_mask is not None):
+                    obj_rgb = obj_rgb_pm / denom
+                    pred = obj_rgb * gt_mask + bg_env * (1.0 - gt_mask)
+                else:
+                    pred = obj_rgb_pm + bg_env * (1.0 - alpha_map)
+
+            pred = linear_to_srgb(tonemap_reinhard(pred)).clamp(0.0, 1.0)
 
             if args is not None:
                 _maybe_dump_nonfinite(
@@ -720,11 +738,12 @@ def _run_pbr_eval(
                 tb_writer.add_image(f"{prefix}/0_render_composite", pred, iteration)
                 if log_gt:
                     tb_writer.add_image(f"{prefix}/0_gt", gt_image, iteration)
-                tb_writer.add_image(f"{prefix}/1_albedo", albedo, iteration)
-                tb_writer.add_image(f"{prefix}/2_roughness", rough.repeat(3, 1, 1), iteration)
-                tb_writer.add_image(f"{prefix}/3_metallic", metal.repeat(3, 1, 1), iteration)
-                shaded_vis = linear_to_srgb(tonemap_reinhard(shaded)).clamp(0.0, 1.0)
-                tb_writer.add_image(f"{prefix}/4_pbr_shaded_obj", shaded_vis, iteration)
+                if object_render_mode == "pbr":
+                    tb_writer.add_image(f"{prefix}/1_albedo", albedo, iteration)
+                    tb_writer.add_image(f"{prefix}/2_roughness", rough.repeat(3, 1, 1), iteration)
+                    tb_writer.add_image(f"{prefix}/3_metallic", metal.repeat(3, 1, 1), iteration)
+                    shaded_vis = linear_to_srgb(tonemap_reinhard(shaded)).clamp(0.0, 1.0)
+                    tb_writer.add_image(f"{prefix}/4_pbr_shaded_obj", shaded_vis, iteration)
                 tb_writer.add_image(f"{prefix}/7_alpha", alpha_map.repeat(3, 1, 1), iteration)
                 if viewpoint.gt_alpha_mask is not None:
                     tb_writer.add_image(
@@ -767,8 +786,13 @@ def training_pbr_static(dataset, opt, pipe, args):
     if bool(getattr(args, "ground_as_gaussians", False)):
         print("[Deprecated] --ground_as_gaussians is deprecated; use --unfixed_gaussians instead.")
         unfixed_gaussians = True
+
+    # Object rendering mode: PBR (default) vs SH (baseline).
+    object_render_mode = str(getattr(args, "object_render_mode", "pbr")).lower().strip()
+    if object_render_mode not in ("pbr", "sh"):
+        raise ValueError(f"--object_render_mode must be 'pbr' or 'sh', got: {object_render_mode}")
     
-    gaussians = GaussianModel(dataset.sh_degree, use_pbr=True)
+    gaussians = GaussianModel(dataset.sh_degree, use_pbr=(object_render_mode == "pbr"))
     gaussians.roughness_min = float(getattr(args, "roughness_min", 0.02))
     gaussians.roughness_max = float(getattr(args, "roughness_max", 0.999))
     
@@ -776,15 +800,16 @@ def training_pbr_static(dataset, opt, pipe, args):
     # It will be updated after Scene creation when we know the true extent.
     gaussians.create_from_dense_pcd(pcd, spatial_lr_scale=1.0)
 
-    # Optional: override initial roughness to a chosen physical value in [0, 1].
-    # Internally, _roughness is passed through sigmoid and then clamped.
-    roughness_init = getattr(args, "roughness_init", None)
-    if roughness_init is not None:
-        r = float(roughness_init)
-        r = max(1e-6, min(1.0 - 1e-6, r))
-        with torch.no_grad():
-            gaussians._roughness.data.fill_(float(inverse_sigmoid(torch.tensor(r)).item()))
-        print(f"Initialized roughness to {r} (pre-sigmoid={gaussians._roughness.data.mean().item():.4f})")
+    if object_render_mode == "pbr":
+        # Optional: override initial roughness to a chosen physical value in [0, 1].
+        # Internally, _roughness is passed through sigmoid and then clamped.
+        roughness_init = getattr(args, "roughness_init", None)
+        if roughness_init is not None:
+            r = float(roughness_init)
+            r = max(1e-6, min(1.0 - 1e-6, r))
+            with torch.no_grad():
+                gaussians._roughness.data.fill_(float(inverse_sigmoid(torch.tensor(r)).item()))
+            print(f"Initialized roughness to {r} (pre-sigmoid={gaussians._roughness.data.mean().item():.4f})")
     
     # 2. Initialize Scene
     # Since gaussians._xyz is now populated, Scene will NOT re-initialize them from COLMAP.
@@ -795,8 +820,14 @@ def training_pbr_static(dataset, opt, pipe, args):
     print(f"Updated spatial_lr_scale to {scene.cameras_extent}")
 
     # 3. Setup Optimizer (Fixed Geometry Mode)
-    # This locks XYZ and Rotation, but allows Scale, Opacity, and PBR to be optimized.
-    gaussians.training_setup_fixed_geometry_pbr_only(opt)
+    # Locks XYZ and Rotation.
+    if object_render_mode == "pbr":
+        # PBR: optimize opacity/scaling + PBR materials (albedo/roughness/metallic)
+        gaussians.training_setup_fixed_geometry_pbr_only(opt)
+    else:
+        # SH: optimize opacity/scaling + SH color (features)
+        gaussians.training_setup_fixed_geometry(opt)
+        print("[Object] Using SH baseline (no PBR).")
 
     # 3.5 Setup Unfixed (Background) Gaussians (optional, SH-only + densify)
     gaussians_unfixed = None
@@ -971,7 +1002,10 @@ def training_pbr_static(dataset, opt, pipe, args):
             if not freeze_env_light:
                 for p in env_light.parameters():
                     p.requires_grad_(True)
-            print(f"[Stage2] iters>={STAGE0_BG_ITERS+STAGE1_ENV_ITERS+1}: train object PBR + unfixed + env_map.")
+            print(
+                f"[Stage2] iters>={STAGE0_BG_ITERS+STAGE1_ENV_ITERS+1}: "
+                f"train object={object_render_mode.upper()} + unfixed + env_map."
+            )
 
         # Update learning rate (mainly for Opacity/SH, since XYZ is locked)
         gaussians.update_learning_rate(iteration)
@@ -1140,7 +1174,10 @@ def training_pbr_static(dataset, opt, pipe, args):
                 continue
 
             # stage == 2 (full training)
-            render_pkg = render(viewpoint_cam, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
+            if object_render_mode == "pbr":
+                render_pkg = render(viewpoint_cam, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
+            else:
+                render_pkg = render(viewpoint_cam, gaussians, pipe, background, render_pbr=False)
             alpha_map = render_pkg.get("rend_alpha")
             if alpha_map is None:
                 raise RuntimeError("render_pkg missing 'rend_alpha'")
@@ -1169,33 +1206,38 @@ def training_pbr_static(dataset, opt, pipe, args):
             last_gt_alpha_mask = mask.detach() if mask is not None else None
             last_sky_weight = None
 
-            gbuffer_albedo_pm = render_pkg.get("gbuffer_albedo")
-            gbuffer_roughness_pm = render_pkg.get("gbuffer_roughness")
-            gbuffer_metallic_pm = render_pkg.get("gbuffer_metallic")
-            gbuffer_normal_pm = render_pkg.get("rend_normal")
-            gbuffer_depth = render_pkg.get("surf_depth")
-            if gbuffer_albedo_pm is None:
-                raise RuntimeError("render_pbr=True but missing G-buffer outputs")
+            if object_render_mode == "pbr":
+                gbuffer_albedo_pm = render_pkg.get("gbuffer_albedo")
+                gbuffer_roughness_pm = render_pkg.get("gbuffer_roughness")
+                gbuffer_metallic_pm = render_pkg.get("gbuffer_metallic")
+                gbuffer_normal_pm = render_pkg.get("rend_normal")
+                gbuffer_depth = render_pkg.get("surf_depth")
+                if gbuffer_albedo_pm is None:
+                    raise RuntimeError("render_pbr=True but missing G-buffer outputs")
 
-            eps = 1e-6
-            denom = alpha_map + eps
-            gbuffer_albedo = torch.clamp(gbuffer_albedo_pm / denom, 0.0, 1.0)
-            gbuffer_roughness = torch.clamp(gbuffer_roughness_pm / denom, 0.1, 0.999)
-            gbuffer_metallic = torch.clamp(gbuffer_metallic_pm / denom, 0.0, 1.0)
-            gbuffer_normal = gbuffer_normal_pm / denom
+                eps = 1e-6
+                denom = alpha_map + eps
+                gbuffer_albedo = torch.clamp(gbuffer_albedo_pm / denom, 0.0, 1.0)
+                gbuffer_roughness = torch.clamp(gbuffer_roughness_pm / denom, 0.1, 0.999)
+                gbuffer_metallic = torch.clamp(gbuffer_metallic_pm / denom, 0.0, 1.0)
+                gbuffer_normal = gbuffer_normal_pm / denom
 
-            shaded_obj = screen_space_pbr_shading(
-                gbuffer_albedo,
-                gbuffer_roughness,
-                gbuffer_metallic,
-                gbuffer_normal,
-                gbuffer_depth,
-                viewpoint_cam.camera_center,
-                viewpoint_cam.world_view_transform,
-                env_light=env_light,
-                ray_dirs_world=ray_dirs,
-                clamp_output=False,
-            )
+                shaded_obj = screen_space_pbr_shading(
+                    gbuffer_albedo,
+                    gbuffer_roughness,
+                    gbuffer_metallic,
+                    gbuffer_normal,
+                    gbuffer_depth,
+                    viewpoint_cam.camera_center,
+                    viewpoint_cam.world_view_transform,
+                    env_light=env_light,
+                    ray_dirs_world=ray_dirs,
+                    clamp_output=False,
+                )
+                obj_rgb_pm = shaded_obj * alpha_map
+            else:
+                # SH baseline: direct SH render is already premultiplied with alpha (bg is black).
+                obj_rgb_pm = render_pkg["render"]
 
             # Composite for reconstruction.
             # By default, composite with rendered alpha. If requested and GT mask exists, composite with masks:
@@ -1204,7 +1246,13 @@ def training_pbr_static(dataset, opt, pipe, args):
             if getattr(args, "composite_use_gt_mask", False) and (mask is not None):
                 alpha_for_comp = mask
 
-            pred = shaded_obj * alpha_for_comp + bg_env * (1.0 - alpha_for_comp)
+            if (object_render_mode == "sh") and getattr(args, "composite_use_gt_mask", False) and (mask is not None):
+                # Decouple SH color from rendered alpha when compositing with GT mask.
+                denom = alpha_map + 1e-6
+                obj_rgb = obj_rgb_pm / denom
+                pred = obj_rgb * alpha_for_comp + bg_env * (1.0 - alpha_for_comp)
+            else:
+                pred = obj_rgb_pm + bg_env * (1.0 - alpha_for_comp)
             pred = linear_to_srgb(tonemap_reinhard(pred)).clamp(0.0, 1.0)
 
             alpha_sup_loss = torch.tensor(0.0, device="cuda")
@@ -1232,20 +1280,24 @@ def training_pbr_static(dataset, opt, pipe, args):
                 if getattr(opt, "lambda_pbr", 0.0) > 0:
                     recon_weight = recon_weight + opt.lambda_pbr * obj_mask
 
-            reg_mask = mask if mask is not None else alpha_map.detach()
-            pbr_losses = compute_pbr_losses(
-                gbuffer_albedo,
-                gbuffer_roughness,
-                gbuffer_metallic,
-                alpha_map=reg_mask,
-                lambda_albedo_smooth=args.lambda_albedo_smooth,
-                lambda_roughness_smooth=args.lambda_roughness_smooth,
-                lambda_metallic_smooth=args.lambda_metallic_smooth,
-                lambda_metallic_prior=args.lambda_metallic_prior,
-                lambda_roughness_prior=args.lambda_roughness_prior,
-                lambda_albedo_chroma=args.lambda_albedo_chroma,
-            )
-            pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses["total_pbr_reg"]
+            if object_render_mode == "pbr":
+                reg_mask = mask if mask is not None else alpha_map.detach()
+                pbr_losses = compute_pbr_losses(
+                    gbuffer_albedo,
+                    gbuffer_roughness,
+                    gbuffer_metallic,
+                    alpha_map=reg_mask,
+                    lambda_albedo_smooth=args.lambda_albedo_smooth,
+                    lambda_roughness_smooth=args.lambda_roughness_smooth,
+                    lambda_metallic_smooth=args.lambda_metallic_smooth,
+                    lambda_metallic_prior=args.lambda_metallic_prior,
+                    lambda_roughness_prior=args.lambda_roughness_prior,
+                    lambda_albedo_chroma=args.lambda_albedo_chroma,
+                )
+                pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses["total_pbr_reg"]
+            else:
+                pbr_losses = {"total_pbr_reg": torch.tensor(0.0, device="cuda")}
+                pbr_reg_loss = torch.tensor(0.0, device="cuda")
 
             Ll1 = l1_loss(pred, gt_image, mask=recon_weight)
             ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=recon_weight.unsqueeze(0))
@@ -1399,26 +1451,26 @@ def training_pbr_static(dataset, opt, pipe, args):
                     tb_writer.add_scalar("train_diag/alpha_mean", alpha_mean, iteration)
                     tb_writer.add_scalar("train_diag/recon_weight_mean", w_mean, iteration)
 
-                    # Material stats (object region only, if any)
-                    if (obj_coverage > 0) and (gbuffer_albedo is not None) and (gbuffer_roughness is not None) and (gbuffer_metallic is not None):
-                        m = (obj_mask > 0.5).expand_as(gbuffer_albedo)
-                        tb_writer.add_scalar("train_diag/albedo_mean_obj", gbuffer_albedo[m].mean().item(), iteration)
-                        tb_writer.add_scalar("train_diag/roughness_mean_obj", gbuffer_roughness[obj_mask > 0.5].mean().item(), iteration)
-                        tb_writer.add_scalar("train_diag/metallic_mean_obj", gbuffer_metallic[obj_mask > 0.5].mean().item(), iteration)
                     tb_writer.add_scalar('train_loss_patches/recon_loss', recon_loss.item(), iteration)
                     tb_writer.add_scalar('train_loss_patches/env_tv_loss', env_tv_loss.item(), iteration)
                     tb_writer.add_scalar('train_loss_patches/env_prior_loss', env_prior_loss.item(), iteration)
-                    tb_writer.add_scalar('train_loss_patches/pbr_reg_pre_scale', pbr_losses["total_pbr_reg"].item(), iteration)
-                    tb_writer.add_scalar('train_stats/alpha_mean', alpha_mean, iteration)
-                    tb_writer.add_scalar('train_stats/obj_weight_mean', w_mean, iteration)
-                    tb_writer.add_scalar('train_stats/albedo_mean', gbuffer_albedo.mean().item(), iteration)
-                    tb_writer.add_scalar('train_stats/roughness_mean', gbuffer_roughness.mean().item(), iteration)
-                    tb_writer.add_scalar('train_stats/metallic_mean', gbuffer_metallic.mean().item(), iteration)
 
-                    for k, v in pbr_losses.items():
-                        if k == "total_pbr_reg":
-                            continue
-                        tb_writer.add_scalar(f"train_loss_patches/pbr_reg_terms/{k}", v.item(), iteration)
+                    if object_render_mode == "pbr":
+                        # Material stats (object region only, if any)
+                        if (obj_coverage > 0) and (gbuffer_albedo is not None) and (gbuffer_roughness is not None) and (gbuffer_metallic is not None):
+                            m = (obj_mask > 0.5).expand_as(gbuffer_albedo)
+                            tb_writer.add_scalar("train_diag/albedo_mean_obj", gbuffer_albedo[m].mean().item(), iteration)
+                            tb_writer.add_scalar("train_diag/roughness_mean_obj", gbuffer_roughness[obj_mask > 0.5].mean().item(), iteration)
+                            tb_writer.add_scalar("train_diag/metallic_mean_obj", gbuffer_metallic[obj_mask > 0.5].mean().item(), iteration)
+                        tb_writer.add_scalar('train_loss_patches/pbr_reg_pre_scale', pbr_losses["total_pbr_reg"].item(), iteration)
+                        tb_writer.add_scalar('train_stats/albedo_mean', gbuffer_albedo.mean().item(), iteration)
+                        tb_writer.add_scalar('train_stats/roughness_mean', gbuffer_roughness.mean().item(), iteration)
+                        tb_writer.add_scalar('train_stats/metallic_mean', gbuffer_metallic.mean().item(), iteration)
+
+                        for k, v in pbr_losses.items():
+                            if k == "total_pbr_reg":
+                                continue
+                            tb_writer.add_scalar(f"train_loss_patches/pbr_reg_terms/{k}", v.item(), iteration)
                 else:
                     # In Stage0/1, object buffers may be unavailable; log only basic mask/weights if present.
                     if last_gt_alpha_mask is not None:
@@ -1557,6 +1609,13 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument("--gt_ply", type=str, required=True, help="Path to dense GT .ply file")
     parser.add_argument("--env_map", type=str, default=None, help="Initial HDR environment map")
+    parser.add_argument(
+        "--object_render_mode",
+        type=str,
+        default="pbr",
+        choices=["pbr", "sh"],
+        help="Object rendering/training mode: 'pbr' (default) or 'sh' (baseline using SH colors).",
+    )
     parser.add_argument(
         "--env_light_pth",
         type=str,
