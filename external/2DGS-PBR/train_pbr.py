@@ -1367,34 +1367,43 @@ def training_pbr_static(dataset, opt, pipe, args):
                         continue
                     tb_writer.add_scalar(f"train_unscaled/pbr_reg/{k}", v.item(), iteration)
 
-                # Weight/mask diagnostics
-                obj_coverage = (obj_mask > 0.5).float().mean().item()
-                alpha_mean = alpha_map.mean().item()
-                w_mean = recon_weight.mean().item()
-                tb_writer.add_scalar("train_diag/obj_coverage", obj_coverage, iteration)
-                tb_writer.add_scalar("train_diag/alpha_mean", alpha_mean, iteration)
-                tb_writer.add_scalar("train_diag/recon_weight_mean", w_mean, iteration)
+                # Stage-dependent diagnostics.
+                if stage == 2:
+                    # Weight/mask diagnostics
+                    obj_coverage = (obj_mask > 0.5).float().mean().item() if obj_mask is not None else 0.0
+                    alpha_mean = alpha_map.mean().item() if alpha_map is not None else 0.0
+                    w_mean = recon_weight.mean().item() if recon_weight is not None else 0.0
+                    tb_writer.add_scalar("train_diag/obj_coverage", obj_coverage, iteration)
+                    tb_writer.add_scalar("train_diag/alpha_mean", alpha_mean, iteration)
+                    tb_writer.add_scalar("train_diag/recon_weight_mean", w_mean, iteration)
 
-                # Material stats (object region only, if any)
-                if obj_coverage > 0:
-                    m = (obj_mask > 0.5).expand_as(gbuffer_albedo)
-                    tb_writer.add_scalar("train_diag/albedo_mean_obj", gbuffer_albedo[m].mean().item(), iteration)
-                    tb_writer.add_scalar("train_diag/roughness_mean_obj", gbuffer_roughness[obj_mask > 0.5].mean().item(), iteration)
-                    tb_writer.add_scalar("train_diag/metallic_mean_obj", gbuffer_metallic[obj_mask > 0.5].mean().item(), iteration)
-                tb_writer.add_scalar('train_loss_patches/recon_loss', recon_loss.item(), iteration)
-                tb_writer.add_scalar('train_loss_patches/env_tv_loss', env_tv_loss.item(), iteration)
-                tb_writer.add_scalar('train_loss_patches/env_prior_loss', env_prior_loss.item(), iteration)
-                tb_writer.add_scalar('train_loss_patches/pbr_reg_pre_scale', pbr_losses["total_pbr_reg"].item(), iteration)
-                tb_writer.add_scalar('train_stats/alpha_mean', alpha_map.mean().item(), iteration)
-                tb_writer.add_scalar('train_stats/obj_weight_mean', recon_weight.mean().item(), iteration)
-                tb_writer.add_scalar('train_stats/albedo_mean', gbuffer_albedo.mean().item(), iteration)
-                tb_writer.add_scalar('train_stats/roughness_mean', gbuffer_roughness.mean().item(), iteration)
-                tb_writer.add_scalar('train_stats/metallic_mean', gbuffer_metallic.mean().item(), iteration)
+                    # Material stats (object region only, if any)
+                    if (obj_coverage > 0) and (gbuffer_albedo is not None) and (gbuffer_roughness is not None) and (gbuffer_metallic is not None):
+                        m = (obj_mask > 0.5).expand_as(gbuffer_albedo)
+                        tb_writer.add_scalar("train_diag/albedo_mean_obj", gbuffer_albedo[m].mean().item(), iteration)
+                        tb_writer.add_scalar("train_diag/roughness_mean_obj", gbuffer_roughness[obj_mask > 0.5].mean().item(), iteration)
+                        tb_writer.add_scalar("train_diag/metallic_mean_obj", gbuffer_metallic[obj_mask > 0.5].mean().item(), iteration)
+                    tb_writer.add_scalar('train_loss_patches/recon_loss', recon_loss.item(), iteration)
+                    tb_writer.add_scalar('train_loss_patches/env_tv_loss', env_tv_loss.item(), iteration)
+                    tb_writer.add_scalar('train_loss_patches/env_prior_loss', env_prior_loss.item(), iteration)
+                    tb_writer.add_scalar('train_loss_patches/pbr_reg_pre_scale', pbr_losses["total_pbr_reg"].item(), iteration)
+                    tb_writer.add_scalar('train_stats/alpha_mean', alpha_mean, iteration)
+                    tb_writer.add_scalar('train_stats/obj_weight_mean', w_mean, iteration)
+                    tb_writer.add_scalar('train_stats/albedo_mean', gbuffer_albedo.mean().item(), iteration)
+                    tb_writer.add_scalar('train_stats/roughness_mean', gbuffer_roughness.mean().item(), iteration)
+                    tb_writer.add_scalar('train_stats/metallic_mean', gbuffer_metallic.mean().item(), iteration)
 
-                for k, v in pbr_losses.items():
-                    if k == "total_pbr_reg":
-                        continue
-                    tb_writer.add_scalar(f"train_loss_patches/pbr_reg_terms/{k}", v.item(), iteration)
+                    for k, v in pbr_losses.items():
+                        if k == "total_pbr_reg":
+                            continue
+                        tb_writer.add_scalar(f"train_loss_patches/pbr_reg_terms/{k}", v.item(), iteration)
+                else:
+                    # In Stage0/1, object buffers may be unavailable; log only basic mask/weights if present.
+                    if last_gt_alpha_mask is not None:
+                        obj_cov = (last_gt_alpha_mask > 0.5).float().mean().item()
+                        tb_writer.add_scalar("train_diag/obj_coverage", obj_cov, iteration)
+                    if last_sky_weight is not None:
+                        tb_writer.add_scalar("train_diag/sky_weight_mean", float(last_sky_weight.mean().item()), iteration)
 
             # Save
             if iteration in args.save_iterations:
