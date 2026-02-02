@@ -27,12 +27,12 @@ from utils.pbr_utils import (
     GroundPlane,
     screen_space_pbr_shading,
     compute_ray_directions_world_from_fov,
+    tonemap_reinhard,
+    linear_to_srgb,
 )
 
 import numpy as np
 from PIL import Image
-
-from utils.pbr_utils import tonemap_reinhard
 
 def _search_for_max_iteration_in_dir(root: str):
     """
@@ -56,7 +56,7 @@ def _search_for_max_iteration_in_dir(root: str):
 
 def save_image(tensor, path):
     """Save a [C, H, W] tensor as image"""
-    img = tonemap_reinhard(tensor).detach().cpu().clamp(0, 1)
+    img = linear_to_srgb(tonemap_reinhard(tensor)).detach().cpu().clamp(0, 1)
     img = (img.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
     Image.fromarray(img).save(path)
 

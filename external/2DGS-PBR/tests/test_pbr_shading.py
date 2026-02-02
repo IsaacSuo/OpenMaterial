@@ -239,6 +239,19 @@ def test_reinhard_tonemap():
     assert torch.allclose(y, expected, atol=1e-6), f"tonemap_reinhard mismatch: {y} vs {expected}"
     print("  - Basic mapping: OK")
 
+def test_srgb_linear_roundtrip():
+    """Test sRGB <-> linear helpers are roughly inverse on [0,1]."""
+    print("\n" + "=" * 50)
+    print("Test 9: sRGB/Linear Roundtrip")
+    print("=" * 50)
+
+    from utils.pbr_utils import srgb_to_linear, linear_to_srgb
+
+    x = torch.linspace(0, 1, 11)
+    y = linear_to_srgb(srgb_to_linear(x))
+    assert torch.allclose(x, y, atol=2e-4), f"roundtrip mismatch: {x} vs {y}"
+    print("  - Roundtrip on [0,1]: OK")
+
 
 def main():
     print("=" * 50)
@@ -254,6 +267,7 @@ def main():
         test_environment_light()
         test_screen_space_pbr()
         test_reinhard_tonemap()
+        test_srgb_linear_roundtrip()
 
         print("\n" + "=" * 50)
         print("ALL PHASE 3 TESTS PASSED!")

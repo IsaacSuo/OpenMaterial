@@ -31,6 +31,7 @@ from utils.pbr_utils import (
     screen_space_pbr_shading,
     compute_ray_directions_world_from_fov,
     tonemap_reinhard,
+    linear_to_srgb,
 )
 from utils.profiler import SimpleProfiler
 from utils.general_utils import safe_state, colormap, inverse_sigmoid
@@ -209,13 +210,16 @@ def _maybe_tb_log_unfixed(
             tb_writer.add_scalar("unfixed/alpha_bg_bg_coverage", float(bg_coverage.detach().cpu().item()), iteration)
 
     if bg_render is not None:
-        tb_writer.add_image("unfixed/bg_render", bg_render.clamp(0.0, 1.0), iteration)
+        vis = linear_to_srgb(tonemap_reinhard(bg_render)).clamp(0.0, 1.0)
+        tb_writer.add_image("unfixed/bg_render", vis, iteration)
     if alpha_bg is not None:
         tb_writer.add_image("unfixed/alpha_bg", alpha_bg.repeat(3, 1, 1).clamp(0.0, 1.0), iteration)
     if sky is not None:
-        tb_writer.add_image("unfixed/sky", sky.clamp(0.0, 1.0), iteration)
+        vis = linear_to_srgb(tonemap_reinhard(sky)).clamp(0.0, 1.0)
+        tb_writer.add_image("unfixed/sky", vis, iteration)
     if bg_env is not None:
-        tb_writer.add_image("unfixed/bg_env", bg_env.clamp(0.0, 1.0), iteration)
+        vis = linear_to_srgb(tonemap_reinhard(bg_env)).clamp(0.0, 1.0)
+        tb_writer.add_image("unfixed/bg_env", vis, iteration)
     if gt_image is not None:
         tb_writer.add_image("unfixed/gt", gt_image[:3].clamp(0.0, 1.0), iteration)
     if gt_alpha_mask is not None:
@@ -658,10 +662,11 @@ def _run_pbr_eval(
                 viewpoint.camera_center, viewpoint.world_view_transform,
                 env_light=env_light,
                 ray_dirs_world=ray_dirs,
+                clamp_output=False,
             )
 
             pred = shaded * alpha_map + bg_env * (1.0 - alpha_map)
-            pred = torch.clamp(pred, 0.0, 1.0)
+            pred = linear_to_srgb(tonemap_reinhard(pred)).clamp(0.0, 1.0)
             gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
             gt_mask = viewpoint.gt_alpha_mask.to("cuda") if viewpoint.gt_alpha_mask is not None else None
 
@@ -701,7 +706,8 @@ def _run_pbr_eval(
                 tb_writer.add_image(f"{prefix}/1_albedo", albedo, iteration)
                 tb_writer.add_image(f"{prefix}/2_roughness", rough.repeat(3, 1, 1), iteration)
                 tb_writer.add_image(f"{prefix}/3_metallic", metal.repeat(3, 1, 1), iteration)
-                tb_writer.add_image(f"{prefix}/4_pbr_shaded_obj", shaded, iteration)
+                shaded_vis = linear_to_srgb(tonemap_reinhard(shaded)).clamp(0.0, 1.0)
+                tb_writer.add_image(f"{prefix}/4_pbr_shaded_obj", shaded_vis, iteration)
                 tb_writer.add_image(f"{prefix}/7_alpha", alpha_map.repeat(3, 1, 1), iteration)
                 if viewpoint.gt_alpha_mask is not None:
                     tb_writer.add_image(
@@ -1067,7 +1073,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                 last_gt_alpha_mask = mask.detach()
                 last_sky_weight = None
                 pred = bg_env
-                pred = tonemap_reinhard(pred).clamp(0.0, 1.0)
+                pred = linear_to_srgb(tonemap_reinhard(pred)).clamp(0.0, 1.0)
                 Ll1 = l1_loss(pred, gt_image, mask=bg_mask)
                 ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=bg_mask.unsqueeze(0))
                 recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
@@ -1104,7 +1110,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                 last_gt_alpha_mask = mask.detach()
                 last_sky_weight = sky_weight.detach()
                 pred = sky
-                pred = tonemap_reinhard(pred).clamp(0.0, 1.0)
+                pred = linear_to_srgb(tonemap_reinhard(pred)).clamp(0.0, 1.0)
                 Ll1 = l1_loss(pred, gt_image, mask=sky_weight)
                 ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=sky_weight.unsqueeze(0))
                 recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
@@ -1181,7 +1187,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                 alpha_for_comp = mask
 
             pred = shaded_obj * alpha_for_comp + bg_env * (1.0 - alpha_for_comp)
-            pred = tonemap_reinhard(pred).clamp(0.0, 1.0)
+            pred = linear_to_srgb(tonemap_reinhard(pred)).clamp(0.0, 1.0)
 
             alpha_sup_loss = torch.tensor(0.0, device="cuda")
             if mask is not None:

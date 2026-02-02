@@ -25,6 +25,34 @@ def tonemap_reinhard(x: torch.Tensor) -> torch.Tensor:
     x = torch.clamp_min(x, 0.0)
     return x / (1.0 + x)
 
+def linear_to_srgb(x: torch.Tensor) -> torch.Tensor:
+    """
+    Linear RGB -> sRGB (differentiable).
+    Assumes input is linear in [0, +inf); output in [0, +inf) (typically clamped to [0,1] by caller).
+    """
+    x = torch.clamp_min(x, 0.0)
+    a = 0.055
+    threshold = 0.0031308
+    return torch.where(
+        x <= threshold,
+        x * 12.92,
+        (1.0 + a) * torch.pow(torch.clamp_min(x, threshold), 1.0 / 2.4) - a,
+    )
+
+def srgb_to_linear(x: torch.Tensor) -> torch.Tensor:
+    """
+    sRGB -> Linear RGB (differentiable).
+    Assumes input is sRGB in [0,1].
+    """
+    x = torch.clamp(x, 0.0, 1.0)
+    a = 0.055
+    threshold = 0.04045
+    return torch.where(
+        x <= threshold,
+        x / 12.92,
+        torch.pow((x + a) / (1.0 + a), 2.4),
+    )
+
 
 class EnvironmentLight(nn.Module):
     """
