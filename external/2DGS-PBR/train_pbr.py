@@ -624,6 +624,7 @@ def _run_pbr_eval(
     iteration: int,
     scene: Scene,
     gaussians: GaussianModel,
+    gaussians_unfixed: GaussianModel | None,
     pipe,
     background: torch.Tensor,
     dummy_color: torch.Tensor,
@@ -655,7 +656,13 @@ def _run_pbr_eval(
             render_pkg = render(viewpoint, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
 
             ray_dirs = _get_ray_dirs_world(viewpoint)
-            bg_env = _compute_background(ray_dirs, viewpoint.camera_center, env_light, ground_plane)
+            sky = env_light.sample(ray_dirs).permute(2, 0, 1)
+            if gaussians_unfixed is not None:
+                bg_pkg = render(viewpoint, gaussians_unfixed, pipe, background, render_pbr=False)
+                alpha_bg = bg_pkg["rend_alpha"]
+                bg_env = bg_pkg["render"] + sky * (1.0 - alpha_bg)
+            else:
+                bg_env = _compute_background(ray_dirs, viewpoint.camera_center, env_light, ground_plane)
 
             alpha_map = render_pkg["rend_alpha"]
             denom = alpha_map + 1e-6
@@ -911,6 +918,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             iteration=0,
             scene=scene,
             gaussians=gaussians,
+            gaussians_unfixed=gaussians_unfixed,
             pipe=pipe,
             background=background,
             dummy_color=dummy_color,
@@ -1524,6 +1532,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                     iteration=iteration,
                     scene=scene,
                     gaussians=gaussians,
+                    gaussians_unfixed=gaussians_unfixed,
                     pipe=pipe,
                     background=background,
                     dummy_color=dummy_color,
