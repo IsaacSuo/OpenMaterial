@@ -1190,9 +1190,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                     alpha_sup_loss = lambda_alpha * torch.abs(alpha_map - mask).mean()
 
             obj_mask = mask if mask is not None else alpha_map.detach()
-            if is_env_warmup:
-                recon_weight = torch.ones_like(alpha_map)
-            elif mask is not None:
+            if mask is not None:
                 if getattr(args, "lambda_bg", None) is None:
                     # If unfixed background Gaussians are enabled, we typically want to supervise background too.
                     if gaussians_unfixed is not None:
