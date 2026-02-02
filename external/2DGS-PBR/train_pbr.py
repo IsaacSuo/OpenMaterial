@@ -179,6 +179,49 @@ def _set_gaussians_trainable(gaussians: GaussianModel, trainable: bool, freeze_g
         if isinstance(p, torch.nn.Parameter):
             p.requires_grad_(bool(trainable))
 
+def _maybe_tb_log_unfixed(
+    tb_writer,
+    iteration: int,
+    stage: int,
+    gaussians_unfixed: GaussianModel | None,
+    bg_render: torch.Tensor | None,
+    alpha_bg: torch.Tensor | None,
+    sky: torch.Tensor | None,
+    bg_env: torch.Tensor | None,
+    gt_image: torch.Tensor | None,
+    gt_alpha_mask: torch.Tensor | None,
+    sky_weight: torch.Tensor | None,
+):
+    if tb_writer is None or gaussians_unfixed is None:
+        return
+
+    tb_writer.add_scalar("unfixed/points", int(gaussians_unfixed.get_xyz.shape[0]), iteration)
+    tb_writer.add_scalar("unfixed/stage", float(stage), iteration)
+
+    if alpha_bg is not None:
+        tb_writer.add_scalar("unfixed/alpha_bg_mean", float(alpha_bg.mean().detach().cpu().item()), iteration)
+        tb_writer.add_scalar("unfixed/alpha_bg_max", float(alpha_bg.max().detach().cpu().item()), iteration)
+        if gt_alpha_mask is not None:
+            obj_overlap = (alpha_bg * torch.clamp(gt_alpha_mask, 0.0, 1.0)).mean()
+            bg_coverage = (alpha_bg * torch.clamp(1.0 - gt_alpha_mask, 0.0, 1.0)).mean()
+            tb_writer.add_scalar("unfixed/alpha_bg_obj_overlap", float(obj_overlap.detach().cpu().item()), iteration)
+            tb_writer.add_scalar("unfixed/alpha_bg_bg_coverage", float(bg_coverage.detach().cpu().item()), iteration)
+
+    if bg_render is not None:
+        tb_writer.add_image("unfixed/bg_render", bg_render.clamp(0.0, 1.0), iteration)
+    if alpha_bg is not None:
+        tb_writer.add_image("unfixed/alpha_bg", alpha_bg.repeat(3, 1, 1).clamp(0.0, 1.0), iteration)
+    if sky is not None:
+        tb_writer.add_image("unfixed/sky", sky.clamp(0.0, 1.0), iteration)
+    if bg_env is not None:
+        tb_writer.add_image("unfixed/bg_env", bg_env.clamp(0.0, 1.0), iteration)
+    if gt_image is not None:
+        tb_writer.add_image("unfixed/gt", gt_image[:3].clamp(0.0, 1.0), iteration)
+    if gt_alpha_mask is not None:
+        tb_writer.add_image("unfixed/gt_alpha_mask", gt_alpha_mask.repeat(3, 1, 1).clamp(0.0, 1.0), iteration)
+    if sky_weight is not None:
+        tb_writer.add_image("unfixed/sky_weight", sky_weight.repeat(3, 1, 1).clamp(0.0, 1.0), iteration)
+
 def _generate_ground_pcd_from_plane(
     ground_plane_json: str,
     ground_texture_path: str | None,
@@ -949,6 +992,15 @@ def training_pbr_static(dataset, opt, pipe, args):
         if env_light_optimizer is not None:
             env_light_optimizer.zero_grad(set_to_none=True)
 
+        # Cache a representative camera's tensors for TB visualization (logged at test_iterations frequency).
+        last_unfixed_bg_render = None
+        last_unfixed_alpha_bg = None
+        last_sky = None
+        last_bg_env = None
+        last_gt_image = None
+        last_gt_alpha_mask = None
+        last_sky_weight = None
+
         recon_loss_sum = 0.0
         l1_sum = 0.0
         ssim_term_sum = 0.0
@@ -1006,6 +1058,13 @@ def training_pbr_static(dataset, opt, pipe, args):
                 if mask is None:
                     raise RuntimeError("[Stage0] Dataset mask is required (gt_alpha_mask).")
                 bg_mask = torch.clamp(1.0 - mask, 0.0, 1.0)
+                last_unfixed_bg_render = bg_render.detach()
+                last_unfixed_alpha_bg = alpha_bg.detach()
+                last_sky = sky.detach()
+                last_bg_env = bg_env.detach()
+                last_gt_image = gt_image.detach()
+                last_gt_alpha_mask = mask.detach()
+                last_sky_weight = None
                 pred = bg_env
                 Ll1 = l1_loss(pred, gt_image, mask=bg_mask)
                 ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=bg_mask.unsqueeze(0))
@@ -1035,6 +1094,13 @@ def training_pbr_static(dataset, opt, pipe, args):
                 sky_weight = bg_mask * torch.clamp(1.0 - alpha_bg_detached, 0.0, 1.0)
 
                 sky = env_light.sample(ray_dirs).permute(2, 0, 1)
+                last_unfixed_bg_render = None
+                last_unfixed_alpha_bg = alpha_bg_detached.detach()
+                last_sky = sky.detach()
+                last_bg_env = None
+                last_gt_image = gt_image.detach()
+                last_gt_alpha_mask = mask.detach()
+                last_sky_weight = sky_weight.detach()
                 pred = sky
                 Ll1 = l1_loss(pred, gt_image, mask=sky_weight)
                 ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=sky_weight.unsqueeze(0))
@@ -1067,6 +1133,14 @@ def training_pbr_static(dataset, opt, pipe, args):
                 )
             else:
                 bg_env = _compute_background(ray_dirs, viewpoint_cam.camera_center, env_light, ground_plane)
+
+            last_unfixed_bg_render = bg_render.detach() if gaussians_unfixed is not None else None
+            last_unfixed_alpha_bg = alpha_bg.detach() if gaussians_unfixed is not None else None
+            last_sky = sky.detach()
+            last_bg_env = bg_env.detach()
+            last_gt_image = gt_image.detach()
+            last_gt_alpha_mask = mask.detach() if mask is not None else None
+            last_sky_weight = None
 
             gbuffer_albedo_pm = render_pkg.get("gbuffer_albedo")
             gbuffer_roughness_pm = render_pkg.get("gbuffer_roughness")
@@ -1404,6 +1478,19 @@ def training_pbr_static(dataset, opt, pipe, args):
             if iteration in args.test_iterations:
                 _maybe_dump_env_map(args=args, model_path=scene.model_path, iteration=iteration, env_light=env_light)
                 _maybe_tb_log_env_map(args=args, tb_writer=tb_writer, iteration=iteration, env_light=env_light)
+                _maybe_tb_log_unfixed(
+                    tb_writer=tb_writer,
+                    iteration=iteration,
+                    stage=stage,
+                    gaussians_unfixed=gaussians_unfixed,
+                    bg_render=last_unfixed_bg_render,
+                    alpha_bg=last_unfixed_alpha_bg,
+                    sky=last_sky,
+                    bg_env=last_bg_env,
+                    gt_image=last_gt_image,
+                    gt_alpha_mask=last_gt_alpha_mask,
+                    sky_weight=last_sky_weight,
+                )
                 _run_pbr_eval(
                     tb_writer=tb_writer,
                     iteration=iteration,
