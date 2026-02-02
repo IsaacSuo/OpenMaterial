@@ -95,11 +95,10 @@ bg = ground_color * hit_mask.unsqueeze(-1).float() + sky * (1.0 - hit_mask.unsqu
 ```bash
 python train_pbr.py \
   --gt_ply <OBJECT_ONLY_DENSE.ply> \
-  --ground_plane_json <.../ground_plane.json> \
-  --ground_as_gaussians \
-  --ground_num_points 200000 \
-  --lambda_ground 1.0 \
-  --lambda_bg 0.1
+  --unfixed_gaussians \
+  --unfixed_num_points 200000 \
+  --lambda_bg 0.1 \
+  --composite_use_gt_mask
 ```
 
 ### Camera

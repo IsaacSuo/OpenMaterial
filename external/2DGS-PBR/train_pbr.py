@@ -781,13 +781,7 @@ def training_pbr_static(dataset, opt, pipe, args):
         if not args.no_env_gradient_scaling:
             env_light.register_gradient_scaling_hook()
 
-    # EnvMap warmup: freeze ALL Gaussians so only env_map is updated.
-    # We do this for BOTH object Gaussians and unfixed/background Gaussians (if enabled).
-    if (not freeze_env_light) and int(getattr(args, "env_warmup_iters", 0) or 0) > 0:
-        _set_gaussians_trainable(gaussians, False, freeze_geometry=True)
-        if gaussians_unfixed is not None:
-            _set_gaussians_trainable(gaussians_unfixed, False, freeze_geometry=False)
-        print(f"[Warmup] Freezing ALL Gaussians for the first {int(args.env_warmup_iters)} iterations (EnvMap-only).")
+    # Note: Training loop uses a hard-coded 3-stage schedule below. The legacy --env_warmup_iters flag is ignored.
 
     # Optional: anchor env_map to the pretrained initialization to reduce lighting/material ambiguity.
     env_map_ref = None
@@ -819,6 +813,15 @@ def training_pbr_static(dataset, opt, pipe, args):
         print(f"[GroundPlane] Initialized with plane from {json_path}")
 
     ground_meta = None
+
+    # -----------------------
+    # Hard-coded 3-stage schedule (no CLI params)
+    # -----------------------
+    # Stage 0: train unfixed/background Gaussians only (SH-only + densify), on background pixels
+    # Stage 1: train env_map only, on "sky-like" background pixels not explained by unfixed
+    # Stage 2: full training (object PBR + unfixed + env_map)
+    STAGE0_BG_ITERS = 1000
+    STAGE1_ENV_ITERS = 1000
 
     # 5. Training Loop
     iter_start = torch.cuda.Event(enable_timing=True)
@@ -861,16 +864,46 @@ def training_pbr_static(dataset, opt, pipe, args):
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
 
-        # Transition out of warmup: unfreeze Gaussians.
-        warmup_iters = int(getattr(args, "env_warmup_iters", 0) or 0)
-        if (not freeze_env_light) and warmup_iters > 0 and (iteration == warmup_iters + 1):
-            _set_gaussians_trainable(gaussians, True, freeze_geometry=True)
-            # After warmup, allow the object Gaussians to optimize SH/color too (even if not supervised by default).
-            gaussians.training_setup_fixed_geometry(opt)
+        # Determine stage.
+        if iteration <= STAGE0_BG_ITERS:
+            stage = 0
+        elif iteration <= (STAGE0_BG_ITERS + STAGE1_ENV_ITERS):
+            stage = 1
+        else:
+            stage = 2
+
+        # Stage transitions (toggle trainability)
+        if iteration == 1:
+            # Stage 0 start
+            _set_gaussians_trainable(gaussians, False, freeze_geometry=True)
             if gaussians_unfixed is not None:
                 _set_gaussians_trainable(gaussians_unfixed, True, freeze_geometry=False)
-                gaussians_unfixed.training_setup(opt)
-            print(f"[Warmup] Unfroze Gaussians at iter={iteration}; now optimizing Gaussians + EnvMap.")
+            if not freeze_env_light:
+                for p in env_light.parameters():
+                    p.requires_grad_(False)
+            print(f"[Stage0] iters=1..{STAGE0_BG_ITERS}: train unfixed background only (SH+density), env_map frozen.")
+
+        if iteration == STAGE0_BG_ITERS + 1:
+            # Stage 1 start
+            if gaussians_unfixed is not None:
+                _set_gaussians_trainable(gaussians_unfixed, False, freeze_geometry=False)
+            if not freeze_env_light:
+                for p in env_light.parameters():
+                    p.requires_grad_(True)
+            print(
+                f"[Stage1] iters={STAGE0_BG_ITERS+1}..{STAGE0_BG_ITERS+STAGE1_ENV_ITERS}: "
+                "train env_map only (sky-like background), all Gaussians frozen."
+            )
+
+        if iteration == STAGE0_BG_ITERS + STAGE1_ENV_ITERS + 1:
+            # Stage 2 start
+            _set_gaussians_trainable(gaussians, True, freeze_geometry=True)
+            if gaussians_unfixed is not None:
+                _set_gaussians_trainable(gaussians_unfixed, True, freeze_geometry=False)
+            if not freeze_env_light:
+                for p in env_light.parameters():
+                    p.requires_grad_(True)
+            print(f"[Stage2] iters>={STAGE0_BG_ITERS+STAGE1_ENV_ITERS+1}: train object PBR + unfixed + env_map.")
 
         # Update learning rate (mainly for Opacity/SH, since XYZ is locked)
         gaussians.update_learning_rate(iteration)
@@ -878,14 +911,11 @@ def training_pbr_static(dataset, opt, pipe, args):
         if gaussians_unfixed is not None:
             gaussians_unfixed.update_learning_rate(iteration)
 
-        # EnvMap Warmup Logic (disabled when env_light is frozen)
-        is_env_warmup = (not freeze_env_light) and (iteration <= args.env_warmup_iters)
-
         batch_cams = int(getattr(args, "batch_cams", 1) or 1)
         batch_cams = max(1, batch_cams)
 
         # Global regularizers (apply once per iteration, not per camera).
-        if freeze_env_light:
+        if freeze_env_light or stage == 0:
             env_tv_loss = torch.tensor(0.0, device="cuda")
             env_smooth_loss = torch.tensor(0.0, device="cuda")
         else:
@@ -893,7 +923,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             env_smooth_loss = getattr(args, "lambda_env_smooth", 0.0) * env_light.smoothness_loss_weighted()
 
         env_prior_loss = torch.tensor(0.0, device="cuda")
-        if (not freeze_env_light) and (env_map_ref is not None) and (env_prior_weight > 0) and (not is_env_warmup):
+        if (not freeze_env_light) and stage >= 1 and (env_map_ref is not None) and (env_prior_weight > 0):
             w = env_light.solid_angle_weight  # [1,H,W]
             diff = env_light.env_map - env_map_ref
             if getattr(args, "env_light_prior_log_space", False):
@@ -904,7 +934,7 @@ def training_pbr_static(dataset, opt, pipe, args):
 
         scale_reg_loss = torch.tensor(0.0, device="cuda")
         lambda_scale_reg = float(getattr(args, "lambda_scale_reg", 0.0) or 0.0)
-        if lambda_scale_reg > 0 and (not is_env_warmup):
+        if lambda_scale_reg > 0 and stage == 2:
             log_scale_max = gaussians._scaling.max(dim=1).values
             scale_thresh = float(getattr(args, "scale_reg_max_ratio", 0.1)) * scene_extent
             log_thresh = float(np.log(max(scale_thresh, 1e-12)))
@@ -914,6 +944,8 @@ def training_pbr_static(dataset, opt, pipe, args):
 
         # Gradient accumulation over multiple cameras reduces variance for non-Lambertian cues.
         gaussians.optimizer.zero_grad(set_to_none=True)
+        if gaussians_unfixed is not None:
+            gaussians_unfixed.optimizer.zero_grad(set_to_none=True)
         if env_light_optimizer is not None:
             env_light_optimizer.zero_grad(set_to_none=True)
 
@@ -947,21 +979,83 @@ def training_pbr_static(dataset, opt, pipe, args):
                 viewpoint_stack = scene.getTrainCameras().copy()
             viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
 
+            mask = viewpoint_cam.gt_alpha_mask.cuda() if viewpoint_cam.gt_alpha_mask is not None else None
+            mask = _process_gt_mask(args, mask)
+
+            ray_dirs = _get_ray_dirs_world(viewpoint_cam)
+            gt_image = viewpoint_cam.original_image.cuda()
+
+            # Stage-specific forward/loss
+            if stage == 0:
+                if gaussians_unfixed is None:
+                    raise RuntimeError("[Stage0] --unfixed_gaussians is required for Stage0 background training.")
+                # Background-only: unfixed SH + fixed sky (env_map is frozen here)
+                sky = env_light.sample(ray_dirs).permute(2, 0, 1)
+                unfixed_render_pkg = render(viewpoint_cam, gaussians_unfixed, pipe, background, render_pbr=False)
+                alpha_bg = unfixed_render_pkg["rend_alpha"]
+                bg_render = unfixed_render_pkg["render"]
+                bg_env = bg_render + sky * (1.0 - alpha_bg)
+                unfixed_stats.append(
+                    (
+                        unfixed_render_pkg["viewspace_points"],
+                        unfixed_render_pkg["visibility_filter"],
+                        unfixed_render_pkg["radii"],
+                    )
+                )
+
+                if mask is None:
+                    raise RuntimeError("[Stage0] Dataset mask is required (gt_alpha_mask).")
+                bg_mask = torch.clamp(1.0 - mask, 0.0, 1.0)
+                pred = bg_env
+                Ll1 = l1_loss(pred, gt_image, mask=bg_mask)
+                ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=bg_mask.unsqueeze(0))
+                recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
+                cam_loss = opt.lambda_rgb * recon_loss
+                (cam_loss / float(batch_cams)).backward()
+                recon_loss_sum += float(recon_loss.detach().cpu().item())
+                l1_sum += float(Ll1.detach().cpu().item())
+                ssim_term_sum += float((1.0 - ssim_val.detach().cpu().item()))
+                continue
+
+            if stage == 1:
+                # Env-only: learn sky-like pixels not explained by unfixed (finite-depth) background.
+                if mask is None:
+                    raise RuntimeError("[Stage1] Dataset mask is required (gt_alpha_mask).")
+                bg_mask = torch.clamp(1.0 - mask, 0.0, 1.0)  # [1,H,W]
+
+                alpha_bg_detached = None
+                if gaussians_unfixed is not None:
+                    with torch.no_grad():
+                        bg_pkg = render(viewpoint_cam, gaussians_unfixed, pipe, background, render_pbr=False)
+                        alpha_bg_detached = bg_pkg["rend_alpha"].detach()
+                if alpha_bg_detached is None:
+                    alpha_bg_detached = torch.zeros_like(bg_mask)
+
+                # Pixels that look like "sky": background pixels not covered by unfixed alpha.
+                sky_weight = bg_mask * torch.clamp(1.0 - alpha_bg_detached, 0.0, 1.0)
+
+                sky = env_light.sample(ray_dirs).permute(2, 0, 1)
+                pred = sky
+                Ll1 = l1_loss(pred, gt_image, mask=sky_weight)
+                ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=sky_weight.unsqueeze(0))
+                recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
+                cam_loss = opt.lambda_rgb * recon_loss
+                (cam_loss / float(batch_cams)).backward()
+                recon_loss_sum += float(recon_loss.detach().cpu().item())
+                l1_sum += float(Ll1.detach().cpu().item())
+                ssim_term_sum += float((1.0 - ssim_val.detach().cpu().item()))
+                continue
+
+            # stage == 2 (full training)
             render_pkg = render(viewpoint_cam, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)
             alpha_map = render_pkg.get("rend_alpha")
             if alpha_map is None:
                 raise RuntimeError("render_pkg missing 'rend_alpha'")
 
-            mask = viewpoint_cam.gt_alpha_mask.cuda() if viewpoint_cam.gt_alpha_mask is not None else None
-            mask = _process_gt_mask(args, mask)
-
-            ray_dirs = _get_ray_dirs_world(viewpoint_cam)
             sky = env_light.sample(ray_dirs).permute(2, 0, 1)  # [3,H,W]
             if gaussians_unfixed is not None:
                 unfixed_render_pkg = render(viewpoint_cam, gaussians_unfixed, pipe, background, render_pbr=False)
-                alpha_bg = unfixed_render_pkg.get("rend_alpha")
-                if alpha_bg is None:
-                    raise RuntimeError("unfixed render_pkg missing 'rend_alpha'")
+                alpha_bg = unfixed_render_pkg["rend_alpha"]
                 bg_render = unfixed_render_pkg["render"]
                 bg_env = bg_render + sky * (1.0 - alpha_bg)
                 unfixed_stats.append(
@@ -973,7 +1067,6 @@ def training_pbr_static(dataset, opt, pipe, args):
                 )
             else:
                 bg_env = _compute_background(ray_dirs, viewpoint_cam.camera_center, env_light, ground_plane)
-            gt_image = viewpoint_cam.original_image.cuda()
 
             gbuffer_albedo_pm = render_pkg.get("gbuffer_albedo")
             gbuffer_roughness_pm = render_pkg.get("gbuffer_roughness")
@@ -1014,7 +1107,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             alpha_sup_loss = torch.tensor(0.0, device="cuda")
             if mask is not None:
                 lambda_alpha = float(getattr(args, "lambda_alpha", 0.0) or 0.0)
-                if lambda_alpha > 0 and (not is_env_warmup):
+                if lambda_alpha > 0:
                     alpha_sup_loss = lambda_alpha * torch.abs(alpha_map - mask).mean()
 
             obj_mask = mask if mask is not None else alpha_map.detach()
@@ -1039,23 +1132,19 @@ def training_pbr_static(dataset, opt, pipe, args):
                     recon_weight = recon_weight + opt.lambda_pbr * obj_mask
 
             reg_mask = mask if mask is not None else alpha_map.detach()
-            if is_env_warmup:
-                pbr_losses = {"total_pbr_reg": torch.tensor(0.0, device="cuda")}
-                pbr_reg_loss = torch.tensor(0.0, device="cuda")
-            else:
-                pbr_losses = compute_pbr_losses(
-                    gbuffer_albedo,
-                    gbuffer_roughness,
-                    gbuffer_metallic,
-                    alpha_map=reg_mask,
-                    lambda_albedo_smooth=args.lambda_albedo_smooth,
-                    lambda_roughness_smooth=args.lambda_roughness_smooth,
-                    lambda_metallic_smooth=args.lambda_metallic_smooth,
-                    lambda_metallic_prior=args.lambda_metallic_prior,
-                    lambda_roughness_prior=args.lambda_roughness_prior,
-                    lambda_albedo_chroma=args.lambda_albedo_chroma,
-                )
-                pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses["total_pbr_reg"]
+            pbr_losses = compute_pbr_losses(
+                gbuffer_albedo,
+                gbuffer_roughness,
+                gbuffer_metallic,
+                alpha_map=reg_mask,
+                lambda_albedo_smooth=args.lambda_albedo_smooth,
+                lambda_roughness_smooth=args.lambda_roughness_smooth,
+                lambda_metallic_smooth=args.lambda_metallic_smooth,
+                lambda_metallic_prior=args.lambda_metallic_prior,
+                lambda_roughness_prior=args.lambda_roughness_prior,
+                lambda_albedo_chroma=args.lambda_albedo_chroma,
+            )
+            pbr_reg_loss = opt.lambda_pbr_reg * pbr_losses["total_pbr_reg"]
 
             Ll1 = l1_loss(pred, gt_image, mask=recon_weight)
             ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=recon_weight.unsqueeze(0))
@@ -1079,7 +1168,8 @@ def training_pbr_static(dataset, opt, pipe, args):
         global_loss = env_tv_loss + env_smooth_loss + env_prior_loss + scale_reg_loss
         if not torch.isfinite(global_loss):
             raise FloatingPointError("Non-finite global regularizer loss detected.")
-        global_loss.backward()
+        if stage >= 1:
+            global_loss.backward()
 
         recon_loss = torch.tensor(recon_loss_sum / float(batch_cams), device="cuda")
         Ll1 = torch.tensor(l1_sum / float(batch_cams), device="cuda")
@@ -1113,7 +1203,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             if iteration % 10 == 0:
                 bg_pts = int(gaussians_unfixed.get_xyz.shape[0]) if gaussians_unfixed is not None else 0
                 progress_bar.set_postfix({
-                    "Status": "Warmup" if is_env_warmup else "Normal",
+                    "Stage": f"{stage}",
                     "Tot": f"{ema_total_for_log:.{5}f}",
                     "Recon": f"{ema_recon_for_log:.{5}f}",
                     "Env": f"{ema_env_for_log:.{2}e}",
@@ -1239,7 +1329,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                     torch.save(env_light.state_dict(), os.path.join(scene.model_path, f"env_light_{iteration}.pth"))
 
             # Densification (unfixed/background only)
-            if (gaussians_unfixed is not None) and (not is_env_warmup) and (iteration < opt.densify_until_iter):
+            if (gaussians_unfixed is not None) and stage in (0, 2) and (iteration < opt.densify_until_iter):
                 for viewspace_point_tensor, visibility_filter, radii in unfixed_stats:
                     gaussians_unfixed.max_radii2D[visibility_filter] = torch.max(
                         gaussians_unfixed.max_radii2D[visibility_filter],
@@ -1262,28 +1352,31 @@ def training_pbr_static(dataset, opt, pipe, args):
                     gaussians_unfixed.reset_opacity()
 
             # Step
-            # [EnvMap Warmup] Freeze ALL Gaussians during warmup (EnvMap-only).
-            # After warmup, train Gaussians + EnvMap together.
-            if not is_env_warmup:
+            if stage == 0:
+                if gaussians_unfixed is not None:
+                    gaussians_unfixed.optimizer.step()
+            elif stage == 1:
+                pass
+            else:
                 gaussians.optimizer.step()
                 if gaussians_unfixed is not None:
                     gaussians_unfixed.optimizer.step()
-            
+             
             # ALWAYS zero grad for Gaussians to prevent accumulation during warmup
             gaussians.optimizer.zero_grad(set_to_none=True)
             if gaussians_unfixed is not None:
                 gaussians_unfixed.optimizer.zero_grad(set_to_none=True)
-            
+             
             # Step EnvMap (unless frozen), optionally only after a certain iteration / periodically.
-            if not freeze_env_light:
+            if (not freeze_env_light) and stage >= 1:
                 env_update_after = int(getattr(args, "env_update_after", 0) or 0)
                 env_update_interval = int(getattr(args, "env_update_interval", 1) or 1)
                 env_update_interval = max(1, env_update_interval)
-                # Warmup is explicitly designed to update env_light every iteration.
-                if is_env_warmup:
+                do_env_step = True
+                if stage == 1:
+                    # Stage1: always update env_map every iteration.
                     do_env_step = True
                 else:
-                    do_env_step = True
                     if env_update_after > 0 and iteration < env_update_after:
                         do_env_step = False
                     if env_update_interval > 1 and (iteration % env_update_interval != 0):
@@ -1506,7 +1599,7 @@ if __name__ == "__main__":
         "--env_warmup_iters",
         type=int,
         default=1000,
-        help="Warmup iterations: freeze ALL Gaussians and optimize ONLY the environment map (env_map).",
+        help="[Ignored] Training loop uses a hard-coded 3-stage schedule; this flag is kept for backward compatibility.",
     )
     parser.add_argument("--env_map_res", type=int, default=1024, help="Resolution of the environment map (height). Width will be 2x height.")
 

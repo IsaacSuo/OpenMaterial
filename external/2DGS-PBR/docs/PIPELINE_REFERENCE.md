@@ -301,7 +301,7 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
 <a id="sec-7-train-pbr"></a>
 ## 7. `train_pbr.py`：静态几何 PBR 训练（逐步拆解）
 
-> 该脚本不是对 `train.py` 的简单加权，而是一个明确的“固定几何、只学材质+环境光”的训练流程。
+> 该脚本不是对 `train.py` 的简单加权，而是一个明确的“固定物体几何、学材质 + 环境光；并可选再学一套有限深度背景（unfixed）”的训练流程。
 
 ### 7.1 初始化阶段
 
@@ -326,53 +326,58 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
 8. 可选初始化 GroundPlane（有限深度背景）：
    - `--ground_plane_json <.../ground_plane.json>`（由 `scripts/reconstruct_ground_plane_texture.py` 生成）
    - `--ground_texture <.../ground_texture.png>`（不传则默认取 json 同目录下的 `ground_texture.png`）
-9. （可选）把地面作为 Gaussians（PBR 可学习材质，而不是固定背景贴图）：
-   - `--ground_as_gaussians`：从 `ground_plane.json` 的 `uv_bounds` 采样点并 append 到 `--gt_ply`，使地面也走 G-buffer → PBR shaded 的路径
-   - `--ground_num_points/--ground_seed/--ground_height_jitter`：控制采样密度与抖动
-   - `--lambda_ground`：地面区域重建权重（与 sky 的 `--lambda_bg` 分开）
+9. （可选）初始化可学习的有限深度背景（Unfixed Background Gaussians，SH-only）：
+   - `--unfixed_gaussians`：启用一套额外的 `GaussianModel(use_pbr=False)`，用于拟合墙壁/室内等有限深度背景（env_map 无法表达的视差部分）
+   - 初始化来源优先级（无需你提供额外几何）：
+     - 若数据集目录存在 `points3d.ply`（Blender 风格）或 `sparse/0/points3D.ply`（COLMAP 风格），会从其中采样 `--unfixed_num_points`
+     - 否则随机初始化在 `cameras_extent` 的包围范围内
+   - 为避免“unfixed 点落入物体体积”浪费容量，会排除物体 `gt_ply` 的 AABB（带可调 margin：`--unfixed_exclude_object_aabb_margin_ratio`）
+   - unfixed 只用 SH/RGB（不走 PBR），并支持 densify/prune（用于“自己长出”背景几何）
 
 ### 7.2 每步训练（核心）
 
-每 iteration：
+本脚本当前使用一个**硬编码的 3-stage schedule**（不通过参数配置）：
 
-1. `gaussians.update_learning_rate(iter)`（即便锁几何，也会更新相关组的 lr；PBR-only 模式主要影响 opacity/scaling 等组）。
+- Stage 0（1..1000）：只训练 unfixed（背景 SH-only + densify），env_map 冻结、物体 PBR 不参与；loss 只在背景像素（`1 - gt_alpha_mask`）上计算
+- Stage 1（1001..2000）：只训练 env_map；loss 只在“背景中更像 sky 的像素”上计算（背景像素且不被 unfixed 的 alpha 覆盖）
+- Stage 2（>=2001）：全量训练：物体 PBR + unfixed + env_map
+
+每 iteration（Stage 2 的全量部分）：
+
+1. `gaussians.update_learning_rate(iter)`（即便锁几何，也会更新相关组的 lr）。
 2. 随机取 `viewpoint_cam`（若 `--batch_cams>1`，则会取 B 个相机逐个 forward/backward，做梯度累积）。
 3. 对每个相机：
-   - `render(viewpoint_cam, gaussians, pipe, background, override_color=dummy_color, render_pbr=True)`：
-     - `override_color` 传全 0，避免 SH 渲染进入监督（PBR-only）
-   - 取 mask：`mask = viewpoint_cam.gt_alpha_mask`（若数据集提供；可通过 `--mask_binarize/--mask_dilate_px` 预处理）
-   - 生成背景（skybox 或 ground+sky）：
-     - `ray_dirs = compute_ray_directions_world_from_fov(...)`
-     - 若未启用 ground plane：`bg = env_light.sample(ray_dirs)` → `[3,H,W]`
-     - 若启用 ground plane：对每像素做 ray-plane intersection，命中则采样 `ground_texture.png`，否则采样 env_map，然后合成得到 `bg`
-   - 取 alpha + G-buffer + normal/depth，反预乘：
-   - `denom = alpha + eps`
-   - `albedo = gbuffer_albedo_pm / denom`（clamp 到 `[0,1]`）
-   - `roughness = gbuffer_roughness_pm / denom`（clamp 到 `[0.1,0.999]`）
-   - `metallic = gbuffer_metallic_pm / denom`（clamp 到 `[0,1]`）
-   - `normal = rend_normal_pm / denom`
+   - 取 mask：`mask = viewpoint_cam.gt_alpha_mask`（来自数据集 `mask/`；即“前景/物体=1”）
+   - 生成 sky：`sky = env_light.sample(ray_dirs)` → `[3,H,W]`
+   - 若启用 unfixed：
+     - 渲染 unfixed：`bg_render + alpha_bg`
+     - 背景合成：`bg = bg_render + sky*(1-alpha_bg)`
+   - 若未启用 unfixed：
+     - 背景为 sky 或 ground+sky（若启用 `GroundPlane`）
+   - 渲染物体 PBR：`render(..., render_pbr=True)` 得到 `alpha + G-buffer + normal/depth`，反预乘得到 `albedo/roughness/metallic/normal`
    - 计算物体着色：`shaded_obj = screen_space_pbr_shading(..., env_light=env_light, ray_dirs_world=ray_dirs)`
-   - 合成图监督：默认用 `rend_alpha` 合成：`pred = shaded_obj * alpha + bg * (1-alpha)`
-     - 可选 `--composite_use_gt_mask`：若存在 `gt_alpha_mask`，则用 GT mask 做 object 的合成；若同时启用 `--ground_as_gaussians`，则会把 `ground_hit_mask` 也并入合成 mask（mask = object + ground，背景只在 sky 区域合成）
-4. 重建损失的权重策略：
-   - warmup：`iteration <= env_warmup_iters` 时强制 full-image supervision（让 env_map 看到背景）
-   - 非 warmup：若存在 `gt_alpha_mask` 且未设置 `--supervise_background`，则重建只在 mask 内做（避免 GT 背景是黑/抠图导致 env_map 被错误监督）
+   - 合成图监督：推荐 `--composite_use_gt_mask`，即用 GT mask 做合成：
+     - `pred = shaded_obj * gt_alpha_mask + bg * (1-gt_alpha_mask)`
+4. 重建损失的权重策略（有 mask 时）：
+   - `--lambda_bg` 控制背景像素权重；若启用 unfixed，通常希望背景也被监督（否则 unfixed 学不到）
    - 可选：`--lambda_pbr` 为物体区域加额外权重
-5. 正则：
+5. 正则（Stage 2）：
    - env 正则：`lambda_env_tv * env_light.tv_loss_weighted()` + 可选 `lambda_env_smooth * env_light.smoothness_loss_weighted()`
    - env prior（可选）：`--env_light_prior_weight` 让 `env_map` 贴近初始化（可选 `--env_light_prior_log_space` 在 log 空间做）
    - scale 正则：`lambda_scale_reg` 约束 gaussian 过大（在 log-scale 空间做，阈值为 `scale_reg_max_ratio * cameras_extent`）
    - alpha 监督：可选 `--lambda_alpha` 让 `rend_alpha` 接近 `gt_alpha_mask`（防止 opacity 作弊）
-   - 材质正则：`opt.lambda_pbr_reg * compute_pbr_losses(...)`（warmup 阶段跳过）
-6. 反传与 step：
+   - 材质正则：`opt.lambda_pbr_reg * compute_pbr_losses(...)`
+6. 反传与 step（Stage 2）：
    - 若 `--batch_cams>1`：对每个相机的 `recon/alpha/pbr_reg` 做 `backward(loss/B)`，再把 env_tv/env_prior/scale_reg 这类“与相机无关”的正则单独 backward 一次。
-   - warmup：gaussians 不 step，只优化 env_light（注意 warmup 仍会尊重 `--env_update_interval` 的“每步更新”语义）
-   - 非 warmup：step gaussians；env_light 按 `--env_update_after/--env_update_interval` 更新（可做后期稀疏更新）
+   - step gaussians；env_light 按 `--env_update_after/--env_update_interval` 更新（可做后期稀疏更新）
 7. clamp（可选）：
    - `env_clamp_min/max`：对 env_map 参数做硬 clamp
    - `scale_clamp_max_ratio`：对 `gaussians._scaling` 做上界 clamp（以 `cameras_extent` 比例定义）
 8. 评估与保存：
-   - 在 `test_iterations/save_iterations` 进行 render-eval、写 TensorBoard、保存 `point_cloud` 与 `env_light_*.pth`
+   - 在 `test_iterations/save_iterations` 进行 render-eval、写 TensorBoard、保存：
+     - 物体 `point_cloud/iteration_X/point_cloud.ply`
+     - unfixed `unfixed_point_cloud/iteration_X/point_cloud.ply`（若启用）
+     - `env_light_{iteration}.pth`
    - 可选 `--debug_nonfinite_dump`：当 eval 中出现 NaN/Inf 时，将关键张量与统计信息写到 `<model_path>/debug_nonfinite/*.pt`（`--debug_nonfinite_dump_full` 会包含全分辨率 tensor；`--debug_nonfinite_raise` 会在 dump 后抛异常）
    - 若设置了 `--test_interval`，脚本会自动生成 `test_iterations = [N, 2N, ...]`（并确保包含最后一次迭代），用于周期性评测
 
@@ -398,6 +403,7 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
    - `--ground_plane_json` + `--ground_texture`（不传 texture 则默认 json 同目录下的 `ground_texture.png`）
 5. `render_set()`：
    - `GaussianModel(use_pbr=True)` + `Scene(load_iteration=iteration)`
+   - 若存在 `unfixed_point_cloud/iteration_X/point_cloud.ply`，会额外加载一套 `GaussianModel(use_pbr=False)` 作为背景高斯，并用 `bg_render + sky*(1-alpha_bg)` 构造背景
    - 对 train/test 相机循环渲染：
      - `render(..., render_pbr=True)` 得到 alpha + G-buffer + normal/depth
      - 背景：默认 skybox（env_map），可选 ground+sky（与 `train_pbr.py` 同逻辑）

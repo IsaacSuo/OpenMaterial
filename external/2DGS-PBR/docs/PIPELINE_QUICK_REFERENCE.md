@@ -13,7 +13,7 @@
 - PBR 静态几何训练（`train_pbr.py` 全流程）→ [PIPELINE_REFERENCE.md#sec-7-train-pbr](PIPELINE_REFERENCE.md#sec-7-train-pbr)
 - 环境光预训练/初始化（`train_env_light.py`）→ [PIPELINE_REFERENCE.md#sec-7-train-pbr](PIPELINE_REFERENCE.md#sec-7-train-pbr)
 - 有限深度地面背景（`GroundPlane` / `--ground_plane_json`）→ [PIPELINE_REFERENCE.md#sec-7-train-pbr](PIPELINE_REFERENCE.md#sec-7-train-pbr)
-- 地面作为 Gaussians（PBR 可学习材质：`--ground_as_gaussians` / `--lambda_ground`）→ [PIPELINE_REFERENCE.md#sec-7-train-pbr](PIPELINE_REFERENCE.md#sec-7-train-pbr)
+- 可学习的有限深度背景（Unfixed Background Gaussians，SH-only：`--unfixed_gaussians`）→ [PIPELINE_REFERENCE.md#sec-7-train-pbr](PIPELINE_REFERENCE.md#sec-7-train-pbr)
 - 基础 2DGS 训练（`train.py`，与 PBR 的关系）→ [PIPELINE_REFERENCE.md#sec-9-train-2dgs](PIPELINE_REFERENCE.md#sec-9-train-2dgs)
 - 训练/渲染产物（输出目录里有什么）→ [PIPELINE_REFERENCE.md#sec-10-artifacts](PIPELINE_REFERENCE.md#sec-10-artifacts)
 

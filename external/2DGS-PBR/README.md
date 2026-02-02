@@ -115,7 +115,14 @@ python train_pbr.py \
 - `--lambda_env_smooth`: solid-angle weighted Laplacian regularization weight
 - `--env_clamp_min`, `--env_clamp_max`: clamp env_map values after each step
 - `--no_env_gradient_scaling`: disable solid-angle gradient scaling hook
-- `--env_warmup_iters`: warmup iterations where only env_map is optimized
+- `--env_warmup_iters`: legacy/ignored (training loop uses a hard-coded 3-stage schedule)
+
+**Unfixed background (optional)**
+
+- `--unfixed_gaussians`: enable an additional SH-only Gaussian set to learn finite-depth background geometry
+- `--unfixed_num_points`: initial unfixed point count (sampled from dataset point cloud if available)
+- `--unfixed_seed`: RNG seed for unfixed initialization
+- `--unfixed_exclude_object_aabb_margin_ratio`: exclude unfixed points inside object AABB (expanded by ratio * cameras_extent)
 
 **Reconstruction supervision (composite image)**
 
@@ -170,9 +177,9 @@ python train_pbr.py \
 - `pred = shaded_obj * alpha + bg_env * (1 - alpha)`
 - `recon_loss = (1 - lambda_dssim) * L1(pred, gt; weight=recon_weight) + lambda_dssim * (1 - SSIM(pred, gt; weight=recon_weight))`
 - `recon_weight`:
-  - warmup (`iter <= env_warmup_iters`): full image (`ones`)
-  - otherwise: if `gt_alpha_mask` exists and `--supervise_background` is NOT set, use GT mask (foreground-only)
-  - otherwise: full image; optionally increased on object region by `--lambda_pbr`
+  - Stage 0 (iters 1..1000): background-only loss (uses `1 - gt_alpha_mask`)
+  - Stage 1 (iters 1001..2000): env-map-only loss on “sky-like” background pixels
+  - Stage 2 (iters >=2001): if `gt_alpha_mask` exists and `--supervise_background` is NOT set, use GT mask (foreground-only); otherwise full image (optionally increased on object via `--lambda_pbr`)
 
 **2) Alpha supervision (optional)**
 
@@ -201,6 +208,7 @@ python train_pbr.py \
 Outputs (under `-m`):
 
 - `point_cloud/iteration_<iter>/point_cloud.ply`
+- `unfixed_point_cloud/iteration_<iter>/point_cloud.ply` (if `--unfixed_gaussians`)
 - `env_light_<iter>.pth`
 
 ### Render (PBR outputs)
@@ -335,7 +343,14 @@ python train_pbr.py \
 - `--lambda_env_smooth`：Laplacian 平滑正则权重（solid-angle 加权）
 - `--env_clamp_min`, `--env_clamp_max`：每步更新后对 env_map 值做 clamp
 - `--no_env_gradient_scaling`：关闭 solid-angle 梯度缩放 hook
-- `--env_warmup_iters`：warmup 步数（warmup 期只优化 env_map）
+- `--env_warmup_iters`：历史参数/已忽略（训练主循环使用硬编码 3-stage schedule）
+
+**Unfixed 背景（可选）**
+
+- `--unfixed_gaussians`：启用一套额外的“可学习背景高斯”（SH-only，用于有限深度背景/墙壁等）
+- `--unfixed_num_points`：unfixed 初始点数（若数据集有 points3d 点云则采样，否则随机初始化）
+- `--unfixed_seed`：unfixed 初始化随机种子
+- `--unfixed_exclude_object_aabb_margin_ratio`：初始化时排除落入物体 AABB（按 ratio * cameras_extent 扩张）的点
 
 **重建监督（合成图）**
 
@@ -383,9 +398,9 @@ python train_pbr.py \
 - `pred = shaded_obj * alpha + bg_env * (1 - alpha)`
 - `recon_loss = (1 - lambda_dssim) * L1(pred, gt; weight=recon_weight) + lambda_dssim * (1 - SSIM(pred, gt; weight=recon_weight))`
 - `recon_weight`：
-  - warmup（`iter <= env_warmup_iters`）：全图（全 1）
-  - 否则：若存在 `gt_alpha_mask` 且未开 `--supervise_background`，仅在 GT mask（前景）区域监督
-  - 否则：全图；并可用 `--lambda_pbr` 对物体区域额外加权
+  - Stage 0（迭代 1..1000）：仅背景像素（`1 - gt_alpha_mask`），用于先训练 unfixed 背景（SH-only + densify）
+  - Stage 1（迭代 1001..2000）：仅训练 env_map，只在“更像 sky 的背景像素”上监督（背景像素且不被 unfixed alpha 覆盖）
+  - Stage 2（迭代 >=2001）：若存在 `gt_alpha_mask` 且未开 `--supervise_background`，仅在 GT mask（前景）区域监督；否则全图（并可用 `--lambda_pbr` 对物体区域额外加权）
 
 **2）Alpha 监督（可选）**
 
@@ -414,6 +429,7 @@ python train_pbr.py \
 输出（在 `-m` 目录下）：
 
 - `point_cloud/iteration_<iter>/point_cloud.ply`
+- `unfixed_point_cloud/iteration_<iter>/point_cloud.ply`（若启用 `--unfixed_gaussians`）
 - `env_light_<iter>.pth`
 
 ### 渲染（PBR 输出）
