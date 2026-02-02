@@ -8,8 +8,10 @@ import sys
 import os
 import ast
 
-# Add the current directory to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add repo root to path
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(TESTS_DIR)
+sys.path.insert(0, REPO_ROOT)
 
 
 def test_pbr_utils_structure():
@@ -18,7 +20,7 @@ def test_pbr_utils_structure():
     print("Test 1: PBR Utils Code Structure")
     print("=" * 50)
 
-    pbr_path = os.path.join(os.path.dirname(__file__), 'utils', 'pbr_utils.py')
+    pbr_path = os.path.join(REPO_ROOT, 'utils', 'pbr_utils.py')
 
     with open(pbr_path, 'r') as f:
         source = f.read()
@@ -223,6 +225,20 @@ def test_screen_space_pbr():
     assert result.min() >= 0 and result.max() <= 1, "Output should be clamped to [0, 1]"
     print("  - Output in [0, 1]: OK")
 
+def test_reinhard_tonemap():
+    """Test Reinhard tone mapping helper"""
+    print("\n" + "=" * 50)
+    print("Test 8: Reinhard Tone Mapping")
+    print("=" * 50)
+
+    from utils.pbr_utils import tonemap_reinhard
+
+    x = torch.tensor([-1.0, 0.0, 1.0, 9.0])
+    y = tonemap_reinhard(x)
+    expected = torch.tensor([0.0, 0.0, 0.5, 0.9])
+    assert torch.allclose(y, expected, atol=1e-6), f"tonemap_reinhard mismatch: {y} vs {expected}"
+    print("  - Basic mapping: OK")
+
 
 def main():
     print("=" * 50)
@@ -237,6 +253,7 @@ def main():
         test_pbr_shading()
         test_environment_light()
         test_screen_space_pbr()
+        test_reinhard_tonemap()
 
         print("\n" + "=" * 50)
         print("ALL PHASE 3 TESTS PASSED!")

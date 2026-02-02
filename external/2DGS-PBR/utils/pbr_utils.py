@@ -17,6 +17,15 @@ import json
 from typing import Optional, Union, Tuple
 
 
+def tonemap_reinhard(x: torch.Tensor) -> torch.Tensor:
+    """
+    Simple Reinhard tone mapping (differentiable).
+    Maps HDR radiance to SDR display range: x -> x / (1 + x), with x clamped to >=0.
+    """
+    x = torch.clamp_min(x, 0.0)
+    return x / (1.0 + x)
+
+
 class EnvironmentLight(nn.Module):
     """
     Environment lighting using HDR environment maps.
@@ -1011,6 +1020,7 @@ def screen_space_pbr_shading(
     light_dir: torch.Tensor = None,
     light_color: torch.Tensor = None,
     ray_dirs_world: Optional[torch.Tensor] = None,
+    clamp_output: bool = True,
 ) -> torch.Tensor:
     """
     Apply PBR shading in screen space using G-Buffer.
@@ -1079,7 +1089,7 @@ def screen_space_pbr_shading(
     # Transpose back to [C, H, W]
     shaded = shaded.permute(2, 0, 1)
 
-    # Clamp to valid range
-    shaded = torch.clamp(shaded, 0.0, 1.0)
+    if clamp_output:
+        shaded = torch.clamp(shaded, 0.0, 1.0)
 
     return shaded

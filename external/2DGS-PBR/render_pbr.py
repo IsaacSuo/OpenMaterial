@@ -32,6 +32,8 @@ from utils.pbr_utils import (
 import numpy as np
 from PIL import Image
 
+from utils.pbr_utils import tonemap_reinhard
+
 def _search_for_max_iteration_in_dir(root: str):
     """
     Find max iteration_* under a directory (e.g., unfixed_point_cloud/iteration_XXXX).
@@ -54,7 +56,7 @@ def _search_for_max_iteration_in_dir(root: str):
 
 def save_image(tensor, path):
     """Save a [C, H, W] tensor as image"""
-    img = tensor.detach().cpu().clamp(0, 1)
+    img = tonemap_reinhard(tensor).detach().cpu().clamp(0, 1)
     img = (img.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
     Image.fromarray(img).save(path)
 
@@ -209,6 +211,7 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
                 view.world_view_transform,
                 env_light=env_light,
                 ray_dirs_world=ray_dirs,
+                clamp_output=False,
             )
             shaded = shaded_obj * alpha_map + bg_env * (1.0 - alpha_map)
             save_image(shaded, os.path.join(pbr_dir, f"{view.image_name}.png"))

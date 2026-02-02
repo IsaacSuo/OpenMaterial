@@ -8,13 +8,16 @@ import ast
 import sys
 import os
 
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(TESTS_DIR)
+
 def test_render_gbuffer_function():
     """Test that render_gbuffer function is properly defined"""
     print("=" * 50)
     print("Test 1: render_gbuffer Function Structure")
     print("=" * 50)
 
-    renderer_path = os.path.join(os.path.dirname(__file__), 'gaussian_renderer', '__init__.py')
+    renderer_path = os.path.join(REPO_ROOT, 'gaussian_renderer', '__init__.py')
 
     with open(renderer_path, 'r') as f:
         source = f.read()
@@ -59,7 +62,7 @@ def test_render_function_pbr_parameter():
     print("Test 2: render Function PBR Parameter")
     print("=" * 50)
 
-    renderer_path = os.path.join(os.path.dirname(__file__), 'gaussian_renderer', '__init__.py')
+    renderer_path = os.path.join(REPO_ROOT, 'gaussian_renderer', '__init__.py')
 
     with open(renderer_path, 'r') as f:
         source = f.read()
@@ -107,7 +110,7 @@ def test_gbuffer_integration():
     print("Test 3: G-Buffer Integration in render()")
     print("=" * 50)
 
-    renderer_path = os.path.join(os.path.dirname(__file__), 'gaussian_renderer', '__init__.py')
+    renderer_path = os.path.join(REPO_ROOT, 'gaussian_renderer', '__init__.py')
 
     with open(renderer_path, 'r') as f:
         source = f.read()
@@ -132,7 +135,7 @@ def test_gaussian_model_use_pbr():
     print("Test 4: GaussianModel use_pbr Attribute")
     print("=" * 50)
 
-    model_path = os.path.join(os.path.dirname(__file__), 'scene', 'gaussian_model.py')
+    model_path = os.path.join(REPO_ROOT, 'scene', 'gaussian_model.py')
 
     with open(model_path, 'r') as f:
         source = f.read()

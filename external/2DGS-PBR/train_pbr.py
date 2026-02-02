@@ -30,6 +30,7 @@ from utils.pbr_utils import (
     GroundPlane,
     screen_space_pbr_shading,
     compute_ray_directions_world_from_fov,
+    tonemap_reinhard,
 )
 from utils.profiler import SimpleProfiler
 from utils.general_utils import safe_state, colormap, inverse_sigmoid
@@ -1066,6 +1067,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                 last_gt_alpha_mask = mask.detach()
                 last_sky_weight = None
                 pred = bg_env
+                pred = tonemap_reinhard(pred).clamp(0.0, 1.0)
                 Ll1 = l1_loss(pred, gt_image, mask=bg_mask)
                 ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=bg_mask.unsqueeze(0))
                 recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
@@ -1102,6 +1104,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                 last_gt_alpha_mask = mask.detach()
                 last_sky_weight = sky_weight.detach()
                 pred = sky
+                pred = tonemap_reinhard(pred).clamp(0.0, 1.0)
                 Ll1 = l1_loss(pred, gt_image, mask=sky_weight)
                 ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=sky_weight.unsqueeze(0))
                 recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
@@ -1167,6 +1170,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                 viewpoint_cam.world_view_transform,
                 env_light=env_light,
                 ray_dirs_world=ray_dirs,
+                clamp_output=False,
             )
 
             # Composite for reconstruction.
@@ -1177,6 +1181,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                 alpha_for_comp = mask
 
             pred = shaded_obj * alpha_for_comp + bg_env * (1.0 - alpha_for_comp)
+            pred = tonemap_reinhard(pred).clamp(0.0, 1.0)
 
             alpha_sup_loss = torch.tensor(0.0, device="cuda")
             if mask is not None:

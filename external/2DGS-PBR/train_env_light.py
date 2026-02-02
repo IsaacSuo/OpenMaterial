@@ -223,6 +223,7 @@ def train_env_light(dataset, opt, pipe, args) -> None:
             cam.world_view_transform,
             env_light=env_light,
             ray_dirs_world=ray_dirs,
+            clamp_output=False,
         )
 
         # Object-only reconstruction with highlight robustness.
