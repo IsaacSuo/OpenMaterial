@@ -913,13 +913,15 @@ def training_pbr_static(dataset, opt, pipe, args):
     ground_meta = None
 
     # -----------------------
-    # Hard-coded 3-stage schedule (no CLI params)
+    # 3-stage schedule (configurable via CLI)
     # -----------------------
     # Stage 0: train unfixed/background Gaussians only (SH-only + densify), on background pixels
     # Stage 1: train env_map only, on "sky-like" background pixels not explained by unfixed
     # Stage 2: full training (object PBR + unfixed + env_map)
-    STAGE0_BG_ITERS = 1000
-    STAGE1_ENV_ITERS = 1000
+    STAGE0_BG_ITERS = int(getattr(args, "stage0_bg_iters", 1000) or 0)
+    STAGE1_ENV_ITERS = int(getattr(args, "stage1_env_iters", 1000) or 0)
+    STAGE0_BG_ITERS = max(0, STAGE0_BG_ITERS)
+    STAGE1_ENV_ITERS = max(0, STAGE1_ENV_ITERS)
 
     # 5. Training Loop
     iter_start = torch.cuda.Event(enable_timing=True)
@@ -1142,20 +1144,32 @@ def training_pbr_static(dataset, opt, pipe, args):
                     raise RuntimeError("[Stage1] Dataset mask is required (gt_alpha_mask).")
                 bg_mask = torch.clamp(1.0 - mask, 0.0, 1.0)  # [1,H,W]
 
+                # By default, we only supervise env_map on "sky-like" background pixels
+                # not explained by unfixed (finite-depth) background.
+                #
+                # Optionally, ignore unfixed entirely for env_map supervision so unfixed
+                # cannot shrink the env_map training signal by expanding alpha_bg.
+                env_stage1_ignore_unfixed = bool(getattr(args, "env_stage1_ignore_unfixed", False))
+
                 alpha_bg_detached = None
-                if gaussians_unfixed is not None:
+                if (not env_stage1_ignore_unfixed) and (gaussians_unfixed is not None):
                     with torch.no_grad():
                         bg_pkg = render(viewpoint_cam, gaussians_unfixed, pipe, background, render_pbr=False)
                         alpha_bg_detached = bg_pkg["rend_alpha"].detach()
                 if alpha_bg_detached is None:
                     alpha_bg_detached = torch.zeros_like(bg_mask)
 
-                # Pixels that look like "sky": background pixels not covered by unfixed alpha.
-                sky_weight = bg_mask * torch.clamp(1.0 - alpha_bg_detached, 0.0, 1.0)
+                # Pixels to supervise env_map on.
+                # - default: bg pixels not covered by unfixed (sky-like)
+                # - ignore_unfixed: all bg pixels from GT mask
+                if env_stage1_ignore_unfixed:
+                    sky_weight = bg_mask
+                else:
+                    sky_weight = bg_mask * torch.clamp(1.0 - alpha_bg_detached, 0.0, 1.0)
 
                 sky = env_light.sample(ray_dirs).permute(2, 0, 1)
                 last_unfixed_bg_render = None
-                last_unfixed_alpha_bg = alpha_bg_detached.detach()
+                last_unfixed_alpha_bg = alpha_bg_detached.detach() if (not env_stage1_ignore_unfixed) else None
                 last_sky = sky.detach()
                 last_bg_env = None
                 last_gt_image = gt_image.detach()
@@ -1783,6 +1797,23 @@ if __name__ == "__main__":
         type=int,
         default=1000,
         help="[Ignored] Training loop uses a hard-coded 3-stage schedule; this flag is kept for backward compatibility.",
+    )
+    parser.add_argument(
+        "--stage0_bg_iters",
+        type=int,
+        default=1000,
+        help="Stage0 iteration count (unfixed background only). Set 0 to skip Stage0 entirely.",
+    )
+    parser.add_argument(
+        "--stage1_env_iters",
+        type=int,
+        default=1000,
+        help="Stage1 iteration count (env_map only). Set 0 to skip Stage1 entirely.",
+    )
+    parser.add_argument(
+        "--env_stage1_ignore_unfixed",
+        action="store_true",
+        help="In Stage1, supervise env_map on all background pixels (1-gt_alpha_mask), ignoring unfixed alpha coverage.",
     )
     parser.add_argument("--env_map_res", type=int, default=1024, help="Resolution of the environment map (height). Width will be 2x height.")
 

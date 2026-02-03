@@ -91,6 +91,15 @@ bg = ground_color * hit_mask.unsqueeze(-1).float() + sky * (1.0 - hit_mask.unsqu
 
 ## Common Training Switches
 
+### Object rendering mode: PBR vs SH baseline
+```bash
+# Default: PBR object shading (G-buffer + env_map)
+python train_pbr.py --object_render_mode pbr ...
+
+# Baseline: SH-only object rendering (no PBR materials)
+python train_pbr.py --object_render_mode sh ...
+```
+
 ### Make ground learnable (as Gaussians)
 ```bash
 python train_pbr.py \

@@ -117,6 +117,10 @@ python train_pbr.py \
 - `--no_env_gradient_scaling`: disable solid-angle gradient scaling hook
 - `--env_warmup_iters`: legacy/ignored (training loop uses a hard-coded 3-stage schedule)
 
+**Object mode**
+
+- `--object_render_mode`: object rendering/training mode: `pbr` (default) or `sh` (baseline)
+
 **Unfixed background (optional)**
 
 - `--unfixed_gaussians`: enable an additional SH-only Gaussian set to learn finite-depth background geometry
@@ -303,6 +307,8 @@ python train_pbr.py \
   -s <DATASET_ROOT>/<hash>/<scene_name> \
   -m output/<scene_name>_pbr_geo_static/1/ \
   --gt_ply <GT_ROOT>/<hash>/dense_sampled.ply \
+  --unfixed_gaussians --unfixed_num_points 200000 \
+  --composite_use_gt_mask \
   --eval \
   --test_interval 1000 \
   --scaling_lr 0.001 \
@@ -344,6 +350,10 @@ python train_pbr.py \
 - `--env_clamp_min`, `--env_clamp_max`：每步更新后对 env_map 值做 clamp
 - `--no_env_gradient_scaling`：关闭 solid-angle 梯度缩放 hook
 - `--env_warmup_iters`：历史参数/已忽略（训练主循环使用硬编码 3-stage schedule）
+
+**物体模式（Object mode）**
+
+- `--object_render_mode`：物体渲染/训练模式：`pbr`（默认）或 `sh`（对照组）
 
 **Unfixed 背景（可选）**
 

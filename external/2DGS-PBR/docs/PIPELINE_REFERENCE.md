@@ -315,6 +315,7 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
 6. `gaussians.training_setup_fixed_geometry_pbr_only(opt)`：
    - 锁 `xyz/rotation/SH`
    - 学 `opacity/scaling + PBR(albedo/roughness/metallic)`
+   - 物体对照组：`--object_render_mode sh` 时，物体不走 PBR（不渲染 G-buffer，不优化 PBR 材质），而是用 SH 颜色作为 baseline（仍可优化 opacity/scaling/SH）
 7. 初始化环境光 `EnvironmentLight(args.env_map, resolution=args.env_map_res)`：
    - 单独 Adam 优化器 `env_light_optimizer`，lr=`opt.env_light_lr`
    - 可选 `register_gradient_scaling_hook()`：用 solid-angle 权重缩放 env_map 梯度
@@ -341,6 +342,7 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
 - Stage 0（1..1000）：只训练 unfixed（背景 SH-only + densify），env_map 冻结、物体 PBR 不参与；loss 只在背景像素（`1 - gt_alpha_mask`）上计算
 - Stage 1（1001..2000）：只训练 env_map；loss 只在“背景中更像 sky 的像素”上计算（背景像素且不被 unfixed 的 alpha 覆盖）
 - Stage 2（>=2001）：全量训练：物体 PBR + unfixed + env_map
+  - 若 `--object_render_mode sh`：Stage 2 中物体分支使用 SH render 作为 `object`，并跳过 PBR 材质正则项（`compute_pbr_losses` 不参与）
 
 每 iteration（Stage 2 的全量部分）：
 
