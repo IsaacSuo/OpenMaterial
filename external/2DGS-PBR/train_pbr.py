@@ -33,6 +33,7 @@ from utils.pbr_utils import (
     tonemap_reinhard,
     linear_to_srgb,
 )
+from utils.light_probe import LightProbe, LightProbeConfig
 from utils.profiler import SimpleProfiler
 from utils.general_utils import safe_state, colormap, inverse_sigmoid
 from utils.image_utils import psnr, render_net_image
@@ -629,6 +630,7 @@ def _run_pbr_eval(
     background: torch.Tensor,
     dummy_color: torch.Tensor,
     env_light,
+    light_probe=None,
     ground_plane=None,
     log_gt: bool = False,
     args=None,
@@ -685,6 +687,7 @@ def _run_pbr_eval(
                     normal, depth_map,
                     viewpoint.camera_center, viewpoint.world_view_transform,
                     env_light=env_light,
+                    light_probe=light_probe,
                     ray_dirs_world=ray_dirs,
                     clamp_output=False,
                 )
@@ -891,6 +894,72 @@ def training_pbr_static(dataset, opt, pipe, args):
 
     scene_extent = float(scene.cameras_extent)
 
+    # 4.25 Light Probe (optional): near-field position+direction -> radiance.
+    # Note: We keep env_light for skybox/background composite; the probe is used for object shading.
+    light_model = str(getattr(args, "light_model", "envmap")).lower().strip()
+    if light_model not in ("envmap", "probe"):
+        raise ValueError(f"--light_model must be 'envmap' or 'probe', got: {light_model}")
+
+    light_probe = None
+    freeze_probe = bool(getattr(args, "freeze_probe", False))
+    probe_optimizer = None
+
+    if light_model == "probe":
+        obj_pts = np.asarray(pcd.points)
+        obj_aabb_min = obj_pts.min(axis=0).astype(np.float32)
+        obj_aabb_max = obj_pts.max(axis=0).astype(np.float32)
+        probe_aabb_margin_ratio = float(getattr(args, "probe_aabb_margin_ratio", 0.05) or 0.05)
+        margin = float(scene_extent) * max(0.0, probe_aabb_margin_ratio)
+        aabb_min = obj_aabb_min - margin
+        aabb_max = obj_aabb_max + margin
+
+        if getattr(args, "probe_aabb_min", None) is not None:
+            aabb_min = np.asarray(args.probe_aabb_min, dtype=np.float32).reshape(3)
+        if getattr(args, "probe_aabb_max", None) is not None:
+            aabb_max = np.asarray(args.probe_aabb_max, dtype=np.float32).reshape(3)
+
+        probe_cfg = LightProbeConfig(
+            backend=str(getattr(args, "probe_backend", "tcnn")),
+            aabb_min=(float(aabb_min[0]), float(aabb_min[1]), float(aabb_min[2])),
+            aabb_max=(float(aabb_max[0]), float(aabb_max[1]), float(aabb_max[2])),
+            n_levels=int(getattr(args, "probe_n_levels", 16) or 16),
+            n_features_per_level=int(getattr(args, "probe_n_features_per_level", 2) or 2),
+            log2_hashmap_size=int(getattr(args, "probe_log2_hashmap_size", 19) or 19),
+            base_resolution=int(getattr(args, "probe_base_resolution", 16) or 16),
+            per_level_scale=float(getattr(args, "probe_per_level_scale", 1.5) or 1.5),
+            dir_encoding=str(getattr(args, "probe_dir_encoding", "sh")),
+            sh_degree=int(getattr(args, "probe_sh_degree", 4) or 4),
+            fourier_n_frequencies=int(getattr(args, "probe_fourier_n_frequencies", 6) or 6),
+            hidden_dim=int(getattr(args, "probe_hidden_dim", 64) or 64),
+            n_hidden_layers=int(getattr(args, "probe_n_hidden_layers", 2) or 2),
+            output_activation=str(getattr(args, "probe_output_activation", "softplus")),
+            output_softplus_beta=float(getattr(args, "probe_output_softplus_beta", 1.0) or 1.0),
+        )
+        light_probe = LightProbe(probe_cfg).cuda()
+
+        if getattr(args, "probe_pth", None):
+            ckpt_path = str(args.probe_pth)
+            if not os.path.exists(ckpt_path):
+                raise FileNotFoundError(f"--probe_pth not found: {ckpt_path}")
+            light_probe.load_state_dict(torch.load(ckpt_path, map_location="cpu"))
+            light_probe = light_probe.cuda()
+            print(f"Loaded light_probe checkpoint: {ckpt_path}")
+
+        if freeze_probe:
+            for p in light_probe.parameters():
+                p.requires_grad_(False)
+            print("Light probe is frozen (no optimization).")
+        else:
+            probe_lr = float(getattr(args, "probe_lr", 1e-2) or 1e-2)
+            probe_weight_decay = float(getattr(args, "probe_weight_decay", 0.0) or 0.0)
+            probe_optimizer = torch.optim.Adam(
+                light_probe.parameters(), lr=probe_lr, weight_decay=probe_weight_decay
+            )
+            print(
+                f"[LightProbe] Enabled: backend={light_probe.backend} lr={probe_lr} wd={probe_weight_decay} "
+                f"aabb_min={probe_cfg.aabb_min} aabb_max={probe_cfg.aabb_max}"
+            )
+
     # 4.5 Ground Plane (optional, for finite-depth backgrounds like checkerboard floor).
     # Note: If unfixed_gaussians is enabled, the unfixed Gaussians should explain finite-depth backgrounds instead.
     ground_plane = None
@@ -956,6 +1025,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             background=background,
             dummy_color=dummy_color,
             env_light=env_light,
+            light_probe=light_probe,
             ground_plane=ground_plane,
             log_gt=True,
             args=args,
@@ -1056,6 +1126,8 @@ def training_pbr_static(dataset, opt, pipe, args):
             gaussians_unfixed.optimizer.zero_grad(set_to_none=True)
         if env_light_optimizer is not None:
             env_light_optimizer.zero_grad(set_to_none=True)
+        if probe_optimizer is not None:
+            probe_optimizer.zero_grad(set_to_none=True)
 
         # Cache a representative camera's tensors for TB visualization (logged at test_iterations frequency).
         last_unfixed_bg_render = None
@@ -1255,6 +1327,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                     viewpoint_cam.camera_center,
                     viewpoint_cam.world_view_transform,
                     env_light=env_light,
+                    light_probe=light_probe,
                     ray_dirs_world=ray_dirs,
                     clamp_output=False,
                 )
@@ -1448,6 +1521,8 @@ def training_pbr_static(dataset, opt, pipe, args):
                                 
                                 scene.save(iteration)
                                 torch.save(env_light.state_dict(), os.path.join(scene.model_path, f"env_light_{iteration}.pth"))
+                                if light_probe is not None:
+                                    torch.save(light_probe.state_dict(), os.path.join(scene.model_path, f"light_probe_{iteration}.pth"))
                                 progress_bar.close()
                                 print("Training complete (Early Stopped).")
                                 return # Exit function directly
@@ -1518,6 +1593,8 @@ def training_pbr_static(dataset, opt, pipe, args):
                     gaussians_unfixed.save_ply(os.path.join(unfixed_dir, "point_cloud.ply"))
                 if not freeze_env_light:
                     torch.save(env_light.state_dict(), os.path.join(scene.model_path, f"env_light_{iteration}.pth"))
+                if light_probe is not None:
+                    torch.save(light_probe.state_dict(), os.path.join(scene.model_path, f"light_probe_{iteration}.pth"))
 
             # Densification (unfixed/background only)
             if (gaussians_unfixed is not None) and stage in (0, 2) and (iteration < opt.densify_until_iter):
@@ -1578,6 +1655,20 @@ def training_pbr_static(dataset, opt, pipe, args):
                     env_light_optimizer.step()
                 env_light_optimizer.zero_grad(set_to_none=True)
 
+            # Step Light Probe (if enabled and not frozen). Only meaningful in stage 2.
+            if (light_probe is not None) and (not freeze_probe) and stage == 2:
+                probe_update_after = int(getattr(args, "probe_update_after", 0) or 0)
+                probe_update_interval = int(getattr(args, "probe_update_interval", 1) or 1)
+                probe_update_interval = max(1, probe_update_interval)
+                do_probe_step = True
+                if probe_update_after > 0 and iteration < probe_update_after:
+                    do_probe_step = False
+                if probe_update_interval > 1 and (iteration % probe_update_interval != 0):
+                    do_probe_step = False
+                if do_probe_step:
+                    probe_optimizer.step()
+                probe_optimizer.zero_grad(set_to_none=True)
+
             env_clamp_min = getattr(args, "env_clamp_min", None)
             env_clamp_max = getattr(args, "env_clamp_max", None)
             if (not freeze_env_light) and ((env_clamp_min is not None) or (env_clamp_max is not None)):
@@ -1620,6 +1711,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                     background=background,
                     dummy_color=dummy_color,
                     env_light=env_light,
+                    light_probe=light_probe,
                     ground_plane=ground_plane,
                     log_gt=(first_eval_iter is not None and iteration == first_eval_iter),
                     args=args,
@@ -1703,6 +1795,41 @@ if __name__ == "__main__":
     )
     parser.add_argument("--lambda_pbr_reg", type=float, default=0.01)
     parser.add_argument("--env_light_lr", type=float, default=0.01)
+    parser.add_argument(
+        "--light_model",
+        type=str,
+        default="envmap",
+        choices=["envmap", "probe"],
+        help="Lighting model for PBR object shading: 'envmap' (far-field) or 'probe' (position+direction light probe network).",
+    )
+    parser.add_argument("--probe_pth", type=str, default=None, help="Optional light probe checkpoint to load.")
+    parser.add_argument("--freeze_probe", action="store_true", help="Freeze light probe parameters (no optimization).")
+    parser.add_argument("--probe_lr", type=float, default=1e-2, help="Light probe learning rate.")
+    parser.add_argument("--probe_weight_decay", type=float, default=0.0, help="Light probe Adam weight decay.")
+    parser.add_argument("--probe_update_after", type=int, default=0, help="Only update probe after this iteration (stage 2).")
+    parser.add_argument("--probe_update_interval", type=int, default=1, help="Update probe every N iterations (stage 2).")
+    parser.add_argument("--probe_backend", type=str, default="tcnn", choices=["tcnn", "mlp"], help="Probe backend.")
+    parser.add_argument("--probe_dir_encoding", type=str, default="sh", choices=["sh", "fourier"], help="Direction encoding for probe.")
+    parser.add_argument("--probe_sh_degree", type=int, default=4, help="SH degree for direction encoding (tcnn backend).")
+    parser.add_argument("--probe_fourier_n_frequencies", type=int, default=6, help="Fourier frequencies for direction encoding.")
+    parser.add_argument("--probe_n_levels", type=int, default=16, help="HashGrid levels (tcnn backend).")
+    parser.add_argument("--probe_n_features_per_level", type=int, default=2, help="HashGrid features per level (tcnn backend).")
+    parser.add_argument("--probe_log2_hashmap_size", type=int, default=19, help="HashGrid log2 hashmap size (tcnn backend).")
+    parser.add_argument("--probe_base_resolution", type=int, default=16, help="HashGrid base resolution (tcnn backend).")
+    parser.add_argument("--probe_per_level_scale", type=float, default=1.5, help="HashGrid per-level scale (tcnn backend).")
+    parser.add_argument("--probe_hidden_dim", type=int, default=64, help="Probe decoder hidden width.")
+    parser.add_argument("--probe_n_hidden_layers", type=int, default=2, help="Probe decoder hidden layers.")
+    parser.add_argument(
+        "--probe_output_activation",
+        type=str,
+        default="softplus",
+        choices=["softplus", "exp", "none"],
+        help="Output activation for probe radiance (HDR).",
+    )
+    parser.add_argument("--probe_output_softplus_beta", type=float, default=1.0, help="Softplus beta for probe output.")
+    parser.add_argument("--probe_aabb_margin_ratio", type=float, default=0.05, help="Expand object AABB by margin_ratio*scene_extent.")
+    parser.add_argument("--probe_aabb_min", type=float, nargs=3, default=None, help="Override probe AABB min (3 floats).")
+    parser.add_argument("--probe_aabb_max", type=float, nargs=3, default=None, help="Override probe AABB max (3 floats).")
     parser.add_argument("--lambda_env_tv", type=float, default=0.001)
     parser.add_argument(
         "--lambda_env_smooth",

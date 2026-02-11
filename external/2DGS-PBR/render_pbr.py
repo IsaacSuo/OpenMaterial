@@ -30,6 +30,7 @@ from utils.pbr_utils import (
     tonemap_reinhard,
     linear_to_srgb,
 )
+from utils.light_probe import LightProbe, LightProbeConfig
 
 import numpy as np
 from PIL import Image
@@ -52,6 +53,28 @@ def _search_for_max_iteration_in_dir(root: str):
         if max_it is None or it > max_it:
             max_it = it
     return max_it
+
+
+def _search_for_latest_ckpt(model_path: str, prefix: str) -> str | None:
+    """
+    Find the latest checkpoint under model_path with pattern: <prefix>_<iter>.pth
+    Returns full path or None.
+    """
+    if not os.path.isdir(model_path):
+        return None
+    best_it = None
+    best_path = None
+    for name in os.listdir(model_path):
+        if not (name.startswith(prefix + "_") and name.endswith(".pth")):
+            continue
+        try:
+            it = int(name[len(prefix) + 1 :].split(".pth")[0])
+        except Exception:
+            continue
+        if best_it is None or it > best_it:
+            best_it = it
+            best_path = os.path.join(model_path, name)
+    return best_path
 
 
 def save_image(tensor, path):
@@ -98,7 +121,7 @@ def _compute_background(ray_dirs, camera_center, env_light, ground_plane=None):
     return ground_color * ground_mask + sky_color * (1.0 - ground_mask)
 
 
-def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_name, ground_plane=None):
+def render_set(dataset, iteration, pipeline, env_light, light_probe, views, out_dir, split_name, ground_plane=None):
     """Render a set of views and save outputs"""
 
     makedirs(out_dir, exist_ok=True)
@@ -214,6 +237,7 @@ def render_set(dataset, iteration, pipeline, env_light, views, out_dir, split_na
                 view.camera_center,
                 view.world_view_transform,
                 env_light=env_light,
+                light_probe=light_probe,
                 ray_dirs_world=ray_dirs,
                 clamp_output=False,
             )
@@ -303,6 +327,35 @@ if __name__ == "__main__":
         default=None,
         help="Path to ground_texture.png. If not specified, looks in same dir as ground_plane_json.",
     )
+    parser.add_argument(
+        "--light_model",
+        type=str,
+        default="envmap",
+        choices=["envmap", "probe"],
+        help="Lighting model for PBR object shading: 'envmap' (far-field) or 'probe' (position+direction light probe network).",
+    )
+    parser.add_argument("--probe_pth", type=str, default=None, help="Optional light probe checkpoint to load.")
+    parser.add_argument("--probe_backend", type=str, default="tcnn", choices=["tcnn", "mlp"], help="Probe backend.")
+    parser.add_argument("--probe_dir_encoding", type=str, default="sh", choices=["sh", "fourier"], help="Direction encoding for probe.")
+    parser.add_argument("--probe_sh_degree", type=int, default=4, help="SH degree for direction encoding (tcnn backend).")
+    parser.add_argument("--probe_fourier_n_frequencies", type=int, default=6, help="Fourier frequencies for direction encoding.")
+    parser.add_argument("--probe_n_levels", type=int, default=16, help="HashGrid levels (tcnn backend).")
+    parser.add_argument("--probe_n_features_per_level", type=int, default=2, help="HashGrid features per level (tcnn backend).")
+    parser.add_argument("--probe_log2_hashmap_size", type=int, default=19, help="HashGrid log2 hashmap size (tcnn backend).")
+    parser.add_argument("--probe_base_resolution", type=int, default=16, help="HashGrid base resolution (tcnn backend).")
+    parser.add_argument("--probe_per_level_scale", type=float, default=1.5, help="HashGrid per-level scale (tcnn backend).")
+    parser.add_argument("--probe_hidden_dim", type=int, default=64, help="Probe decoder hidden width.")
+    parser.add_argument("--probe_n_hidden_layers", type=int, default=2, help="Probe decoder hidden layers.")
+    parser.add_argument(
+        "--probe_output_activation",
+        type=str,
+        default="softplus",
+        choices=["softplus", "exp", "none"],
+        help="Output activation for probe radiance (HDR).",
+    )
+    parser.add_argument("--probe_output_softplus_beta", type=float, default=1.0, help="Softplus beta for probe output.")
+    parser.add_argument("--probe_aabb_min", type=float, nargs=3, default=None, help="Probe AABB min (3 floats).")
+    parser.add_argument("--probe_aabb_max", type=float, nargs=3, default=None, help="Probe AABB max (3 floats).")
 
     args = get_combined_args(parser)
     print("Rendering (PBR mode) " + args.model_path)
@@ -317,6 +370,7 @@ if __name__ == "__main__":
     dataset = model.extract(args)
     iteration = args.iteration
     pipe = pipeline.extract(args)
+    setattr(dataset, "object_render_mode", getattr(args, "object_render_mode", "pbr"))
 
     # Determine iteration first
     if iteration == -1:
@@ -352,6 +406,45 @@ if __name__ == "__main__":
     if not env_light_loaded:
         print(f"Using default environment light (no trained env_light found)")
 
+    # Optional: load light probe for object shading.
+    light_model = str(getattr(args, "light_model", "envmap")).lower().strip()
+    light_probe = None
+    if light_model == "probe":
+        aabb_min = tuple(float(x) for x in args.probe_aabb_min) if getattr(args, "probe_aabb_min", None) is not None else (-1.0, -1.0, -1.0)
+        aabb_max = tuple(float(x) for x in args.probe_aabb_max) if getattr(args, "probe_aabb_max", None) is not None else (1.0, 1.0, 1.0)
+        probe_cfg = LightProbeConfig(
+            backend=str(getattr(args, "probe_backend", "tcnn")),
+            aabb_min=aabb_min,
+            aabb_max=aabb_max,
+            n_levels=int(getattr(args, "probe_n_levels", 16) or 16),
+            n_features_per_level=int(getattr(args, "probe_n_features_per_level", 2) or 2),
+            log2_hashmap_size=int(getattr(args, "probe_log2_hashmap_size", 19) or 19),
+            base_resolution=int(getattr(args, "probe_base_resolution", 16) or 16),
+            per_level_scale=float(getattr(args, "probe_per_level_scale", 1.5) or 1.5),
+            dir_encoding=str(getattr(args, "probe_dir_encoding", "sh")),
+            sh_degree=int(getattr(args, "probe_sh_degree", 4) or 4),
+            fourier_n_frequencies=int(getattr(args, "probe_fourier_n_frequencies", 6) or 6),
+            hidden_dim=int(getattr(args, "probe_hidden_dim", 64) or 64),
+            n_hidden_layers=int(getattr(args, "probe_n_hidden_layers", 2) or 2),
+            output_activation=str(getattr(args, "probe_output_activation", "softplus")),
+            output_softplus_beta=float(getattr(args, "probe_output_softplus_beta", 1.0) or 1.0),
+        )
+        light_probe = LightProbe(probe_cfg).cuda()
+        probe_ckpt = getattr(args, "probe_pth", None)
+        if probe_ckpt is None:
+            # Prefer the current iteration, otherwise load the latest.
+            p = os.path.join(args.model_path, f"light_probe_{iteration}.pth")
+            if os.path.exists(p):
+                probe_ckpt = p
+            else:
+                probe_ckpt = _search_for_latest_ckpt(args.model_path, "light_probe")
+        if probe_ckpt is not None and os.path.exists(str(probe_ckpt)):
+            light_probe.load_state_dict(torch.load(str(probe_ckpt), map_location="cpu"))
+            light_probe = light_probe.cuda()
+            print(f"Loaded light probe from: {probe_ckpt}")
+        else:
+            print("Warning: --light_model=probe but no probe checkpoint found; using randomly initialized probe.")
+
     # Load ground plane (optional, for finite-depth ground backgrounds)
     ground_plane = None
     ground_plane_json = getattr(args, 'ground_plane_json', None)
@@ -371,7 +464,7 @@ if __name__ == "__main__":
     # Render train set
     if not skip_train:
         train_dir = os.path.join(args.model_path, 'train', f"ours_{iteration}")
-        scene = render_set(dataset, iteration, pipe, env_light,
+        scene = render_set(dataset, iteration, pipe, env_light, light_probe,
                           "train", train_dir, "train", ground_plane=ground_plane)
 
         if compute_metrics_flag:
@@ -392,7 +485,7 @@ if __name__ == "__main__":
     # Render test set
     if not skip_test:
         test_dir = os.path.join(args.model_path, 'test', f"ours_{iteration}")
-        scene = render_set(dataset, iteration, pipe, env_light,
+        scene = render_set(dataset, iteration, pipe, env_light, light_probe,
                           "test", test_dir, "test", ground_plane=ground_plane)
 
         if compute_metrics_flag:
@@ -412,5 +505,4 @@ if __name__ == "__main__":
 
     print("\nRendering complete!")
     print(f"Output saved to: {args.model_path}")
-    # Pass through for render_set (stored on dataset namespace for convenience)
-    setattr(dataset, "object_render_mode", getattr(args, "object_render_mode", "pbr"))
+    # dataset.object_render_mode is already set before rendering.

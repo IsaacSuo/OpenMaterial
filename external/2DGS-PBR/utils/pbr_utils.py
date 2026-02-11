@@ -16,6 +16,11 @@ import os
 import json
 from typing import Optional, Union, Tuple
 
+try:
+    from utils.light_probe import LightProbe
+except Exception:
+    LightProbe = None  # optional
+
 
 def tonemap_reinhard(x: torch.Tensor) -> torch.Tensor:
     """
@@ -1013,6 +1018,47 @@ def pbr_shading_env(
     return color
 
 
+def pbr_shading_probe(
+    albedo: torch.Tensor,        # [H,W,3]
+    roughness: torch.Tensor,     # [H,W,1]
+    metallic: torch.Tensor,      # [H,W,1]
+    normal: torch.Tensor,        # [H,W,3]
+    view_dir: torch.Tensor,      # [H,W,3] (pointing to camera)
+    world_pos: torch.Tensor,     # [H,W,3]
+    light_probe,
+) -> torch.Tensor:
+    """
+    Near-field lighting using a learnable light probe network.
+
+    The probe is queried at (position, direction). For specular we use reflection
+    direction; for diffuse we use the normal direction and maximum roughness.
+    """
+    # Reflection direction for specular
+    reflect_dir = 2.0 * torch.sum(normal * view_dir, dim=-1, keepdim=True) * normal - view_dir
+    reflect_dir = F.normalize(reflect_dir, dim=-1)
+
+    # Flatten to [N,3] for probe
+    H, W = albedo.shape[:2]
+    pos = world_pos.reshape(-1, 3)
+    rdir = reflect_dir.reshape(-1, 3)
+    ndir = normal.reshape(-1, 3)
+
+    # Specular and diffuse "environment" colors.
+    specular_color = light_probe.radiance(pos, rdir).reshape(H, W, 3)
+    diffuse_irradiance = light_probe.radiance(pos, ndir).reshape(H, W, 3)
+
+    # Fresnel/energy conservation, same as env version.
+    f0 = torch.lerp(torch.full_like(albedo, 0.04), albedo, metallic)
+    n_dot_v = torch.clamp(torch.sum(normal * view_dir, dim=-1, keepdim=True), min=0.001)
+    F_env = fresnel_schlick_roughness(n_dot_v, f0, roughness)
+    kS = F_env
+    kD = (1.0 - kS) * (1.0 - metallic)
+
+    diffuse = kD * albedo * diffuse_irradiance
+    specular = kS * specular_color
+    return diffuse + specular
+
+
 def fresnel_schlick_roughness(cos_theta: torch.Tensor, f0: torch.Tensor, roughness: torch.Tensor) -> torch.Tensor:
     """
     Fresnel-Schlick approximation with roughness correction for IBL.
@@ -1045,9 +1091,11 @@ def screen_space_pbr_shading(
     camera_center: torch.Tensor,
     camera_transform: torch.Tensor,
     env_light: EnvironmentLight = None,
+    light_probe: Optional["LightProbe"] = None,
     light_dir: torch.Tensor = None,
     light_color: torch.Tensor = None,
     ray_dirs_world: Optional[torch.Tensor] = None,
+    world_pos: Optional[torch.Tensor] = None,
     clamp_output: bool = True,
 ) -> torch.Tensor:
     """
@@ -1093,7 +1141,22 @@ def screen_space_pbr_shading(
         view_dir = -camera_center.view(1, 1, 3).expand(H, W, 3)
         view_dir = F.normalize(view_dir, dim=-1)
 
-    if env_light is not None:
+    # Optional: near-field probe lighting.
+    if light_probe is not None:
+        if world_pos is None:
+            if ray_dirs_world is None:
+                raise ValueError("light_probe requires world_pos or ray_dirs_world to infer world_pos.")
+            depth = gbuffer_depth.permute(1, 2, 0)  # [H,W,1]
+            world_pos = camera_center.view(1, 1, 3) + ray_dirs_world * depth
+        if world_pos.shape == (3, H, W):
+            world_pos = world_pos.permute(1, 2, 0)
+        if world_pos.shape != (H, W, 3):
+            raise ValueError(f"world_pos must be [H,W,3] or [3,H,W], got {tuple(world_pos.shape)}")
+
+        shaded = pbr_shading_probe(
+            albedo, roughness, metallic, normal, view_dir, world_pos, light_probe
+        )
+    elif env_light is not None:
         # Use environment lighting
         shaded = pbr_shading_env(
             albedo, roughness, metallic, normal, view_dir, env_light
