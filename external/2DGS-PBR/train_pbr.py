@@ -962,6 +962,10 @@ def training_pbr_static(dataset, opt, pipe, args):
         )
 
     first_iter = 1
+    lambda_unfixed_obj_overlap = float(getattr(args, "lambda_unfixed_obj_overlap", 0.0) or 0.0)
+    lambda_unfixed_obj_overlap = max(0.0, lambda_unfixed_obj_overlap)
+    unfixed_disable_densification = bool(getattr(args, "unfixed_disable_densification", False))
+    unfixed_disable_opacity_reset = bool(getattr(args, "unfixed_disable_opacity_reset", False))
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
 
@@ -1131,7 +1135,13 @@ def training_pbr_static(dataset, opt, pipe, args):
                 Ll1 = l1_loss(pred, gt_image, mask=bg_mask)
                 ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=bg_mask.unsqueeze(0))
                 recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
-                cam_loss = opt.lambda_rgb * recon_loss
+                # Optional: prevent unfixed from "cheating" by covering the object region.
+                # Even though Stage0 loss is background-only, unfixed can still increase alpha over the object.
+                # Penalize alpha overlap on the object mask to keep unfixed behind/away from the object.
+                unfixed_overlap_loss = torch.tensor(0.0, device="cuda")
+                if lambda_unfixed_obj_overlap > 0:
+                    unfixed_overlap_loss = lambda_unfixed_obj_overlap * (alpha_bg * mask).mean()
+                cam_loss = opt.lambda_rgb * recon_loss + unfixed_overlap_loss
                 (cam_loss / float(batch_cams)).backward()
                 recon_loss_sum += float(recon_loss.detach().cpu().item())
                 l1_sum += float(Ll1.detach().cpu().item())
@@ -1317,7 +1327,12 @@ def training_pbr_static(dataset, opt, pipe, args):
             ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=recon_weight.unsqueeze(0))
             recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
 
-            cam_loss = opt.lambda_rgb * recon_loss + alpha_sup_loss + pbr_reg_loss
+            unfixed_overlap_loss = torch.tensor(0.0, device="cuda")
+            if (lambda_unfixed_obj_overlap > 0) and (gaussians_unfixed is not None) and (mask is not None):
+                # Penalize unfixed alpha inside object region.
+                unfixed_overlap_loss = lambda_unfixed_obj_overlap * (alpha_bg * mask).mean()
+
+            cam_loss = opt.lambda_rgb * recon_loss + alpha_sup_loss + pbr_reg_loss + unfixed_overlap_loss
             if not torch.isfinite(cam_loss):
                 raise FloatingPointError("Non-finite cam_loss detected during minibatch accumulation.")
             (cam_loss / float(batch_cams)).backward()
@@ -1506,26 +1521,28 @@ def training_pbr_static(dataset, opt, pipe, args):
 
             # Densification (unfixed/background only)
             if (gaussians_unfixed is not None) and stage in (0, 2) and (iteration < opt.densify_until_iter):
-                for viewspace_point_tensor, visibility_filter, radii in unfixed_stats:
-                    gaussians_unfixed.max_radii2D[visibility_filter] = torch.max(
-                        gaussians_unfixed.max_radii2D[visibility_filter],
-                        radii[visibility_filter],
-                    )
-                    gaussians_unfixed.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                if not unfixed_disable_densification:
+                    for viewspace_point_tensor, visibility_filter, radii in unfixed_stats:
+                        gaussians_unfixed.max_radii2D[visibility_filter] = torch.max(
+                            gaussians_unfixed.max_radii2D[visibility_filter],
+                            radii[visibility_filter],
+                        )
+                        gaussians_unfixed.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-                if (iteration > opt.densify_from_iter) and (iteration % opt.densification_interval == 0):
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians_unfixed.densify_and_prune(
-                        opt.densify_grad_threshold,
-                        opt.opacity_cull,
-                        scene.cameras_extent,
-                        size_threshold,
-                    )
+                    if (iteration > opt.densify_from_iter) and (iteration % opt.densification_interval == 0):
+                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        gaussians_unfixed.densify_and_prune(
+                            opt.densify_grad_threshold,
+                            opt.opacity_cull,
+                            scene.cameras_extent,
+                            size_threshold,
+                        )
 
-                if (iteration % opt.opacity_reset_interval == 0) or (
-                    dataset.white_background and iteration == opt.densify_from_iter
-                ):
-                    gaussians_unfixed.reset_opacity()
+                if not unfixed_disable_opacity_reset:
+                    if (iteration % opt.opacity_reset_interval == 0) or (
+                        dataset.white_background and iteration == opt.densify_from_iter
+                    ):
+                        gaussians_unfixed.reset_opacity()
 
             # Step
             if stage == 0:
@@ -1839,6 +1856,22 @@ if __name__ == "__main__":
         "--unfixed_gaussians",
         action="store_true",
         help="If set, learn an additional unfixed/background Gaussian set (SH-only) to explain finite-depth background geometry.",
+    )
+    parser.add_argument(
+        "--unfixed_disable_densification",
+        action="store_true",
+        help="Disable densify/prune for unfixed/background Gaussians (can prevent sudden instability from densification).",
+    )
+    parser.add_argument(
+        "--unfixed_disable_opacity_reset",
+        action="store_true",
+        help="Disable opacity reset for unfixed/background Gaussians (helps avoid sudden 'explosions' at multiples of --opacity_reset_interval).",
+    )
+    parser.add_argument(
+        "--lambda_unfixed_obj_overlap",
+        type=float,
+        default=0.0,
+        help="Optional penalty on unfixed alpha overlapping the object mask (discourages unfixed Gaussians from covering/cheating in front of the object).",
     )
     parser.add_argument(
         "--unfixed_num_points",
