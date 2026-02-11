@@ -84,12 +84,53 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         render_pbr: If True, also render G-Buffer for PBR (albedo, roughness, metallic maps)
     """
  
-    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means.
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
         screenspace_points.retain_grad()
     except:
         pass
+
+    # Guard: the CUDA rasterizer extension can misbehave on empty point sets.
+    # Return correctly-shaped zero buffers, while keeping a (zero) gradient path to screenspace_points
+    # so densification code that reads viewspace_points.grad does not crash.
+    if pc.get_xyz.shape[0] == 0:
+        H = int(viewpoint_camera.image_height)
+        W = int(viewpoint_camera.image_width)
+        device = bg_color.device
+        dtype = bg_color.dtype
+
+        rendered_image = torch.zeros((3, H, W), device=device, dtype=dtype)
+        render_alpha = torch.zeros((1, H, W), device=device, dtype=dtype)
+        render_normal = torch.zeros((3, H, W), device=device, dtype=dtype)
+        surf_depth = torch.zeros((1, H, W), device=device, dtype=dtype)
+        surf_normal = torch.zeros((3, H, W), device=device, dtype=dtype)
+        render_dist = torch.zeros((1, H, W), device=device, dtype=dtype)
+
+        # Ensure rendered_image is connected to screenspace_points so .grad exists (as zeros).
+        rendered_image = rendered_image + (screenspace_points.sum() * 0.0)
+
+        rets = {
+            "render": rendered_image,
+            "viewspace_points": screenspace_points,
+            "visibility_filter": torch.zeros((0,), device=device, dtype=torch.bool),
+            "radii": torch.zeros((0,), device=device, dtype=dtype),
+            "rend_alpha": render_alpha,
+            "rend_normal": render_normal,
+            "rend_dist": render_dist,
+            "surf_depth": surf_depth,
+            "surf_normal": surf_normal,
+        }
+
+        if render_pbr and pc.use_pbr:
+            rets.update(
+                {
+                    "gbuffer_albedo": torch.zeros((3, H, W), device=device, dtype=dtype),
+                    "gbuffer_roughness": torch.zeros((1, H, W), device=device, dtype=dtype),
+                    "gbuffer_metallic": torch.zeros((1, H, W), device=device, dtype=dtype),
+                }
+            )
+        return rets
 
     # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
