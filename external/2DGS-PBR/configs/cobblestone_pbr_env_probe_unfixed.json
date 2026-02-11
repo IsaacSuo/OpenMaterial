@@ -1,6 +1,6 @@
 {
   "paths": {
-    "source": "/opt/data/private/dataset/OpenMaterial_ablation/b14a251fe8ad4a10bbc75f7dd3f6ceb/cobblestone_street_night_4k-conductor/",
+    "source": "/opt/data/private/dataset/OpenMaterial_ablation/b14a251fe8ad4a10bbc75f7dd3f6cebb/cobblestone_street_night_4k-conductor/",
     "output": "output/cobblestone_pbr_geo_static/unfixed_from_scratch_env_probe_v2/",
     "gt_ply": "/opt/data/private/dataset/OpenMaterial_ablation/groundtruth_ablation/b14a251fe8ad4a10bbc75f7dd3f6cebb/dense_sampled.ply",
     "init_env_map": null
@@ -140,4 +140,3 @@
     "tb_log_env_map": true
   }
 }
-

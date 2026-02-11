@@ -466,6 +466,24 @@ def _validate_args(args: Namespace) -> None:
     if not getattr(args, "gt_ply", None):
         raise ValueError("args.gt_ply is required")
 
+    # Scene type detection requires either:
+    # - COLMAP: <source_path>/sparse/
+    # - Blender/NeRF synthetic: <source_path>/transforms_train.json
+    src = str(args.source_path)
+    has_colmap = os.path.exists(os.path.join(src, "sparse"))
+    has_blender = os.path.exists(os.path.join(src, "transforms_train.json"))
+    if not (has_colmap or has_blender):
+        try:
+            entries = sorted(os.listdir(src)) if os.path.isdir(src) else []
+        except Exception:
+            entries = []
+        raise ValueError(
+            "Could not recognize scene type from paths.source. "
+            "Expected either '<source>/sparse/' (COLMAP) or '<source>/transforms_train.json' (Blender). "
+            f"Got source_path={src!r}. "
+            f"Top-level entries={entries[:30]!r}"
+        )
+
     if getattr(args, "light_model", "envmap") == "probe" and getattr(args, "object_render_mode", "pbr") != "pbr":
         raise ValueError("--light_model=probe requires --object_render_mode=pbr")
 
@@ -544,4 +562,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
