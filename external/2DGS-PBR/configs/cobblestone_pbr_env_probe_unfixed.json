@@ -94,6 +94,7 @@
   "optim": {
     "iters": 30000,
     "batch_cams": 1,
+    "opacity_cull": 0.01,
     "lr": {
       "scaling": 0.001,
       "opacity": 0.05,

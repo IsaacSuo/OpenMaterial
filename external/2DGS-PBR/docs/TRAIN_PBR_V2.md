@@ -35,6 +35,9 @@ Examples:
 # Change total iterations
 --override optim.iters=60000
 
+# Make pruning less aggressive (keep more background gaussians)
+--override optim.opacity_cull=0.01
+
 # Change evaluation frequency
 --override schedule.eval.every=1000
 
@@ -69,4 +72,3 @@ Config keys:
 - `<output>/config_resolved.json`
 
 The training engine writes the usual artifacts under `<output>/` (point cloud, env_light ckpts, etc.).
-

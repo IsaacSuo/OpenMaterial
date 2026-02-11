@@ -233,6 +233,7 @@ def _build_args_from_config(cfg: dict[str, Any]) -> Namespace:
     feature_lr = _as_float(_get(cfg, "optim.lr.feature_lr", None), 0.0025)
     scaling_lr = _as_float(_get(cfg, "optim.lr.scaling", None), 0.005)
     opacity_lr = _as_float(_get(cfg, "optim.lr.opacity", None), 0.05)
+    opacity_cull = _as_float(_get(cfg, "optim.opacity_cull", None), 0.05)
     rotation_lr = _as_float(_get(cfg, "optim.lr.rotation_lr", None), 0.001)
     albedo_lr = _as_float(_get(cfg, "optim.lr.albedo", None), 0.001)
     roughness_lr = _as_float(_get(cfg, "optim.lr.roughness", None), 0.0002)
@@ -385,7 +386,7 @@ def _build_args_from_config(cfg: dict[str, Any]) -> Namespace:
     args.lambda_dssim = _as_float(_get(cfg, "loss.lambda_dssim", None), 0.2)
     args.lambda_dist = 0.0
     args.lambda_normal = 0.05
-    args.opacity_cull = 0.05
+    args.opacity_cull = float(opacity_cull)
     args.densification_interval = 100
     args.opacity_reset_interval = 3000
     args.densify_from_iter = 500

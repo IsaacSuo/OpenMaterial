@@ -611,6 +611,19 @@ class GaussianModel:
         return optimizable_tensors
 
     def prune_points(self, mask):
+        # Guard against pruning all points (can crash CUDA rasterizer backward on empty inputs).
+        # If all points are marked for pruning, keep the single most-opaque point.
+        if isinstance(mask, torch.Tensor) and mask.numel() > 0:
+            if mask.dtype != torch.bool:
+                mask = mask.to(torch.bool)
+            if bool(mask.all().item()):
+                with torch.no_grad():
+                    op = self.get_opacity.squeeze()
+                    if op.numel() > 0:
+                        keep_idx = int(torch.argmax(op).item())
+                        mask = mask.clone()
+                        mask[keep_idx] = False
+
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 

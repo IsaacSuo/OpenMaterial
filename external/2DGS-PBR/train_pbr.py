@@ -1140,6 +1140,7 @@ def training_pbr_static(dataset, opt, pipe, args):
 
         recon_loss_sum = 0.0
         env_recon_loss_sum = 0.0
+        bg_recon_loss_sum = 0.0
         l1_sum = 0.0
         ssim_term_sum = 0.0
         alpha_sup_sum = 0.0
@@ -1404,11 +1405,9 @@ def training_pbr_static(dataset, opt, pipe, args):
             # Responsibility split (scheme A, probe object / env skybox):
             #
             # - Object branch (gaussians/materials/probe) should NOT be driven by env_map errors.
-            # - Env-map (skybox) gradients should come only from (1 - opacity) pixels.
-            #
-            # Implement as two reconstruction losses with detached counterparts:
-            #   (1) recon_loss_obj: bg detached -> updates object/probe only
-            #   (2) recon_loss_env: obj & alpha detached -> updates env_map only, weighted by (1-alpha)
+            # - Env-map (skybox) gradients should come only from uncovered background pixels.
+            # - If unfixed background gaussians are enabled, supervise them on background pixels
+            #   while detaching sky, so env_map stays clean.
             # ------------------------------------------------------------
 
             # Object-side reconstruction (background detached).
@@ -1421,8 +1420,10 @@ def training_pbr_static(dataset, opt, pipe, args):
             pred_obj = linear_to_srgb(tonemap_reinhard(pred_obj)).clamp(0.0, 1.0)
 
             # Use object-only weight to avoid letting background pixels affect object/probe.
-            obj_weight = alpha_for_comp.detach() if isinstance(alpha_for_comp, torch.Tensor) else alpha_map.detach()
-            obj_weight = torch.clamp(obj_weight, 0.0, 1.0)
+            if mask is not None:
+                obj_weight = torch.clamp(mask.detach(), 0.0, 1.0)
+            else:
+                obj_weight = torch.clamp(alpha_map.detach(), 0.0, 1.0)
             if getattr(opt, "lambda_pbr", 0.0) > 0:
                 obj_weight = obj_weight + opt.lambda_pbr * obj_weight
 
@@ -1430,26 +1431,40 @@ def training_pbr_static(dataset, opt, pipe, args):
             ssim_val = ssim(pred_obj.unsqueeze(0), gt_image.unsqueeze(0), mask=obj_weight.unsqueeze(0))
             recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
 
-            # Env-side reconstruction (object + alpha detached; only (1-alpha) pixels supervise env_map).
+            # Background-geometry reconstruction (unfixed only): detach sky so env_map is not pulled.
+            bg_recon_loss = torch.tensor(0.0, device="cuda")
+            if (gaussians_unfixed is not None) and (mask is not None):
+                bg_weight = torch.clamp(1.0 - mask.detach(), 0.0, 1.0)
+                pred_bg = bg_render + sky.detach() * (1.0 - alpha_bg)
+                pred_bg = linear_to_srgb(tonemap_reinhard(pred_bg)).clamp(0.0, 1.0)
+                Ll1_bg = l1_loss(pred_bg, gt_image, mask=bg_weight)
+                ssim_bg = ssim(pred_bg.unsqueeze(0), gt_image.unsqueeze(0), mask=bg_weight.unsqueeze(0))
+                bg_recon_loss = (1.0 - opt.lambda_dssim) * Ll1_bg + opt.lambda_dssim * (1.0 - ssim_bg)
+                (opt.lambda_rgb * bg_recon_loss / float(batch_cams)).backward()
+                bg_recon_loss_sum += float(bg_recon_loss.detach().cpu().item())
+
+            # Env-side reconstruction (skybox only): detach object/unfixed; supervise only uncovered background pixels.
             env_recon_loss = torch.tensor(0.0, device="cuda")
             if (not freeze_env_light) and (stage >= 1):
-                alpha_det = alpha_map.detach()
-                env_weight = torch.clamp(1.0 - alpha_det, 0.0, 1.0)
+                if mask is not None:
+                    bg_weight = torch.clamp(1.0 - mask.detach(), 0.0, 1.0)
+                else:
+                    bg_weight = torch.clamp(1.0 - alpha_map.detach(), 0.0, 1.0)
 
                 if gaussians_unfixed is not None:
-                    bg_env_for_env = bg_render.detach() + sky * (1.0 - alpha_bg.detach())
+                    alpha_bg_det = alpha_bg.detach()
+                    sky_weight = bg_weight * torch.clamp(1.0 - alpha_bg_det, 0.0, 1.0)
+                    pred_env = bg_render.detach() + sky * (1.0 - alpha_bg_det)
                 else:
-                    bg_env_for_env = bg_env
+                    sky_weight = bg_weight
+                    pred_env = sky
 
-                # Use the standard alpha blending with detached alpha/object:
-                # d(pred_env)/d(env_map) is proportional to (1 - alpha_det), so env_map only
-                # learns from pixels not fully covered by the object. No extra masking here
-                # (avoid squaring the (1-alpha) weighting).
-                pred_env = obj_rgb_pm.detach() + bg_env_for_env * env_weight
+                # Only supervise skybox pixels. This keeps env_map gradients clean and prevents
+                # it from compensating for object/unfixed errors.
                 pred_env = linear_to_srgb(tonemap_reinhard(pred_env)).clamp(0.0, 1.0)
 
-                Ll1_env = l1_loss(pred_env, gt_image, mask=None)
-                ssim_env = ssim(pred_env.unsqueeze(0), gt_image.unsqueeze(0), mask=None)
+                Ll1_env = l1_loss(pred_env, gt_image, mask=sky_weight)
+                ssim_env = ssim(pred_env.unsqueeze(0), gt_image.unsqueeze(0), mask=sky_weight.unsqueeze(0))
                 env_recon_loss = (1.0 - opt.lambda_dssim) * Ll1_env + opt.lambda_dssim * (1.0 - ssim_env)
                 (opt.lambda_rgb * env_recon_loss / float(batch_cams)).backward()
                 env_recon_loss_sum += float(env_recon_loss.detach().cpu().item())
@@ -1481,6 +1496,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             global_loss.backward()
 
         recon_loss = torch.tensor(recon_loss_sum / float(batch_cams), device="cuda")
+        bg_recon_loss = torch.tensor(bg_recon_loss_sum / float(batch_cams), device="cuda")
         env_recon_loss = torch.tensor(env_recon_loss_sum / float(batch_cams), device="cuda")
         Ll1 = torch.tensor(l1_sum / float(batch_cams), device="cuda")
         ssim_val = torch.tensor(1.0 - (ssim_term_sum / float(batch_cams)), device="cuda")
@@ -1488,7 +1504,7 @@ def training_pbr_static(dataset, opt, pipe, args):
         pbr_reg_loss = torch.tensor(pbr_reg_sum / float(batch_cams), device="cuda")
 
         total_loss = (
-            opt.lambda_rgb * (recon_loss + env_recon_loss)
+            opt.lambda_rgb * (recon_loss + bg_recon_loss + env_recon_loss)
             + env_tv_loss
             + env_smooth_loss
             + env_prior_loss
@@ -1535,13 +1551,13 @@ def training_pbr_static(dataset, opt, pipe, args):
                 w_mean = weight_mean_sum / float(batch_cams)
                 print(
                     f"\n[ITER {iteration}] total={total_loss.item():.6f} "
-                    f"(lambda_rgb*(obj+env)={(opt.lambda_rgb * (recon_loss.item() + env_recon_loss.item())):.6f}, "
+                    f"(lambda_rgb*(obj+bg+env)={(opt.lambda_rgb * (recon_loss.item() + bg_recon_loss.item() + env_recon_loss.item())):.6f}, "
                     f"lambda_env_tv*tv={env_tv_loss.item():.6f}, "
                     f"lambda_env_smooth*smooth={env_smooth_loss.item():.6f}, "
                     f"lambda_scale_reg*scale={scale_reg_loss.item():.6f}, "
                     f"lambda_alpha*alpha={alpha_sup_loss.item():.6f}, "
                     f"lambda_pbr_reg*reg={pbr_reg_loss.item():.6f}) | "
-                    f"obj_recon={recon_loss.item():.6f} env_recon={env_recon_loss.item():.6f} "
+                    f"obj_recon={recon_loss.item():.6f} bg_recon={bg_recon_loss.item():.6f} env_recon={env_recon_loss.item():.6f} "
                     f"(L1={Ll1.item():.6f}, 1-SSIM={(1.0-ssim_val).item():.6f}) | "
                     f"tv_unscaled={env_tv_unscaled:.6e} reg_unscaled={pbr_reg_unscaled:.6e} | "
                     f"env_mean={env_mean:.3f} env_max={env_max:.3f} | "
@@ -1586,6 +1602,7 @@ def training_pbr_static(dataset, opt, pipe, args):
             if tb_writer:
                 tb_writer.add_scalar('train/total_loss', total_loss.item(), iteration)
                 tb_writer.add_scalar('train/recon_loss_obj', recon_loss.item(), iteration)
+                tb_writer.add_scalar('train/recon_loss_bg', bg_recon_loss.item(), iteration)
                 tb_writer.add_scalar('train/recon_loss_env', env_recon_loss.item(), iteration)
                 tb_writer.add_scalar('train/recon_l1', Ll1.item(), iteration)
                 tb_writer.add_scalar('train/recon_ssim_term', (1.0 - ssim_val).item(), iteration)
