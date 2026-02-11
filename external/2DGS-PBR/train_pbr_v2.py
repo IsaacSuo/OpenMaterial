@@ -36,6 +36,39 @@ from arguments import ModelParams, OptimizationParams, PipelineParams
 from train_pbr import training_pbr_static
 
 
+def _fill_missing_paramgroup_defaults(args: Namespace) -> None:
+    """
+    Ensure args has all fields expected by arguments/{Model,Optimization,Pipeline}Params.extract().
+
+    The training engine expects `OptimizationParams.extract(args)` to return a GroupParams that
+    includes (at least) position LR schedule fields even if we don't optimize XYZ in the main
+    static-geometry branch, because unfixed/background gaussians can use the standard optimizer.
+    """
+    # Optimization defaults
+    tmp = argparse.ArgumentParser(add_help=False)
+    opt_defaults = OptimizationParams(tmp)
+    for k, v in vars(opt_defaults).items():
+        if not hasattr(args, k):
+            setattr(args, k, v)
+
+    # Model defaults (mostly harmless; helps keep cfg compatible with existing extract logic)
+    tmp = argparse.ArgumentParser(add_help=False)
+    model_defaults = ModelParams(tmp)
+    for k, v in vars(model_defaults).items():
+        # ModelParams stores some as _source_path/_model_path; we set the public names elsewhere.
+        if k.startswith("_"):
+            continue
+        if not hasattr(args, k):
+            setattr(args, k, v)
+
+    # Pipeline defaults
+    tmp = argparse.ArgumentParser(add_help=False)
+    pipe_defaults = PipelineParams(tmp)
+    for k, v in vars(pipe_defaults).items():
+        if not hasattr(args, k):
+            setattr(args, k, v)
+
+
 def _load_json(path: str) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -537,6 +570,7 @@ def main() -> int:
         return 0
 
     args = _build_args_from_config(cfg)
+    _fill_missing_paramgroup_defaults(args)
     _validate_args(args)
 
     _write_resolved_config(args.model_path, cfg)
