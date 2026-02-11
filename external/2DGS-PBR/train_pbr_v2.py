@@ -192,8 +192,15 @@ def _build_args_from_config(cfg: dict[str, Any]) -> Namespace:
 
     # ---- OptimParams base (the engine extracts many defaults; we set the ones we care about) ----
     batch_cams = _as_int(_get(cfg, "optim.batch_cams", None), 1)
+    # These defaults match arguments/OptimizationParams.
+    position_lr_init = _as_float(_get(cfg, "optim.lr.position_lr_init", None), 0.00016)
+    position_lr_final = _as_float(_get(cfg, "optim.lr.position_lr_final", None), 0.0000016)
+    position_lr_delay_mult = _as_float(_get(cfg, "optim.lr.position_lr_delay_mult", None), 0.01)
+    position_lr_max_steps = _as_int(_get(cfg, "optim.lr.position_lr_max_steps", None), 30_000)
+    feature_lr = _as_float(_get(cfg, "optim.lr.feature_lr", None), 0.0025)
     scaling_lr = _as_float(_get(cfg, "optim.lr.scaling", None), 0.005)
     opacity_lr = _as_float(_get(cfg, "optim.lr.opacity", None), 0.05)
+    rotation_lr = _as_float(_get(cfg, "optim.lr.rotation_lr", None), 0.001)
     albedo_lr = _as_float(_get(cfg, "optim.lr.albedo", None), 0.001)
     roughness_lr = _as_float(_get(cfg, "optim.lr.roughness", None), 0.0002)
     metallic_lr = _as_float(_get(cfg, "optim.lr.metallic", None), 0.0002)
@@ -332,8 +339,15 @@ def _build_args_from_config(cfg: dict[str, Any]) -> Namespace:
 
     # OptimizationParams (core)
     args.iterations = iters
+    # Full OptimizationParams fields required by GaussianModel.training_setup() (used by unfixed Gaussians).
+    args.position_lr_init = float(position_lr_init)
+    args.position_lr_final = float(position_lr_final)
+    args.position_lr_delay_mult = float(position_lr_delay_mult)
+    args.position_lr_max_steps = int(position_lr_max_steps)
+    args.feature_lr = float(feature_lr)
     args.opacity_lr = opacity_lr
     args.scaling_lr = scaling_lr
+    args.rotation_lr = float(rotation_lr)
     args.percent_dense = 0.01  # default; keep opt extractor happy
     args.lambda_dssim = _as_float(_get(cfg, "loss.lambda_dssim", None), 0.2)
     args.lambda_dist = 0.0

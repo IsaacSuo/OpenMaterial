@@ -1440,11 +1440,15 @@ def training_pbr_static(dataset, opt, pipe, args):
                 else:
                     bg_env_for_env = bg_env
 
+                # Use the standard alpha blending with detached alpha/object:
+                # d(pred_env)/d(env_map) is proportional to (1 - alpha_det), so env_map only
+                # learns from pixels not fully covered by the object. No extra masking here
+                # (avoid squaring the (1-alpha) weighting).
                 pred_env = obj_rgb_pm.detach() + bg_env_for_env * env_weight
                 pred_env = linear_to_srgb(tonemap_reinhard(pred_env)).clamp(0.0, 1.0)
 
-                Ll1_env = l1_loss(pred_env, gt_image, mask=env_weight)
-                ssim_env = ssim(pred_env.unsqueeze(0), gt_image.unsqueeze(0), mask=env_weight.unsqueeze(0))
+                Ll1_env = l1_loss(pred_env, gt_image, mask=None)
+                ssim_env = ssim(pred_env.unsqueeze(0), gt_image.unsqueeze(0), mask=None)
                 env_recon_loss = (1.0 - opt.lambda_dssim) * Ll1_env + opt.lambda_dssim * (1.0 - ssim_env)
                 (opt.lambda_rgb * env_recon_loss / float(batch_cams)).backward()
 
