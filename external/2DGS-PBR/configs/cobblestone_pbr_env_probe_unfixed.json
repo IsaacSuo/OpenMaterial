@@ -1,0 +1,143 @@
+{
+  "paths": {
+    "source": "/opt/data/private/dataset/OpenMaterial_ablation/b14a251fe8ad4a10bbc75f7dd3f6ceb/cobblestone_street_night_4k-conductor/",
+    "output": "output/cobblestone_pbr_geo_static/unfixed_from_scratch_env_probe_v2/",
+    "gt_ply": "/opt/data/private/dataset/OpenMaterial_ablation/groundtruth_ablation/b14a251fe8ad4a10bbc75f7dd3f6cebb/dense_sampled.ply",
+    "init_env_map": null
+  },
+  "model": {
+    "sh_degree": 3,
+    "images": "images",
+    "resolution": -1,
+    "white_background": false,
+    "data_device": "cuda",
+    "eval": true
+  },
+  "object": {
+    "mode": "pbr",
+    "roughness_init": 0.02,
+    "roughness_min": 0.02,
+    "roughness_max": 0.999
+  },
+  "background": {
+    "model": "unfixed",
+    "unfixed": {
+      "num_points": 200000,
+      "seed": 0,
+      "exclude_object_aabb_margin_ratio": 0.02,
+      "disable_densification": false,
+      "disable_opacity_reset": false,
+      "lambda_obj_overlap": 0.01
+    },
+    "ground_plane": {
+      "json": null,
+      "texture": null
+    }
+  },
+  "pipeline": {
+    "depth_ratio": 0.0,
+    "compute_cov3d_python": false
+  },
+  "lighting": {
+    "sky": {
+      "model": "envmap",
+      "envmap": {
+        "res_h": 1024,
+        "lr": 0.01,
+        "lambda_tv": 0.001,
+        "lambda_smooth": 0.0,
+        "clamp_min": null,
+        "clamp_max": null,
+        "freeze": false,
+        "prior_pth": null,
+        "prior_weight": 0.0,
+        "prior_log_space": false
+      }
+    },
+    "object": {
+      "model": "probe",
+      "probe": {
+        "backend": "tcnn",
+        "lr": 0.01,
+        "weight_decay": 0.0,
+        "update_after": 7500,
+        "update_interval": 1,
+        "freeze": false,
+        "ckpt": null,
+        "aabb": {
+          "mode": "gt_ply_margin",
+          "margin_ratio": 0.05,
+          "min": null,
+          "max": null
+        },
+        "tcnn": {
+          "n_levels": 16,
+          "n_features_per_level": 2,
+          "log2_hashmap_size": 19,
+          "base_resolution": 16,
+          "per_level_scale": 1.5,
+          "dir_encoding": "sh",
+          "sh_degree": 4,
+          "fourier_n_frequencies": 6
+        },
+        "mlp": {
+          "hidden_dim": 64,
+          "n_hidden_layers": 2
+        },
+        "output": {
+          "activation": "softplus",
+          "softplus_beta": 1.0
+        }
+      }
+    }
+  },
+  "optim": {
+    "iters": 30000,
+    "batch_cams": 1,
+    "lr": {
+      "scaling": 0.001,
+      "opacity": 0.05,
+      "albedo": 0.001,
+      "roughness": 0.01,
+      "metallic": 0.0002
+    }
+  },
+  "loss": {
+    "lambda_rgb": 1.0,
+    "lambda_dssim": 0.2,
+    "lambda_pbr_boost": 0.1,
+    "lambda_alpha": 0.0,
+    "lambda_bg": 1.0,
+    "composite_use_gt_mask": true,
+    "supervise_background": false,
+    "pbr_reg": {
+      "lambda_total": 0.01,
+      "albedo_smooth": 0.01,
+      "roughness_smooth": 0.01,
+      "metallic_smooth": 0.01,
+      "metallic_prior": 0.001,
+      "roughness_prior": 0.001,
+      "albedo_chroma": 0.001
+    }
+  },
+  "schedule": {
+    "phases": [
+      { "name": "bg_only", "iters": 4000 },
+      { "name": "env_only", "iters": 3000 },
+      { "name": "full", "iters": 23000 }
+    ],
+    "env_update": { "after": 0, "interval": 10 },
+    "eval": { "every": 1000, "first": false },
+    "save": { "at": [7000, 30000] }
+  },
+  "debug": {
+    "quiet": false,
+    "log_every": 500,
+    "dump_nonfinite": true,
+    "dump_nonfinite_full": false,
+    "dump_nonfinite_raise": false,
+    "dump_env_map_on_eval": true,
+    "tb_log_env_map": true
+  }
+}
+

@@ -77,6 +77,25 @@ python train_pbr.py \
   --supervise_background
 ```
 
+### Train (v2: JSON config + CLI overrides)
+
+If you prefer a config-driven entrypoint (recommended for complex runs), use `train_pbr_v2.py`:
+
+```bash
+python train_pbr_v2.py --config configs/pbr_env_probe_unfixed_complex.json
+```
+
+Override a few fields from CLI:
+
+```bash
+python train_pbr_v2.py \
+  --config configs/pbr_env_probe_unfixed_complex.json \
+  --override paths.source=\"/path/to/dataset\" \
+  --override paths.gt_ply=\"/path/to/dense.ply\" \
+  --override paths.output=\"output/my_run/\" \
+  --override lighting.object.model=\"probe\"
+```
+
 #### `train_pbr.py` argument reference
 
 **Core paths**

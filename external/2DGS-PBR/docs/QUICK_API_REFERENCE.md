@@ -100,6 +100,25 @@ python train_pbr.py --object_render_mode pbr ...
 python train_pbr.py --object_render_mode sh ...
 ```
 
+### Lighting model for object shading: env-map vs probe (scheme A)
+```bash
+# Object uses env-map IBL (default)
+python train_pbr.py --object_render_mode pbr --light_model envmap ...
+
+# Object uses light probe (position+direction -> HDR radiance); background still uses env_map
+python train_pbr.py --object_render_mode pbr --light_model probe --probe_backend tcnn --probe_lr 0.01 ...
+```
+
+### Config entrypoint (v2)
+```bash
+python train_pbr_v2.py --config configs/pbr_env_probe_unfixed_complex.json
+
+# Override a few fields (value parsed as JSON if possible)
+python train_pbr_v2.py --config cfg.json \
+  --override optim.iters=60000 \
+  --override lighting.object.probe.lr=0.005
+```
+
 ### Make ground learnable (as Gaussians)
 ```bash
 python train_pbr.py \

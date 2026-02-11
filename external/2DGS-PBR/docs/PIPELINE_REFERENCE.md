@@ -20,6 +20,7 @@
 
 - “原始 2DGS 训练”（SH/RGB 监督 + normal/distortion 正则）：`train.py`
 - “PBR 静态几何训练”（只优化材质+光照，锁几何/禁 densification）：`train_pbr.py`（函数名 `training_pbr_static`）
+- “PBR 静态几何训练（v2 配置入口）”（JSON config + CLI overrides，调用同一训练引擎）：`train_pbr_v2.py`（用法：`docs/TRAIN_PBR_V2.md`）
 
 **PBR 的关键约定：G-buffer 是 premultiplied 的**
 
@@ -42,6 +43,7 @@
 
 - `train.py`：基础 2DGS 训练（SH/RGB 重建 + distortion/normal 正则 + densification）。
 - `train_pbr.py`：PBR 静态几何训练（dense 点云初始化、锁 xyz/rotation、禁 densification、学材质+env light、对“物体+skybox 合成”监督）。
+- `train_pbr_v2.py`：`train_pbr.py` 的配置驱动入口（JSON config + `--override key=value`），用于减少参数碎片与提升可复现性；会把最终配置写到 `<output>/config_resolved.json`。
 - `train_env_light.py`：可选的环境光预训练/初始化脚本（从多视角监督学习一个 env_light 初值，供 `train_pbr.py` 继续优化并用 prior 锚定）。
 - `render.py`：基础渲染/导出 + TSDF mesh 抽取（依赖 `open3d`、`utils/mesh_utils.py` 等）。
 - `render_pbr.py`：PBR 渲染导出（输出合成图、材质贴图、normal/depth 可视化，并可计算指标）。
@@ -87,7 +89,13 @@
     - `sample(ray_dirs_world, camera_center)`：返回 `(ground_color, hit_mask)`，其中 `ground_color` 在未命中像素为 0，`hit_mask` 指示哪些像素射线与平面相交且落在 UV bounds 内
     - `train_pbr.py` / `render_pbr.py` 中会把 ground 与 skybox 按 `hit_mask` 合成背景
   - `screen_space_pbr_shading()`：输入 G-buffer（albedo/roughness/metallic/normal/depth）与视线方向（可传入 `ray_dirs_world`），输出 `[3,H,W]` PBR shaded。
+    - `env_light=...`：远场 IBL（env_map）
+    - `light_probe=...`：近场光照探针网络（位置+方向→HDR radiance），更适合极端镜面/高频反射
   - `compute_ray_directions_world_from_fov()`：根据 FoV + `Camera.world_view_transform` 计算每像素世界空间射线方向（注意本 repo 的 transform 约定见 §4）。
+- `utils/light_probe.py`：
+  - `LightProbe`：光照探针网络（输入 world position + direction，输出 HDR radiance），支持：
+    - `backend="tcnn"`：TinyCUDA-NN HashGrid + 小 MLP（安装 `tinycudann` 时启用；缺失时自动 fallback）
+    - `backend="mlp"`：纯 PyTorch fallback
 - `utils/loss_utils.py`：
   - `l1_loss()` 支持 mask（实现为加权平均）。
   - `ssim()` 支持 mask（当 mask 是单通道时会扩展到多通道避免 SSIM>1 的异常归一化）。
@@ -303,6 +311,16 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
 
 > 该脚本不是对 `train.py` 的简单加权，而是一个明确的“固定物体几何、学材质 + 环境光；并可选再学一套有限深度背景（unfixed）”的训练流程。
 
+### 7.0 推荐入口：`train_pbr_v2.py`（JSON config + CLI overrides）
+
+如果你需要把参数系统化、可复现、并避免命令行参数过长，推荐用 `train_pbr_v2.py`：
+
+- `--config <json>`：主配置文件
+- `--override a.b.c=value`：覆盖少量字段（value 尝试按 JSON 解析）
+- 会写出 `<output>/config_resolved.json`（最终生效配置）
+
+详细见：`docs/TRAIN_PBR_V2.md`（含示例 config、常用 overrides）。
+
 ### 7.1 初始化阶段
 
 1. 校验 `--gt_ply` 必须存在。
@@ -337,11 +355,11 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
 
 ### 7.2 每步训练（核心）
 
-本脚本当前使用一个**硬编码的 3-stage schedule**（不通过参数配置）：
+本脚本使用一个**可配置的 3-stage schedule**（由 CLI 参数控制）：
 
-- Stage 0（1..1000）：只训练 unfixed（背景 SH-only + densify），env_map 冻结、物体 PBR 不参与；loss 只在背景像素（`1 - gt_alpha_mask`）上计算
-- Stage 1（1001..2000）：只训练 env_map；loss 只在“背景中更像 sky 的像素”上计算（背景像素且不被 unfixed 的 alpha 覆盖）
-- Stage 2（>=2001）：全量训练：物体 PBR + unfixed + env_map
+- Stage 0（1..`--stage0_bg_iters`）：只训练 unfixed（背景 SH-only + densify），env_map 冻结、物体不参与；loss 只在背景像素（`1 - gt_alpha_mask`）上计算
+- Stage 1（接下来 `--stage1_env_iters`）：只训练 env_map；默认只在“背景中更像 sky 的像素”上计算（背景像素且不被 unfixed 的 alpha 覆盖），可用 `--env_stage1_ignore_unfixed` 改为忽略 unfixed 覆盖
+- Stage 2（之后直到 `--iterations`）：全量训练：物体 + unfixed + env_map（以及可选的 light probe）
   - 若 `--object_render_mode sh`：Stage 2 中物体分支使用 SH render 作为 `object`，并跳过 PBR 材质正则项（`compute_pbr_losses` 不参与）
 
 每 iteration（Stage 2 的全量部分）：
@@ -357,7 +375,11 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
    - 若未启用 unfixed：
      - 背景为 sky 或 ground+sky（若启用 `GroundPlane`）
    - 渲染物体 PBR：`render(..., render_pbr=True)` 得到 `alpha + G-buffer + normal/depth`，反预乘得到 `albedo/roughness/metallic/normal`
-   - 计算物体着色：`shaded_obj = screen_space_pbr_shading(..., env_light=env_light, ray_dirs_world=ray_dirs)`
+   - 计算物体着色：`shaded_obj = screen_space_pbr_shading(..., env_light=..., light_probe=..., ray_dirs_world=ray_dirs)`
+     - 默认 `--light_model envmap`：物体用 env_map IBL（远场）
+     - `--light_model probe`：物体用光照探针网络（位置+方向→HDR radiance）
+       - scheme A：**背景仍然使用 env_map**（skybox），并且物体着色路径不会调用 env_map
+       - env_map 的重建梯度只来自未被物体覆盖的像素（按 `1 - rend_alpha` 权重），与物体/探针通过 alpha blending 解耦
    - 合成图监督：推荐 `--composite_use_gt_mask`，即用 GT mask 做合成：
      - `pred = shaded_obj * gt_alpha_mask + bg * (1-gt_alpha_mask)`
 4. 重建损失的权重策略（有 mask 时）：
@@ -380,6 +402,7 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
      - 物体 `point_cloud/iteration_X/point_cloud.ply`
      - unfixed `unfixed_point_cloud/iteration_X/point_cloud.ply`（若启用）
      - `env_light_{iteration}.pth`
+     - `light_probe_{iteration}.pth`（若启用 `--light_model probe`）
    - 可选 `--debug_nonfinite_dump`：当 eval 中出现 NaN/Inf 时，将关键张量与统计信息写到 `<model_path>/debug_nonfinite/*.pt`（`--debug_nonfinite_dump_full` 会包含全分辨率 tensor；`--debug_nonfinite_raise` 会在 dump 后抛异常）
    - 若设置了 `--test_interval`，脚本会自动生成 `test_iterations = [N, 2N, ...]`（并确保包含最后一次迭代），用于周期性评测
 
@@ -401,6 +424,10 @@ mask 读取策略（`scene/dataset_readers.py:readCamerasFromTransforms` + `util
 2. 决定 iteration：若 `--iteration=-1` 则扫描 `point_cloud/iteration_*` 取最大。
 3. 加载 `EnvironmentLight`：
    - 若存在 `env_light_{iteration}.pth` 则优先加载；否则尝试加载最新的 `env_light_*.pth`；都没有则用默认灰环境光。
+3.5 （可选）加载 Light Probe（物体近场光照，scheme A）：
+   - `--light_model probe` 启用 probe 着色（背景仍用 env_map）
+   - 默认优先加载 `<model_path>/light_probe_{iteration}.pth`，否则加载最新的 `light_probe_*.pth`，也可用 `--probe_pth` 指定
+   - 注意：probe 需要与训练一致的 AABB；渲染端可通过 `--probe_aabb_min/--probe_aabb_max` 指定（建议与训练一致）
 4. （可选）加载 GroundPlane（有限深度背景）：
    - `--ground_plane_json` + `--ground_texture`（不传 texture 则默认 json 同目录下的 `ground_texture.png`）
 5. `render_set()`：
@@ -571,7 +598,9 @@ env_map 表示的是“无限远方向 → 颜色/辐射度”，无法表达有
 
 1. `gaussian_renderer/__init__.py`（render 包含哪些 buffer、alpha/normal/depth 的来源）
 2. `utils/pbr_utils.py`（EnvironmentLight 与 screen-space shading 的输入输出约定）
+2.5 `utils/light_probe.py`（Light Probe：位置+方向→HDR radiance；TCNN HashGrid/MLP fallback）
 3. `train_pbr.py`（如何把 G-buffer 与 env 合成，并构造 loss/优化器）
+3.5 `train_pbr_v2.py`（JSON config + overrides 入口；如何把配置写入 `config_resolved.json`）
 4. `scene/gaussian_model.py`（PBR 参数如何存储/激活/保存到 PLY）
 5. `scene/__init__.py` + `scene/dataset_readers.py`（数据集识别与 mask 流）
 
@@ -583,7 +612,9 @@ env_map 表示的是“无限远方向 → 颜色/辐射度”，无法表达有
 - “渲染输出有哪些字段？” → `gaussian_renderer/__init__.py`
 - “out_others 通道是啥？” → `submodules/diff-surfel-rasterization/cuda_rasterizer/auxiliary.h`
 - “PBR shaded 怎么算？” → `utils/pbr_utils.py:screen_space_pbr_shading`、`pbr_shading_env`
+- “probe 光照怎么接入？” → `utils/light_probe.py` + `utils/pbr_utils.py:screen_space_pbr_shading(light_probe=...)` + `train_pbr.py(--light_model probe)`
 - “PBR 训练怎么组合 loss？” → `train_pbr.py` + `utils/loss_utils.py:compute_pbr_losses`
+- “如何用 JSON 配置跑训练？” → `train_pbr_v2.py` + `docs/TRAIN_PBR_V2.md`
 - “mask 怎么来的？” → `scene/dataset_readers.py` + `utils/camera_utils.py`
 - “env_light 怎么存/怎么读？” → `train_pbr.py`（保存） + `render_pbr.py`（加载）
 - “env_light 初始化/先验怎么用？” → `train_env_light.py` + `train_pbr.py`（`--env_light_pth/--env_light_prior_weight`）

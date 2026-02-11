@@ -11,6 +11,7 @@
 ## Training
 
 - PBR 静态几何训练（`train_pbr.py` 全流程）→ [PIPELINE_REFERENCE.md#sec-7-train-pbr](PIPELINE_REFERENCE.md#sec-7-train-pbr)
+- 配置驱动训练入口（JSON + override）：`train_pbr_v2.py` → `docs/TRAIN_PBR_V2.md`
 - 环境光预训练/初始化（`train_env_light.py`）→ [PIPELINE_REFERENCE.md#sec-7-train-pbr](PIPELINE_REFERENCE.md#sec-7-train-pbr)
 - 有限深度地面背景（`GroundPlane` / `--ground_plane_json`）→ [PIPELINE_REFERENCE.md#sec-7-train-pbr](PIPELINE_REFERENCE.md#sec-7-train-pbr)
 - 可学习的有限深度背景（Unfixed Background Gaussians，SH-only：`--unfixed_gaussians`）→ [PIPELINE_REFERENCE.md#sec-7-train-pbr](PIPELINE_REFERENCE.md#sec-7-train-pbr)

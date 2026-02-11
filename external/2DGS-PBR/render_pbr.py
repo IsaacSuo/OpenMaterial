@@ -236,7 +236,8 @@ def render_set(dataset, iteration, pipeline, env_light, light_probe, views, out_
                 gbuffer_depth,
                 view.camera_center,
                 view.world_view_transform,
-                env_light=env_light,
+                # If a probe is provided, object shading must NOT call env_map.
+                env_light=None if (light_probe is not None) else env_light,
                 light_probe=light_probe,
                 ray_dirs_world=ray_dirs,
                 clamp_output=False,

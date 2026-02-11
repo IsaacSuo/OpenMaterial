@@ -686,7 +686,7 @@ def _run_pbr_eval(
                     albedo, rough, metal,
                     normal, depth_map,
                     viewpoint.camera_center, viewpoint.world_view_transform,
-                    env_light=env_light,
+                    env_light=None if (light_probe is not None) else env_light,
                     light_probe=light_probe,
                     ray_dirs_world=ray_dirs,
                     clamp_output=False,
@@ -1326,7 +1326,9 @@ def training_pbr_static(dataset, opt, pipe, args):
                     gbuffer_depth,
                     viewpoint_cam.camera_center,
                     viewpoint_cam.world_view_transform,
-                    env_light=env_light,
+                    # If a light probe is provided, object shading must NOT call env_map.
+                    # env_map is responsible for the skybox/background via alpha blending.
+                    env_light=None if (light_probe is not None) else env_light,
                     light_probe=light_probe,
                     ray_dirs_world=ray_dirs,
                     clamp_output=False,
@@ -1343,14 +1345,15 @@ def training_pbr_static(dataset, opt, pipe, args):
             if getattr(args, "composite_use_gt_mask", False) and (mask is not None):
                 alpha_for_comp = mask
 
+            # Composite for visualization/metrics (not necessarily the same graph used for gradient separation).
             if (object_render_mode == "sh") and getattr(args, "composite_use_gt_mask", False) and (mask is not None):
                 # Decouple SH color from rendered alpha when compositing with GT mask.
                 denom = alpha_map + 1e-6
                 obj_rgb = obj_rgb_pm / denom
-                pred = obj_rgb * alpha_for_comp + bg_env * (1.0 - alpha_for_comp)
+                pred_vis = obj_rgb * alpha_for_comp + bg_env * (1.0 - alpha_for_comp)
             else:
-                pred = obj_rgb_pm + bg_env * (1.0 - alpha_for_comp)
-            pred = linear_to_srgb(tonemap_reinhard(pred)).clamp(0.0, 1.0)
+                pred_vis = obj_rgb_pm + bg_env * (1.0 - alpha_for_comp)
+            pred_vis = linear_to_srgb(tonemap_reinhard(pred_vis)).clamp(0.0, 1.0)
 
             alpha_sup_loss = torch.tensor(0.0, device="cuda")
             if mask is not None:
@@ -1396,9 +1399,54 @@ def training_pbr_static(dataset, opt, pipe, args):
                 pbr_losses = {"total_pbr_reg": torch.tensor(0.0, device="cuda")}
                 pbr_reg_loss = torch.tensor(0.0, device="cuda")
 
-            Ll1 = l1_loss(pred, gt_image, mask=recon_weight)
-            ssim_val = ssim(pred.unsqueeze(0), gt_image.unsqueeze(0), mask=recon_weight.unsqueeze(0))
+            # ------------------------------------------------------------
+            # Responsibility split (scheme A, probe object / env skybox):
+            #
+            # - Object branch (gaussians/materials/probe) should NOT be driven by env_map errors.
+            # - Env-map (skybox) gradients should come only from (1 - opacity) pixels.
+            #
+            # Implement as two reconstruction losses with detached counterparts:
+            #   (1) recon_loss_obj: bg detached -> updates object/probe only
+            #   (2) recon_loss_env: obj & alpha detached -> updates env_map only, weighted by (1-alpha)
+            # ------------------------------------------------------------
+
+            # Object-side reconstruction (background detached).
+            if (object_render_mode == "sh") and getattr(args, "composite_use_gt_mask", False) and (mask is not None):
+                denom = alpha_map + 1e-6
+                obj_rgb = obj_rgb_pm / denom
+                pred_obj = obj_rgb * alpha_for_comp + bg_env.detach() * (1.0 - alpha_for_comp)
+            else:
+                pred_obj = obj_rgb_pm + bg_env.detach() * (1.0 - alpha_for_comp)
+            pred_obj = linear_to_srgb(tonemap_reinhard(pred_obj)).clamp(0.0, 1.0)
+
+            # Use object-only weight to avoid letting background pixels affect object/probe.
+            obj_weight = alpha_for_comp.detach() if isinstance(alpha_for_comp, torch.Tensor) else alpha_map.detach()
+            obj_weight = torch.clamp(obj_weight, 0.0, 1.0)
+            if getattr(opt, "lambda_pbr", 0.0) > 0:
+                obj_weight = obj_weight + opt.lambda_pbr * obj_weight
+
+            Ll1 = l1_loss(pred_obj, gt_image, mask=obj_weight)
+            ssim_val = ssim(pred_obj.unsqueeze(0), gt_image.unsqueeze(0), mask=obj_weight.unsqueeze(0))
             recon_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
+
+            # Env-side reconstruction (object + alpha detached; only (1-alpha) pixels supervise env_map).
+            env_recon_loss = torch.tensor(0.0, device="cuda")
+            if (not freeze_env_light) and (stage >= 1):
+                alpha_det = alpha_map.detach()
+                env_weight = torch.clamp(1.0 - alpha_det, 0.0, 1.0)
+
+                if gaussians_unfixed is not None:
+                    bg_env_for_env = bg_render.detach() + sky * (1.0 - alpha_bg.detach())
+                else:
+                    bg_env_for_env = bg_env
+
+                pred_env = obj_rgb_pm.detach() + bg_env_for_env * env_weight
+                pred_env = linear_to_srgb(tonemap_reinhard(pred_env)).clamp(0.0, 1.0)
+
+                Ll1_env = l1_loss(pred_env, gt_image, mask=env_weight)
+                ssim_env = ssim(pred_env.unsqueeze(0), gt_image.unsqueeze(0), mask=env_weight.unsqueeze(0))
+                env_recon_loss = (1.0 - opt.lambda_dssim) * Ll1_env + opt.lambda_dssim * (1.0 - ssim_env)
+                (opt.lambda_rgb * env_recon_loss / float(batch_cams)).backward()
 
             unfixed_overlap_loss = torch.tensor(0.0, device="cuda")
             if (lambda_unfixed_obj_overlap > 0) and (gaussians_unfixed is not None) and (mask is not None):
