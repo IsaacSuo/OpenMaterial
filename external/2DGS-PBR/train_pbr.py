@@ -1139,6 +1139,7 @@ def training_pbr_static(dataset, opt, pipe, args):
         last_sky_weight = None
 
         recon_loss_sum = 0.0
+        env_recon_loss_sum = 0.0
         l1_sum = 0.0
         ssim_term_sum = 0.0
         alpha_sup_sum = 0.0
@@ -1451,6 +1452,7 @@ def training_pbr_static(dataset, opt, pipe, args):
                 ssim_env = ssim(pred_env.unsqueeze(0), gt_image.unsqueeze(0), mask=None)
                 env_recon_loss = (1.0 - opt.lambda_dssim) * Ll1_env + opt.lambda_dssim * (1.0 - ssim_env)
                 (opt.lambda_rgb * env_recon_loss / float(batch_cams)).backward()
+                env_recon_loss_sum += float(env_recon_loss.detach().cpu().item())
 
             unfixed_overlap_loss = torch.tensor(0.0, device="cuda")
             if (lambda_unfixed_obj_overlap > 0) and (gaussians_unfixed is not None) and (mask is not None):
@@ -1479,13 +1481,14 @@ def training_pbr_static(dataset, opt, pipe, args):
             global_loss.backward()
 
         recon_loss = torch.tensor(recon_loss_sum / float(batch_cams), device="cuda")
+        env_recon_loss = torch.tensor(env_recon_loss_sum / float(batch_cams), device="cuda")
         Ll1 = torch.tensor(l1_sum / float(batch_cams), device="cuda")
         ssim_val = torch.tensor(1.0 - (ssim_term_sum / float(batch_cams)), device="cuda")
         alpha_sup_loss = torch.tensor(alpha_sup_sum / float(batch_cams), device="cuda")
         pbr_reg_loss = torch.tensor(pbr_reg_sum / float(batch_cams), device="cuda")
 
         total_loss = (
-            opt.lambda_rgb * recon_loss
+            opt.lambda_rgb * (recon_loss + env_recon_loss)
             + env_tv_loss
             + env_smooth_loss
             + env_prior_loss
@@ -1532,13 +1535,14 @@ def training_pbr_static(dataset, opt, pipe, args):
                 w_mean = weight_mean_sum / float(batch_cams)
                 print(
                     f"\n[ITER {iteration}] total={total_loss.item():.6f} "
-                    f"(lambda_rgb*recon={opt.lambda_rgb * recon_loss.item():.6f}, "
+                    f"(lambda_rgb*(obj+env)={(opt.lambda_rgb * (recon_loss.item() + env_recon_loss.item())):.6f}, "
                     f"lambda_env_tv*tv={env_tv_loss.item():.6f}, "
                     f"lambda_env_smooth*smooth={env_smooth_loss.item():.6f}, "
                     f"lambda_scale_reg*scale={scale_reg_loss.item():.6f}, "
                     f"lambda_alpha*alpha={alpha_sup_loss.item():.6f}, "
                     f"lambda_pbr_reg*reg={pbr_reg_loss.item():.6f}) | "
-                    f"recon={recon_loss.item():.6f} (L1={Ll1.item():.6f}, 1-SSIM={(1.0-ssim_val).item():.6f}) | "
+                    f"obj_recon={recon_loss.item():.6f} env_recon={env_recon_loss.item():.6f} "
+                    f"(L1={Ll1.item():.6f}, 1-SSIM={(1.0-ssim_val).item():.6f}) | "
                     f"tv_unscaled={env_tv_unscaled:.6e} reg_unscaled={pbr_reg_unscaled:.6e} | "
                     f"env_mean={env_mean:.3f} env_max={env_max:.3f} | "
                     f"scale_max={scale_max_val:.3f} | "
@@ -1581,7 +1585,8 @@ def training_pbr_static(dataset, opt, pipe, args):
 
             if tb_writer:
                 tb_writer.add_scalar('train/total_loss', total_loss.item(), iteration)
-                tb_writer.add_scalar('train/recon_loss', recon_loss.item(), iteration)
+                tb_writer.add_scalar('train/recon_loss_obj', recon_loss.item(), iteration)
+                tb_writer.add_scalar('train/recon_loss_env', env_recon_loss.item(), iteration)
                 tb_writer.add_scalar('train/recon_l1', Ll1.item(), iteration)
                 tb_writer.add_scalar('train/recon_ssim_term', (1.0 - ssim_val).item(), iteration)
                 tb_writer.add_scalar('train/env_tv_loss', env_tv_loss.item(), iteration)
